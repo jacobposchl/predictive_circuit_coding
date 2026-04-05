@@ -188,6 +188,7 @@ Use this for:
 - tests
 - synthetic workflow checks
 - local window inspection
+- notebook UI preview on synthetic data via `pcc-preview-notebook-ui`
 
 ### Colab A100
 

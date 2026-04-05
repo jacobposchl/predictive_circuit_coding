@@ -7,6 +7,12 @@ This repository is an Allen-first Neuropixels pipeline for predictive population
 
 The current repo is Stage 7 complete: it supports `pcc-prepare-data`, `pcc-train`, `pcc-evaluate`, `pcc-discover`, and `pcc-validate`, plus two thin Colab notebooks that sit on top of the CLI/library surface.
 
+If you want to preview the notebook-style stage flow and artifact summaries without touching Allen data or Colab, run:
+
+```bash
+pcc-preview-notebook-ui --output-root artifacts/notebook_ui_preview --force
+```
+
 The main human-facing guide for how the repo is organized and how to run the experiment is:
 
 - [project_guide.md](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/documents/project_guide.md)
@@ -22,6 +28,7 @@ pcc-train --config configs/pcc/predictive_circuit_coding_base.yaml --data-config
 pcc-evaluate --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_best.pt --split valid
 pcc-discover --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_best.pt --split discovery
 pcc-validate --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_best.pt --discovery-artifact artifacts/checkpoints/pcc_best_discovery_discovery.json
+pcc-preview-notebook-ui --output-root artifacts/notebook_ui_preview --force
 ```
 
 Each Stage 5-7 command writes:

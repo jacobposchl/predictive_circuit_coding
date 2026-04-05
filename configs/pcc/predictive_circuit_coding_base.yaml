@@ -9,7 +9,10 @@ splits:
   test: test
 
 dataset_selection:
-  output_name: runtime_selection
+  output_name: familiar_g_concept_check
+  experience_levels: [Familiar]
+  image_sets: [G]
+  session_types: [EPHYS_1_images_G_5uL_reward]
   session_ids: []
   subject_ids: []
   exclude_session_ids: []
@@ -18,11 +21,8 @@ dataset_selection:
   subject_ids_file:
   exclude_session_ids_file:
   exclude_subject_ids_file:
-  experience_levels: []
-  session_types: []
-  image_sets: []
-  session_numbers: []
   project_codes: []
+  session_numbers: []
   brain_regions_any: []
   min_n_units:
   max_n_units:
@@ -30,12 +30,12 @@ dataset_selection:
   max_trial_count:
   min_duration_s:
   max_duration_s:
-  split_seed:
-  split_primary_axis:
-  train_fraction:
-  valid_fraction:
-  discovery_fraction:
-  test_fraction:
+  split_seed: 7
+  split_primary_axis: subject
+  train_fraction: 0.5
+  valid_fraction: 0.2
+  discovery_fraction: 0.15
+  test_fraction: 0.15
 
 data_runtime:
   bin_width_ms: 20.0

@@ -34,6 +34,7 @@ pcc-train = "predictive_circuit_coding.cli.train:main"
 pcc-evaluate = "predictive_circuit_coding.cli.evaluate:main"
 pcc-discover = "predictive_circuit_coding.cli.discover:main"
 pcc-validate = "predictive_circuit_coding.cli.validate:main"
+pcc-preview-notebook-ui = "predictive_circuit_coding.cli.preview_notebook:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
