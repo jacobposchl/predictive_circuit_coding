@@ -40,14 +40,16 @@ def build_workspace(config: DataPreparationConfig) -> PreparationWorkspace:
 
 def create_workspace(config: DataPreparationConfig) -> PreparationWorkspace:
     workspace = build_workspace(config)
-    for path in (
+    paths = [
         workspace.root,
-        workspace.raw,
         workspace.prepared,
         workspace.brainset_prepared_root,
         workspace.manifests,
         workspace.splits,
         workspace.logs,
-    ):
+    ]
+    if config.allen_sdk.cache_root is None:
+        paths.append(workspace.raw)
+    for path in paths:
         path.mkdir(parents=True, exist_ok=True)
     return workspace

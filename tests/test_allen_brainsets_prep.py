@@ -252,3 +252,33 @@ def test_scan_prepared_session_decodes_byte_region_labels(tmp_path: Path):
     )
 
     assert scan.brain_regions == ("LP", "VISp")
+
+
+def test_scan_prepared_session_resolves_external_allen_cache_session_path(tmp_path: Path):
+    dataset_id = "allen_visual_behavior_neuropixels"
+    prepared_root = tmp_path / "prepared" / dataset_id
+    prepared_root.mkdir(parents=True)
+    session_path = prepared_root / "4001.h5"
+    _write_unsplit_session(
+        session_path,
+        dataset_id=dataset_id,
+        session_id="4001",
+        subject_id="mouse_cache",
+        regions=["VISp", "VISl"],
+    )
+    cache_root = tmp_path / "allen_cache"
+    expected_raw_path = (
+        cache_root
+        / "visual-behavior-neuropixels-0.5.0"
+        / "behavior_ecephys_sessions"
+        / "4001"
+    )
+    expected_raw_path.mkdir(parents=True)
+
+    scan = scan_prepared_session(
+        session_path,
+        dataset_id=dataset_id,
+        raw_root=cache_root,
+    )
+
+    assert Path(scan.raw_data_path) == expected_raw_path.resolve()

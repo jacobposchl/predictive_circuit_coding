@@ -122,6 +122,37 @@ def test_create_workspace_builds_expected_directories(tmp_path: Path):
     assert workspace.logs.is_dir()
 
 
+def test_create_workspace_skips_in_repo_raw_dir_when_external_cache_root_is_configured(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    external_cache_root = tmp_path / "external_cache"
+    text = config_path.read_text(encoding="utf-8")
+    text += (
+        "\nbrainsets_pipeline:\n"
+        "  local_pipeline_path: ../../brainsets_local_pipelines/allen_visual_behavior_neuropixels/pipeline.py\n"
+        "  runner_cores: 2\n"
+        "  use_active_environment: true\n"
+        "  processed_only_upload: true\n"
+        "  keep_raw_cache: true\n"
+        "  default_session_ids_file:\n"
+        "  default_max_sessions:\n"
+        f"allen_sdk:\n  cache_root: {external_cache_root.as_posix()}\n  cleanup_raw_after_processing: false\n"
+        "unit_filtering:\n"
+        "  filter_by_validity: true\n"
+        "  filter_out_of_brain_units: true\n"
+        "  amplitude_cutoff_maximum: 0.1\n"
+        "  presence_ratio_minimum: 0.95\n"
+        "  isi_violations_maximum: 0.5\n"
+    )
+    config_path.write_text(text, encoding="utf-8")
+
+    config = load_preparation_config(config_path)
+    workspace = create_workspace(config)
+
+    assert config.allen_sdk.cache_root == external_cache_root.resolve()
+    assert not workspace.raw.exists()
+    assert workspace.brainset_prepared_root.is_dir()
+
+
 def test_session_manifest_builds_prepared_paths_and_regions(tmp_path: Path):
     config = load_preparation_config(_write_config(tmp_path))
     workspace = create_workspace(config)

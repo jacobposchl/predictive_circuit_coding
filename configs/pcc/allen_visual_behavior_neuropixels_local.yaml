@@ -44,8 +44,9 @@ brainsets_pipeline:
   default_max_sessions:
 
 allen_sdk:
-  cache_root:
+  cache_root: C:/Users/Jacob Poschl/le-jepa-snn/snn-jepa/visual_behavior_neuropixels_data
   cleanup_raw_after_processing: false
+
 
 unit_filtering:
   filter_by_validity: true

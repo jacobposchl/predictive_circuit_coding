@@ -7,21 +7,9 @@ This repository is an Allen-first Neuropixels pipeline for predictive population
 
 The current repo is Stage 7 complete: it supports `pcc-prepare-data`, `pcc-train`, `pcc-evaluate`, `pcc-discover`, and `pcc-validate`, plus two thin Colab notebooks that sit on top of the CLI/library surface.
 
-## Workflow
+The main human-facing guide for how the repo is organized and how to run the experiment is:
 
-Local machine:
-
-1. Create or refresh the dedicated Allen prep environment.
-2. Run `pcc-prepare-data prepare-allen-visual-behavior-neuropixels`.
-3. Upload the processed bundle from `data/allen_visual_behavior_neuropixels/` to Google Drive.
-4. Optionally inspect split windows locally before training.
-
-Colab:
-
-1. Mount Drive.
-2. Install the repo.
-3. Run the training notebook to produce checkpoints and evaluation summaries.
-4. Run the discovery/validation notebook to produce motif and validation artifacts.
+- [project_guide.md](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/documents/project_guide.md)
 
 ## Main Commands
 
@@ -52,12 +40,8 @@ They are intentionally thin and call the same CLI surface listed above.
 
 Stage 7 docs live under `documents/`:
 
+- [project_guide.md](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/documents/project_guide.md)
 - [artifact_contracts.md](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/documents/artifact_contracts.md)
-- [notebook_workflow.md](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/documents/notebook_workflow.md)
-- [dev_workflows.md](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/documents/dev_workflows.md)
-- [troubleshooting.md](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/documents/troubleshooting.md)
-- [manual_acceptance_checklist.md](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/documents/manual_acceptance_checklist.md)
-- [predictive_circuit_coding_design_doc.docx](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/documents/predictive_circuit_coding_design_doc.docx)
 
 ## Install
 
@@ -73,6 +57,30 @@ Allen prep environment:
 
 - use [environments/allen_visual_behavior_prep/README.md](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/environments/allen_visual_behavior_prep/README.md)
 - use [scripts/setup_allen_visual_behavior_prep_env.ps1](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/scripts/setup_allen_visual_behavior_prep_env.ps1)
+
+## Troubleshooting
+
+Allen prep problems:
+
+- if `brainsets` or AllenSDK dependencies conflict, use the dedicated Allen prep environment rather than the main training environment
+- if no processed sessions are produced, verify the prep command completed and rerun with `--max-sessions 1` first
+
+Training problems:
+
+- if `split_manifest.json` is missing, rerun local prep first
+- if a resume checkpoint is missing, clear `training.resume_checkpoint` or point it at a real checkpoint
+- if a checkpoint dataset mismatch is reported, use a checkpoint produced from the same dataset/config family
+
+Discovery problems:
+
+- if no positive `stimulus_change` labels are found, increase discovery coverage or adjust the sampled window coverage
+- if no candidate tokens are selected, lower `discovery.min_candidate_score` or increase `discovery.max_batches`
+- if clustering produces no motif clusters, lower `discovery.cluster_similarity_threshold` or reduce `discovery.min_cluster_size`
+
+Validation problems:
+
+- if no recurrence hits are found, validation still succeeds, but the held-out recurrence story is weak for that run
+- if the discovery artifact dataset does not match the checkpoint/config dataset, rerun with aligned artifacts
 
 ## Verification
 

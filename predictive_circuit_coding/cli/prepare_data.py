@@ -95,8 +95,9 @@ def _run_init_workspace(args: argparse.Namespace) -> int:
     console = get_console()
     config = load_preparation_config(args.config)
     workspace = create_workspace(config)
+    raw_dir = config.allen_sdk.cache_root or workspace.raw
     console.print(f"[green]Workspace ready[/green] at {workspace.root}")
-    console.print(f"Raw data dir      : {workspace.raw}")
+    console.print(f"Raw data dir      : {raw_dir}")
     console.print(f"Prepared data dir : {workspace.brainset_prepared_root}")
     console.print(f"Manifest dir      : {workspace.manifests}")
     console.print(f"Split dir         : {workspace.splits}")

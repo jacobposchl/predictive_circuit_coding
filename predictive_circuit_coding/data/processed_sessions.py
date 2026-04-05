@@ -110,6 +110,25 @@ def _extract_trial_count(data) -> int:
     return 0
 
 
+def _resolve_raw_session_path(raw_root: str | Path, session_id: str) -> Path:
+    root = Path(raw_root).resolve()
+    candidates: list[Path] = []
+
+    # AllenSDK cache roots may point at:
+    # 1. the top-level parent containing the versioned dataset directory
+    # 2. the versioned dataset directory itself
+    # 3. the behavior_ecephys_sessions directory directly
+    candidates.append(root / "behavior_ecephys_sessions" / session_id)
+    for dataset_dir in sorted(root.glob("visual-behavior-neuropixels-*")):
+        candidates.append(dataset_dir / "behavior_ecephys_sessions" / session_id)
+    candidates.append(root / session_id)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return candidates[0].resolve() if candidates else (root / session_id).resolve()
+
+
 def scan_prepared_session(
     path: str | Path,
     *,
@@ -124,7 +143,7 @@ def scan_prepared_session(
         recording_id=f"{dataset_id}/{session_id}",
         session_id=session_id,
         subject_id=subject_id,
-        raw_data_path=str(Path(raw_root) / session_id),
+        raw_data_path=str(_resolve_raw_session_path(raw_root, session_id)),
         duration_s=_extract_domain_duration_s(data),
         n_units=_extract_unit_count(data),
         brain_regions=_extract_brain_regions(data),
