@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from predictive_circuit_coding.data import build_workspace, load_preparation_config, load_split_manifest
+from predictive_circuit_coding.data import resolve_runtime_dataset_view
 from predictive_circuit_coding.decoding.labels import extract_stimulus_change_labels
 from predictive_circuit_coding.training.artifacts import load_training_checkpoint
 from predictive_circuit_coding.training.config import ExperimentConfig
@@ -34,10 +34,14 @@ def extract_frozen_tokens(
     checkpoint_path: str | Path,
     split_name: str,
     max_batches: int | None = None,
+    dataset_view=None,
 ) -> FrozenTokenCollection:
-    prep_config = load_preparation_config(data_config_path)
-    workspace = build_workspace(prep_config)
-    split_manifest = load_split_manifest(workspace.split_manifest_path)
+    dataset_view = dataset_view or resolve_runtime_dataset_view(
+        experiment_config=experiment_config,
+        data_config_path=data_config_path,
+    )
+    workspace = dataset_view.workspace
+    split_manifest = dataset_view.split_manifest
     tokenizer = build_tokenizer_from_config(experiment_config)
     device = resolve_device(experiment_config.execution.device)
     model = build_model_from_config(experiment_config).to(device)
@@ -49,6 +53,9 @@ def extract_frozen_tokens(
         workspace=workspace,
         split_manifest=split_manifest,
         split=split_name,
+        config_dir=dataset_view.config_dir,
+        config_name_prefix=dataset_view.config_name_prefix,
+        dataset_split=dataset_view.dataset_split,
     )
     sampler = build_sequential_fixed_window_sampler(
         bundle.dataset,

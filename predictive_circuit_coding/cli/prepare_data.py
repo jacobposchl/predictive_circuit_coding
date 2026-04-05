@@ -5,21 +5,27 @@ import sys
 from pathlib import Path
 
 from predictive_circuit_coding.data import (
-    apply_split_assignments_to_prepared_sessions,
+    build_session_catalog_from_prepared_sessions,
     build_brainsets_runner_command,
-    build_session_manifest_from_prepared_sessions,
     build_session_manifest_from_table,
     build_split_manifest,
     create_workspace,
     load_split_manifest,
     load_preparation_config,
+    load_session_catalog,
     load_session_manifest,
+    materialize_runtime_selection,
+    project_catalog_to_session_manifest,
+    resolve_runtime_dataset_view,
     run_brainsets_pipeline,
+    write_session_catalog,
+    write_session_catalog_csv,
     write_session_manifest,
     write_split_manifest,
     write_upload_bundle_manifest,
 )
 from predictive_circuit_coding.data.layout import build_workspace
+from predictive_circuit_coding.training import load_experiment_config
 from predictive_circuit_coding.utils import build_dependency_table, collect_dependency_status, get_console
 
 
@@ -70,6 +76,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     prepare_allen.add_argument("--reprocess", action="store_true", help="Rebuild processed session files even if they already exist.")
     prepare_allen.add_argument("--redownload", action="store_true", help="Force AllenSDK to redownload source session files when supported.")
     prepare_allen.set_defaults(func=_run_prepare_allen_visual_behavior_neuropixels)
+
+    process_allen = subparsers.add_parser(
+        "process-allen-visual-behavior-neuropixels",
+        help="Run only the expensive raw-to-processed Allen session conversion step.",
+    )
+    process_allen.add_argument("--config", required=True, help="Path to a YAML preparation config.")
+    process_allen.add_argument("--session-ids-file", default=None, help="Optional text file containing one session id per line.")
+    process_allen.add_argument("--max-sessions", type=int, default=None, help="Optional cap for subset runs.")
+    process_allen.add_argument("--cleanup-raw", action="store_true", help="Delete the Allen raw cache after successful processing.")
+    process_allen.add_argument("--reprocess", action="store_true", help="Rebuild processed session files even if they already exist.")
+    process_allen.add_argument("--redownload", action="store_true", help="Force AllenSDK to redownload source session files when supported.")
+    process_allen.set_defaults(func=_run_process_allen_visual_behavior_neuropixels)
+
+    build_catalog = subparsers.add_parser(
+        "build-session-catalog",
+        help="Build the rich session catalog, canonical split manifest, and upload bundle from existing processed sessions.",
+    )
+    build_catalog.add_argument("--config", required=True, help="Path to a YAML preparation config.")
+    build_catalog.set_defaults(func=_run_build_session_catalog)
+
+    materialize_selection = subparsers.add_parser(
+        "materialize-runtime-selection",
+        help="Materialize a metadata-filtered runtime subset and derived split configs from the full processed dataset.",
+    )
+    materialize_selection.add_argument("--config", required=True, help="Path to an experiment YAML config.")
+    materialize_selection.add_argument("--data-config", required=True, help="Path to a preparation YAML config.")
+    materialize_selection.set_defaults(func=_run_materialize_runtime_selection)
 
     prepare_allen_legacy = subparsers.add_parser(
         "prepare-allen-neuropixels",
@@ -213,7 +246,38 @@ def _build_all_split_configs(*, workspace, split_manifest) -> list[Path]:
     return paths
 
 
-def _run_prepare_allen_visual_behavior_neuropixels(args: argparse.Namespace) -> int:
+def _write_canonical_catalog_artifacts(*, config, workspace):
+    console = get_console()
+    catalog = build_session_catalog_from_prepared_sessions(config, workspace=workspace)
+    if not catalog.records:
+        raise RuntimeError(
+            "No processed sessions were found while building the session catalog. "
+            "Run the processing phase first or confirm that processed .h5 files exist."
+        )
+    write_session_catalog(catalog, workspace.session_catalog_path)
+    write_session_catalog_csv(catalog, workspace.session_catalog_csv_path)
+    manifest = project_catalog_to_session_manifest(catalog)
+    write_session_manifest(manifest, workspace.session_manifest_path)
+    split_manifest = build_split_manifest(manifest, config=config.splits)
+    write_split_manifest(split_manifest, workspace.split_manifest_path)
+    config_paths = _build_all_split_configs(workspace=workspace, split_manifest=split_manifest)
+    upload_manifest = write_upload_bundle_manifest(
+        workspace=workspace,
+        dataset_id=config.dataset.dataset_id,
+        upload_processed_only=config.brainsets_pipeline.processed_only_upload,
+    )
+    console.print(f"[green]Wrote session catalog[/green] to {workspace.session_catalog_path}")
+    console.print(f"[green]Wrote session catalog CSV[/green] to {workspace.session_catalog_csv_path}")
+    console.print(f"[green]Wrote session manifest[/green] to {workspace.session_manifest_path}")
+    console.print(f"[green]Wrote split manifest[/green] to {workspace.split_manifest_path}")
+    for config_path in config_paths:
+        console.print(f"[green]Wrote dataset config[/green] to {config_path}")
+    console.print(f"[green]Wrote upload manifest[/green] to {upload_manifest}")
+    console.print(f"Catalog sessions: {len(catalog.records)}")
+    return catalog, split_manifest, upload_manifest
+
+
+def _run_process_allen_visual_behavior_neuropixels(args: argparse.Namespace) -> int:
     console = get_console()
     config = load_preparation_config(args.config)
     workspace = create_workspace(config)
@@ -235,23 +299,6 @@ def _run_prepare_allen_visual_behavior_neuropixels(args: argparse.Namespace) -> 
         reprocess=args.reprocess,
         redownload=args.redownload,
     )
-
-    manifest = build_session_manifest_from_prepared_sessions(config, workspace=workspace)
-    if not manifest.records:
-        raise RuntimeError(
-            "The Allen Visual Behavior Neuropixels pipeline completed without producing any processed sessions."
-        )
-    write_session_manifest(manifest, workspace.session_manifest_path)
-    split_manifest = build_split_manifest(manifest, config=config.splits)
-    write_split_manifest(split_manifest, workspace.split_manifest_path)
-    apply_split_assignments_to_prepared_sessions(workspace=workspace, split_manifest=split_manifest)
-    config_paths = _build_all_split_configs(workspace=workspace, split_manifest=split_manifest)
-    upload_manifest = write_upload_bundle_manifest(
-        workspace=workspace,
-        dataset_id=config.dataset.dataset_id,
-        upload_processed_only=config.brainsets_pipeline.processed_only_upload,
-    )
-
     if args.cleanup_raw or config.allen_sdk.cleanup_raw_after_processing:
         raw_root = config.allen_sdk.cache_root or workspace.raw
         target = raw_root / config.dataset.dataset_id
@@ -260,13 +307,49 @@ def _run_prepare_allen_visual_behavior_neuropixels(args: argparse.Namespace) -> 
 
             shutil.rmtree(target)
             console.print(f"[yellow]Removed raw cache[/yellow] at {target}")
+    processed_count = len(list(workspace.brainset_prepared_root.glob("*.h5")))
+    console.print(f"[green]Processed sessions available[/green]: {processed_count}")
+    return 0
 
-    console.print(f"[green]Wrote session manifest[/green] to {workspace.session_manifest_path}")
-    console.print(f"[green]Wrote split manifest[/green] to {workspace.split_manifest_path}")
-    for config_path in config_paths:
-        console.print(f"[green]Wrote dataset config[/green] to {config_path}")
-    console.print(f"[green]Wrote upload manifest[/green] to {upload_manifest}")
-    console.print(f"Prepared sessions: {len(manifest.records)}")
+
+def _run_build_session_catalog(args: argparse.Namespace) -> int:
+    config = load_preparation_config(args.config)
+    workspace = create_workspace(config)
+    _write_canonical_catalog_artifacts(config=config, workspace=workspace)
+    return 0
+
+
+def _run_materialize_runtime_selection(args: argparse.Namespace) -> int:
+    console = get_console()
+    experiment_config = load_experiment_config(args.config)
+    if not experiment_config.dataset_selection.is_active:
+        raise ValueError(
+            "dataset_selection is not active in the experiment config. Add session or metadata filters before "
+            "materializing a runtime selection."
+        )
+    view = resolve_runtime_dataset_view(
+        experiment_config=experiment_config,
+        data_config_path=args.data_config,
+    )
+    summary = view.selection_summary
+    console.print(f"[green]Wrote selected session catalog[/green] to {view.session_catalog_path}")
+    console.print(f"[green]Wrote selected split manifest[/green] to {view.split_manifest_path}")
+    if summary is not None:
+        console.print(f"Selection name : {summary.output_name}")
+        console.print(f"Sessions       : {summary.session_count}")
+        console.print(f"Subjects       : {summary.subject_count}")
+        console.print(f"Total units    : {summary.total_units}")
+        console.print(f"Total trials   : {summary.total_trials}")
+        for split_name in ("train", "valid", "discovery", "test"):
+            console.print(f"{split_name:>12}: {summary.split_counts.get(split_name, 0)} sessions")
+    return 0
+
+
+def _run_prepare_allen_visual_behavior_neuropixels(args: argparse.Namespace) -> int:
+    _run_process_allen_visual_behavior_neuropixels(args)
+    config = load_preparation_config(args.config)
+    workspace = create_workspace(config)
+    _write_canonical_catalog_artifacts(config=config, workspace=workspace)
     return 0
 
 

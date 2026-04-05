@@ -11,6 +11,7 @@ from predictive_circuit_coding.training.artifacts import (
 from predictive_circuit_coding.training.config import (
     ArtifactConfig,
     DataRuntimeConfig,
+    DatasetSelectionConfig,
     DiscoveryConfig,
     EvaluationConfig,
     ExecutionConfig,
@@ -64,7 +65,7 @@ def run_training_step(model, objective, batch):
     return _run(model, objective, batch)
 
 
-def train_model(*, experiment_config, data_config_path, train_split, valid_split):
+def train_model(*, experiment_config, data_config_path, train_split, valid_split, dataset_view=None):
     from predictive_circuit_coding.training.loop import train_model as _train
 
     return _train(
@@ -72,6 +73,7 @@ def train_model(*, experiment_config, data_config_path, train_split, valid_split
         data_config_path=data_config_path,
         train_split=train_split,
         valid_split=valid_split,
+        dataset_view=dataset_view,
     )
 
 __all__ = [
@@ -79,6 +81,7 @@ __all__ = [
     "CandidateTokenRecord",
     "CheckpointMetadata",
     "DataRuntimeConfig",
+    "DatasetSelectionConfig",
     "DecoderSummary",
     "DiscoveryArtifact",
     "DiscoveryConfig",

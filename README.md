@@ -15,6 +15,9 @@ The main human-facing guide for how the repo is organized and how to run the exp
 
 ```bash
 pcc-prepare-data prepare-allen-visual-behavior-neuropixels --config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
+pcc-prepare-data process-allen-visual-behavior-neuropixels --config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
+pcc-prepare-data build-session-catalog --config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
+pcc-prepare-data materialize-runtime-selection --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
 pcc-train --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
 pcc-evaluate --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_best.pt --split valid
 pcc-discover --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_best.pt --split discovery
@@ -26,6 +29,17 @@ Each Stage 5-7 command writes:
 - its main artifact
 - a JSON run-manifest sidecar that records the config paths, split names, input artifacts, and output artifacts used for that run
 - `pcc-discover` also writes companion cluster summary JSON and CSV outputs for easier inspection
+
+## Dataset Selection
+
+The canonical local dataset can contain the full processed Allen session store. Subset experiments are now handled at runtime through `dataset_selection` in [predictive_circuit_coding_base.yaml](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/configs/pcc/predictive_circuit_coding_base.yaml), not by reprocessing raw data.
+
+You can:
+
+- process the full dataset once
+- rebuild the rich session catalog cheaply
+- select subsets by metadata like `experience_level`, `session_type`, `image_set`, `subject_id`, `brain_regions_any`, or explicit `session_ids_file`
+- recompute split manifests for the selected subset without recreating `.h5` files
 
 ## Notebooks
 
@@ -64,10 +78,13 @@ Allen prep problems:
 
 - if `brainsets` or AllenSDK dependencies conflict, use the dedicated Allen prep environment rather than the main training environment
 - if no processed sessions are produced, verify the prep command completed and rerun with `--max-sessions 1` first
+- if metadata or subset behavior changes, rerun `pcc-prepare-data build-session-catalog` instead of reprocessing `.h5` files
 
 Training problems:
 
 - if `split_manifest.json` is missing, rerun local prep first
+- if `session_catalog.json` is missing, run `pcc-prepare-data build-session-catalog`
+- if a runtime subset should be used, edit `dataset_selection` in the experiment config and optionally run `pcc-prepare-data materialize-runtime-selection` before launching Colab
 - if a resume checkpoint is missing, clear `training.resume_checkpoint` or point it at a real checkpoint
 - if a checkpoint dataset mismatch is reported, use a checkpoint produced from the same dataset/config family
 

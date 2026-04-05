@@ -2,6 +2,43 @@
 
 This repo treats these outputs as first-class artifacts.
 
+## Session Catalog JSON
+
+Location:
+
+- `data/<dataset_id>/manifests/session_catalog.json`
+
+Required top-level keys:
+
+- `dataset_id`
+- `source_name`
+- `records`
+
+Each record must retain:
+
+- processed-session scan fields such as `session_id`, `subject_id`, `duration_s`, `n_units`, `brain_regions`, `trial_count`, `prepared_session_path`, and `raw_data_path`
+- promoted Allen session metadata such as `session_type`, `image_set`, `experience_level`, `session_number`, and `project_code` when available
+
+## Selected Session Catalog JSON
+
+Location:
+
+- `data/<dataset_id>/manifests/selections/<output_name>/selected_session_catalog.json`
+
+Purpose:
+
+- records the exact metadata-filtered session subset used by a runtime-selected experiment
+
+## Selected Split Manifest JSON
+
+Location:
+
+- `data/<dataset_id>/splits/selections/<output_name>/selected_split_manifest.json`
+
+Purpose:
+
+- records the recomputed train/valid/discovery/test assignment for a runtime-selected subset
+
 ## Training Checkpoint
 
 Location:

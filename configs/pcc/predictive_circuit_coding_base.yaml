@@ -8,6 +8,35 @@ splits:
   discovery: discovery
   test: test
 
+dataset_selection:
+  output_name: runtime_selection
+  session_ids: []
+  subject_ids: []
+  exclude_session_ids: []
+  exclude_subject_ids: []
+  session_ids_file:
+  subject_ids_file:
+  exclude_session_ids_file:
+  exclude_subject_ids_file:
+  experience_levels: []
+  session_types: []
+  image_sets: []
+  session_numbers: []
+  project_codes: []
+  brain_regions_any: []
+  min_n_units:
+  max_n_units:
+  min_trial_count:
+  max_trial_count:
+  min_duration_s:
+  max_duration_s:
+  split_seed:
+  split_primary_axis:
+  train_fraction:
+  valid_fraction:
+  discovery_fraction:
+  test_fraction:
+
 data_runtime:
   bin_width_ms: 20.0
   context_bins: 500

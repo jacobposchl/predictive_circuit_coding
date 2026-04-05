@@ -81,6 +81,64 @@ class SplitConfig:
 
 
 @dataclass(frozen=True)
+class DatasetSelectionConfig:
+    output_name: str = "runtime_selection"
+    session_ids: tuple[str, ...] = ()
+    subject_ids: tuple[str, ...] = ()
+    exclude_session_ids: tuple[str, ...] = ()
+    exclude_subject_ids: tuple[str, ...] = ()
+    session_ids_file: Path | None = None
+    subject_ids_file: Path | None = None
+    exclude_session_ids_file: Path | None = None
+    exclude_subject_ids_file: Path | None = None
+    experience_levels: tuple[str, ...] = ()
+    session_types: tuple[str, ...] = ()
+    image_sets: tuple[str, ...] = ()
+    session_numbers: tuple[int, ...] = ()
+    project_codes: tuple[str, ...] = ()
+    brain_regions_any: tuple[str, ...] = ()
+    min_n_units: int | None = None
+    max_n_units: int | None = None
+    min_trial_count: int | None = None
+    max_trial_count: int | None = None
+    min_duration_s: float | None = None
+    max_duration_s: float | None = None
+    split_seed: int | None = None
+    split_primary_axis: str | None = None
+    train_fraction: float | None = None
+    valid_fraction: float | None = None
+    discovery_fraction: float | None = None
+    test_fraction: float | None = None
+
+    @property
+    def is_active(self) -> bool:
+        return any(
+            (
+                self.session_ids,
+                self.subject_ids,
+                self.exclude_session_ids,
+                self.exclude_subject_ids,
+                self.session_ids_file is not None,
+                self.subject_ids_file is not None,
+                self.exclude_session_ids_file is not None,
+                self.exclude_subject_ids_file is not None,
+                self.experience_levels,
+                self.session_types,
+                self.image_sets,
+                self.session_numbers,
+                self.project_codes,
+                self.brain_regions_any,
+                self.min_n_units is not None,
+                self.max_n_units is not None,
+                self.min_trial_count is not None,
+                self.max_trial_count is not None,
+                self.min_duration_s is not None,
+                self.max_duration_s is not None,
+            )
+        )
+
+
+@dataclass(frozen=True)
 class TrainingRuntimeConfig:
     num_epochs: int = 1
     train_steps_per_epoch: int = 8
@@ -131,6 +189,7 @@ class ExperimentConfig:
     optimization: OptimizationConfig
     artifacts: ArtifactConfig
     splits: SplitConfig = field(default_factory=SplitConfig)
+    dataset_selection: DatasetSelectionConfig = field(default_factory=DatasetSelectionConfig)
     training: TrainingRuntimeConfig = field(default_factory=TrainingRuntimeConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
@@ -142,6 +201,15 @@ class ExperimentConfig:
         payload["config_path"] = str(self.config_path)
         payload["artifacts"]["checkpoint_dir"] = str(self.artifacts.checkpoint_dir)
         payload["artifacts"]["summary_path"] = str(self.artifacts.summary_path)
+        for key in (
+            "session_ids_file",
+            "subject_ids_file",
+            "exclude_session_ids_file",
+            "exclude_subject_ids_file",
+        ):
+            value = payload["dataset_selection"].get(key)
+            if value is not None:
+                payload["dataset_selection"][key] = str(value)
         if self.training.resume_checkpoint is not None:
             payload["training"]["resume_checkpoint"] = str(self.training.resume_checkpoint)
         return payload
@@ -172,6 +240,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     optimization = raw["optimization"]
     artifacts = raw["artifacts"]
     split_raw = raw.get("splits", {})
+    selection_raw = raw.get("dataset_selection", {})
     training_raw = raw.get("training", {})
     execution_raw = raw.get("execution", {})
     evaluation_raw = raw.get("evaluation", {})
@@ -233,6 +302,53 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
             valid=str(split_raw.get("valid", "valid")),
             discovery=str(split_raw.get("discovery", "discovery")),
             test=str(split_raw.get("test", "test")),
+        ),
+        dataset_selection=DatasetSelectionConfig(
+            output_name=str(selection_raw.get("output_name", "runtime_selection")),
+            session_ids=tuple(str(value) for value in selection_raw.get("session_ids", []) or ()),
+            subject_ids=tuple(str(value) for value in selection_raw.get("subject_ids", []) or ()),
+            exclude_session_ids=tuple(str(value) for value in selection_raw.get("exclude_session_ids", []) or ()),
+            exclude_subject_ids=tuple(str(value) for value in selection_raw.get("exclude_subject_ids", []) or ()),
+            session_ids_file=_resolve_optional_path(config_dir, selection_raw.get("session_ids_file")),
+            subject_ids_file=_resolve_optional_path(config_dir, selection_raw.get("subject_ids_file")),
+            exclude_session_ids_file=_resolve_optional_path(config_dir, selection_raw.get("exclude_session_ids_file")),
+            exclude_subject_ids_file=_resolve_optional_path(config_dir, selection_raw.get("exclude_subject_ids_file")),
+            experience_levels=tuple(str(value) for value in selection_raw.get("experience_levels", []) or ()),
+            session_types=tuple(str(value) for value in selection_raw.get("session_types", []) or ()),
+            image_sets=tuple(str(value) for value in selection_raw.get("image_sets", []) or ()),
+            session_numbers=tuple(int(value) for value in selection_raw.get("session_numbers", []) or ()),
+            project_codes=tuple(str(value) for value in selection_raw.get("project_codes", []) or ()),
+            brain_regions_any=tuple(str(value) for value in selection_raw.get("brain_regions_any", []) or ()),
+            min_n_units=int(selection_raw["min_n_units"]) if selection_raw.get("min_n_units") is not None else None,
+            max_n_units=int(selection_raw["max_n_units"]) if selection_raw.get("max_n_units") is not None else None,
+            min_trial_count=(
+                int(selection_raw["min_trial_count"]) if selection_raw.get("min_trial_count") is not None else None
+            ),
+            max_trial_count=(
+                int(selection_raw["max_trial_count"]) if selection_raw.get("max_trial_count") is not None else None
+            ),
+            min_duration_s=(
+                float(selection_raw["min_duration_s"]) if selection_raw.get("min_duration_s") is not None else None
+            ),
+            max_duration_s=(
+                float(selection_raw["max_duration_s"]) if selection_raw.get("max_duration_s") is not None else None
+            ),
+            split_seed=int(selection_raw["split_seed"]) if selection_raw.get("split_seed") is not None else None,
+            split_primary_axis=(
+                str(selection_raw["split_primary_axis"]) if selection_raw.get("split_primary_axis") is not None else None
+            ),
+            train_fraction=(
+                float(selection_raw["train_fraction"]) if selection_raw.get("train_fraction") is not None else None
+            ),
+            valid_fraction=(
+                float(selection_raw["valid_fraction"]) if selection_raw.get("valid_fraction") is not None else None
+            ),
+            discovery_fraction=(
+                float(selection_raw["discovery_fraction"]) if selection_raw.get("discovery_fraction") is not None else None
+            ),
+            test_fraction=(
+                float(selection_raw["test_fraction"]) if selection_raw.get("test_fraction") is not None else None
+            ),
         ),
         training=TrainingRuntimeConfig(
             num_epochs=int(training_raw.get("num_epochs", 1)),
@@ -329,6 +445,36 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("training.evaluate_every_epochs must be >= 1")
     if config.training.log_every_steps < 1:
         raise ValueError("training.log_every_steps must be >= 1")
+    if config.dataset_selection.split_primary_axis not in {None, "subject", "session"}:
+        raise ValueError("dataset_selection.split_primary_axis must be 'subject', 'session', or null")
+    for name, value in (
+        ("dataset_selection.train_fraction", config.dataset_selection.train_fraction),
+        ("dataset_selection.valid_fraction", config.dataset_selection.valid_fraction),
+        ("dataset_selection.discovery_fraction", config.dataset_selection.discovery_fraction),
+        ("dataset_selection.test_fraction", config.dataset_selection.test_fraction),
+    ):
+        if value is not None and not 0.0 <= value <= 1.0:
+            raise ValueError(f"{name} must be in [0, 1]")
+    if any(
+        value is not None
+        for value in (
+            config.dataset_selection.train_fraction,
+            config.dataset_selection.valid_fraction,
+            config.dataset_selection.discovery_fraction,
+            config.dataset_selection.test_fraction,
+        )
+    ):
+        total = sum(
+            value or 0.0
+            for value in (
+                config.dataset_selection.train_fraction,
+                config.dataset_selection.valid_fraction,
+                config.dataset_selection.discovery_fraction,
+                config.dataset_selection.test_fraction,
+            )
+        )
+        if abs(total - 1.0) > 1.0e-6:
+            raise ValueError("dataset_selection split fractions must sum to 1.0 when explicitly provided")
     if config.execution.device not in {"cpu", "cuda", "auto"}:
         raise ValueError("execution.device must be one of 'cpu', 'cuda', or 'auto'")
     if config.evaluation.max_batches < 1:

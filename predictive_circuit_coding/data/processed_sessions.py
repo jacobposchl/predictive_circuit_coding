@@ -265,6 +265,8 @@ def write_upload_bundle_manifest(
     files.extend(
         [
             workspace.session_manifest_path.relative_to(workspace.root).as_posix(),
+            workspace.session_catalog_path.relative_to(workspace.root).as_posix(),
+            workspace.session_catalog_csv_path.relative_to(workspace.root).as_posix(),
             workspace.split_manifest_path.relative_to(workspace.root).as_posix(),
         ]
     )

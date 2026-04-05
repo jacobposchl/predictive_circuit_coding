@@ -52,6 +52,7 @@ def validate_discovery_artifact(
     data_config_path: str | Path,
     checkpoint_path: str | Path,
     discovery_artifact_path: str | Path,
+    dataset_view=None,
 ) -> ValidationSummary:
     artifact = _load_discovery_artifact(discovery_artifact_path)
     if not artifact.get("candidates"):
@@ -64,6 +65,7 @@ def validate_discovery_artifact(
         checkpoint_path=checkpoint_path,
         split_name=experiment_config.splits.discovery,
         max_batches=experiment_config.discovery.max_batches,
+        dataset_view=dataset_view,
     )
     real_fit = fit_additive_probe(
         tokens=discovery_collection.tokens,
@@ -91,6 +93,7 @@ def validate_discovery_artifact(
         checkpoint_path=checkpoint_path,
         split_name=experiment_config.splits.test,
         max_batches=experiment_config.evaluation.max_batches,
+        dataset_view=dataset_view,
     )
     centroids = _candidate_centroids(artifact["candidates"])
     positive_test_records = [record for record in test_collection.records if record.label == 1]

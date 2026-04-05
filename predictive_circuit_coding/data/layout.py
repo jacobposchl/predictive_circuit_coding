@@ -16,6 +16,8 @@ class PreparationWorkspace:
     splits: Path
     logs: Path
     session_manifest_path: Path
+    session_catalog_path: Path
+    session_catalog_csv_path: Path
     split_manifest_path: Path
 
 
@@ -34,6 +36,8 @@ def build_workspace(config: DataPreparationConfig) -> PreparationWorkspace:
         splits=splits,
         logs=root / config.dataset.logs_subdir,
         session_manifest_path=manifests / config.dataset.session_manifest_name,
+        session_catalog_path=manifests / "session_catalog.json",
+        session_catalog_csv_path=manifests / "session_catalog.csv",
         split_manifest_path=splits / config.dataset.split_manifest_name,
     )
 

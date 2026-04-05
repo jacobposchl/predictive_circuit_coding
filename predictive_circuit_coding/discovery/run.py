@@ -16,6 +16,7 @@ def discover_motifs(
     data_config_path: str | Path,
     checkpoint_path: str | Path,
     split_name: str,
+    dataset_view=None,
 ) -> DiscoveryArtifact:
     collection = extract_frozen_tokens(
         experiment_config=experiment_config,
@@ -23,6 +24,7 @@ def discover_motifs(
         checkpoint_path=checkpoint_path,
         split_name=split_name,
         max_batches=experiment_config.discovery.max_batches,
+        dataset_view=dataset_view,
     )
     probe_fit = fit_additive_probe(
         tokens=collection.tokens,

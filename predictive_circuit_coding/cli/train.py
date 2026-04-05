@@ -10,6 +10,7 @@ from predictive_circuit_coding.cli.common import (
     print_artifact,
     require_checkpoint_matches_dataset,
     require_non_empty_split,
+    require_runtime_view,
 )
 from predictive_circuit_coding.training import load_experiment_config, train_model
 from predictive_circuit_coding.training.logging import StageLogger
@@ -29,10 +30,11 @@ def _run(args: argparse.Namespace) -> int:
     config = load_experiment_config(args.config)
     train_split = args.split or config.splits.train
     valid_split = args.valid_split or config.splits.valid
+    dataset_view = require_runtime_view(experiment_config=config, data_config_path=args.data_config)
     logger = StageLogger(name="pcc-train")
     logger.log_stage("preflight", expected_next="checkpoint + training summary")
-    require_non_empty_split(data_config_path=args.data_config, split_name=train_split)
-    require_non_empty_split(data_config_path=args.data_config, split_name=valid_split)
+    require_non_empty_split(dataset_view=dataset_view, split_name=train_split)
+    require_non_empty_split(dataset_view=dataset_view, split_name=valid_split)
     if config.training.resume_checkpoint is not None:
         require_checkpoint_matches_dataset(
             checkpoint_path=config.training.resume_checkpoint,
@@ -45,6 +47,7 @@ def _run(args: argparse.Namespace) -> int:
         data_config_path=args.data_config,
         train_split=train_split,
         valid_split=valid_split,
+        dataset_view=dataset_view,
     )
     print_artifact(console, label="Best checkpoint", path=result.checkpoint_path)
     print_artifact(console, label="Training summary", path=result.summary_path)
@@ -57,6 +60,9 @@ def _run(args: argparse.Namespace) -> int:
             "data_config_path": str(Path(args.data_config).resolve()),
             "train_split": train_split,
             "valid_split": valid_split,
+            "runtime_split_manifest_path": str(dataset_view.split_manifest_path),
+            "runtime_session_catalog_path": str(dataset_view.session_catalog_path),
+            "dataset_selection_active": dataset_view.selection_active,
             "resume_checkpoint": str(config.training.resume_checkpoint) if config.training.resume_checkpoint else None,
         },
         outputs={

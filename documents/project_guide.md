@@ -57,7 +57,7 @@ Every token and every discovered candidate must remain traceable back to:
 
 - data preparation contracts
 - workspace layout
-- manifests and split logic
+- rich session catalog, manifests, selection, and split logic
 - processed session loading and session scanning
 - `brainsets` runner integration
 - `temporaldata` session writing
@@ -244,6 +244,7 @@ This is the experiment config.
 It controls:
 
 - runtime data parameters such as bin width and patching
+- dataset selection filters and subset split recomputation
 - model hyperparameters
 - objective settings
 - optimization settings
@@ -271,6 +272,7 @@ Preparation config answers:
 Experiment config answers:
 
 - how do we batch windows
+- which subset of the canonical processed dataset should be used for this run
 - how do we train the model
 - how do we evaluate and discover motifs
 - where do runtime artifacts go
@@ -283,7 +285,7 @@ This is the standard experiment path a collaborator should follow.
 
 Purpose:
 
-- create the processed Allen bundle used by the rest of the project
+- process raw Allen sessions once and build the canonical local processed dataset view
 
 Input:
 
@@ -299,10 +301,21 @@ pcc-prepare-data prepare-allen-visual-behavior-neuropixels --config configs/pcc/
 Outputs:
 
 - prepared `.h5` sessions under `data/allen_visual_behavior_neuropixels/prepared/`
+- `session_catalog.json`
+- `session_catalog.csv`
 - `session_manifest.json`
 - `split_manifest.json`
 - split-specific `torch_brain_*.yaml` files
 - upload bundle manifest
+
+The same workflow is also available as two explicit phases:
+
+```bash
+pcc-prepare-data process-allen-visual-behavior-neuropixels --config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
+pcc-prepare-data build-session-catalog --config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
+```
+
+Use the split-phase commands when the processed `.h5` files are already correct and only metadata, catalogs, or split logic need to be rebuilt.
 
 ### 2. Local inspection
 
@@ -338,6 +351,32 @@ Outputs:
 
 - Drive copy of processed sessions and support manifests
 
+### Runtime subset selection
+
+Subset experiments do not require reprocessing raw Allen sessions.
+
+The repo now treats the full processed session store as canonical and uses `dataset_selection` in `configs/pcc/predictive_circuit_coding_base.yaml` to define run-time subsets.
+
+Selection supports:
+
+- exact inclusion via `session_ids`, `subject_ids`, and corresponding `*_file` options
+- metadata filtering via fields like `experience_levels`, `session_types`, `image_sets`, `project_codes`, `session_numbers`, and `brain_regions_any`
+- numeric filtering via `n_units`, `trial_count`, and `duration_s`
+- exclusion lists for session and subject IDs
+
+When a subset is active:
+
+- the repo writes `selected_session_catalog.json`
+- the repo recomputes a `selected_split_manifest.json`
+- the repo writes derived `torch_brain_selected_*.yaml` files
+- Stage 5-7 commands consume those derived artifacts automatically
+
+You can materialize the subset explicitly before training:
+
+```bash
+pcc-prepare-data materialize-runtime-selection --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
+```
+
 ### 4. Colab training
 
 Purpose:
@@ -365,6 +404,7 @@ Outputs:
 - checkpoint `.pt`
 - training summary JSON
 - training run-manifest sidecar
+- if `dataset_selection` is active, the run-manifest also records the derived selected split manifest and selected session catalog paths
 
 ### 5. Colab evaluation
 
@@ -441,6 +481,7 @@ Responsibilities:
 - mount Drive
 - install the repo and notebook extras
 - run preflight checks
+- allow the user to keep the full processed dataset on Drive and choose subsets by editing `dataset_selection` in the experiment config
 - launch training
 - launch evaluation
 - surface stage boundaries, elapsed time, and checkpoint reminders
@@ -487,6 +528,9 @@ The main artifact sequence is:
 
 7. run-manifest sidecars  
    produced by all Stage 5-7 CLIs so a user can reconstruct which config, checkpoint, split, and outputs belonged to the run
+
+8. selected session catalogs and selected split manifests  
+   produced only when `dataset_selection` is active so subset runs remain reproducible without touching canonical `.h5` files
 
 Use [artifact_contracts.md](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/documents/artifact_contracts.md) for exact shapes and required keys.
 

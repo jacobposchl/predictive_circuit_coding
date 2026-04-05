@@ -11,6 +11,7 @@ from predictive_circuit_coding.cli.common import (
     require_checkpoint_matches_dataset,
     require_discovery_artifact_matches_dataset,
     require_non_empty_split,
+    require_runtime_view,
     warn,
 )
 from predictive_circuit_coding.training import (
@@ -44,10 +45,11 @@ def _default_output_paths(discovery_artifact_path: str | Path) -> tuple[Path, Pa
 def _run(args: argparse.Namespace) -> int:
     console = get_cli_console()
     config = load_experiment_config(args.config)
+    dataset_view = require_runtime_view(experiment_config=config, data_config_path=args.data_config)
     logger = StageLogger(name="pcc-validate")
     logger.log_stage("preflight", expected_next="validation summary json/csv")
-    require_non_empty_split(data_config_path=args.data_config, split_name=config.splits.discovery)
-    require_non_empty_split(data_config_path=args.data_config, split_name=config.splits.test)
+    require_non_empty_split(dataset_view=dataset_view, split_name=config.splits.discovery)
+    require_non_empty_split(dataset_view=dataset_view, split_name=config.splits.test)
     checkpoint_path = require_checkpoint_matches_dataset(
         checkpoint_path=args.checkpoint,
         dataset_id=config.dataset_id,
@@ -62,6 +64,7 @@ def _run(args: argparse.Namespace) -> int:
         data_config_path=args.data_config,
         checkpoint_path=checkpoint_path,
         discovery_artifact_path=discovery_artifact_path,
+        dataset_view=dataset_view,
     )
     default_json, default_csv = _default_output_paths(discovery_artifact_path)
     output_json = Path(args.output_json) if args.output_json else default_json
@@ -81,6 +84,9 @@ def _run(args: argparse.Namespace) -> int:
             "discovery_artifact_path": str(discovery_artifact_path),
             "discovery_split": config.splits.discovery,
             "test_split": config.splits.test,
+            "runtime_split_manifest_path": str(dataset_view.split_manifest_path),
+            "runtime_session_catalog_path": str(dataset_view.session_catalog_path),
+            "dataset_selection_active": dataset_view.selection_active,
         },
         outputs={
             "validation_summary_json": str(output_json),

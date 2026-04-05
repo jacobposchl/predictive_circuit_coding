@@ -10,6 +10,7 @@ from predictive_circuit_coding.cli.prepare_data import main
 from predictive_circuit_coding.data import (
     build_brainsets_runner_command,
     create_workspace,
+    load_session_catalog,
     load_preparation_config,
     load_session_manifest,
     load_split_manifest,
@@ -175,10 +176,12 @@ def test_prepare_allen_neuropixels_builds_upload_ready_bundle(monkeypatch, tmp_p
         assert exc.code == 0
 
     session_manifest = load_session_manifest(workspace.session_manifest_path)
+    session_catalog = load_session_catalog(workspace.session_catalog_path)
     split_manifest = load_split_manifest(workspace.split_manifest_path)
     upload_manifest_path = workspace.manifests / "upload_bundle.json"
 
     assert len(session_manifest.records) == 2
+    assert len(session_catalog.records) == 2
     assert upload_manifest_path.is_file()
     assert all(record.prepared_session_path for record in session_manifest.records)
     assert {item.split for item in split_manifest.assignments} <= {"train", "valid", "discovery", "test"}
@@ -187,7 +190,7 @@ def test_prepare_allen_neuropixels_builds_upload_ready_bundle(monkeypatch, tmp_p
         assert (workspace.splits / f"torch_brain_{split_name}.yaml").is_file()
 
 
-def test_prepare_allen_neuropixels_applies_split_masks_for_torch_brain(monkeypatch, tmp_path: Path):
+def test_prepare_allen_neuropixels_builds_catalog_and_split_specific_dataset_configs(monkeypatch, tmp_path: Path):
     config_path = _write_config(tmp_path)
     config = load_preparation_config(config_path)
     workspace = create_workspace(config)
@@ -212,6 +215,7 @@ def test_prepare_allen_neuropixels_applies_split_masks_for_torch_brain(monkeypat
     except SystemExit as exc:
         assert exc.code == 0
 
+    assert workspace.session_catalog_path.is_file()
     split_manifest = load_split_manifest(workspace.split_manifest_path)
     bundle = build_dataset_bundle(
         workspace=workspace,
@@ -226,7 +230,7 @@ def test_prepare_allen_neuropixels_applies_split_masks_for_torch_brain(monkeypat
     assert rows
     session_id = rows[0].recording_id.split("/", 1)[1]
     session = load_temporaldata_session(workspace.brainset_prepared_root / f"{session_id}.h5", lazy=False)
-    assert hasattr(session.spikes, "train_mask")
+    assert session.session.id == session_id
 
     if hasattr(bundle.dataset, "_close_open_files"):
         bundle.dataset._close_open_files()

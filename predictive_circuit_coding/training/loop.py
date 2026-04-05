@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from predictive_circuit_coding.data import build_workspace, load_preparation_config, load_split_manifest
+from predictive_circuit_coding.data import resolve_runtime_dataset_view
 from predictive_circuit_coding.evaluation.metrics import aggregate_metric_dicts
 from predictive_circuit_coding.evaluation.run import evaluate_checkpoint_on_split
 from predictive_circuit_coding.training.artifacts import (
@@ -81,10 +81,14 @@ def train_model(
     data_config_path: str | Path,
     train_split: str,
     valid_split: str,
+    dataset_view=None,
 ) -> TrainingRunResult:
-    prep_config = load_preparation_config(data_config_path)
-    workspace = build_workspace(prep_config)
-    split_manifest = load_split_manifest(workspace.split_manifest_path)
+    dataset_view = dataset_view or resolve_runtime_dataset_view(
+        experiment_config=experiment_config,
+        data_config_path=data_config_path,
+    )
+    workspace = dataset_view.workspace
+    split_manifest = dataset_view.split_manifest
 
     tokenizer = build_tokenizer_from_config(experiment_config)
     model = build_model_from_config(experiment_config)
@@ -131,6 +135,9 @@ def train_model(
             workspace=workspace,
             split_manifest=split_manifest,
             split=train_split,
+            config_dir=dataset_view.config_dir,
+            config_name_prefix=dataset_view.config_name_prefix,
+            dataset_split=dataset_view.dataset_split,
         )
         train_sampler = build_random_fixed_window_sampler(
             train_bundle.dataset,
@@ -179,6 +186,7 @@ def train_model(
                 split_name=valid_split,
                 checkpoint_path=str(best_checkpoint_path if best_checkpoint_path.exists() else ""),
                 max_batches=experiment_config.training.validation_steps,
+                dataset_view=dataset_view,
             )
             valid_metric = float(evaluation.metrics["predictive_improvement"])
             if valid_metric >= best_metric:

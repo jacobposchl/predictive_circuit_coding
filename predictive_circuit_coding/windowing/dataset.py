@@ -52,6 +52,8 @@ def build_torch_brain_config(
     dataset_id: str,
     session_ids: Iterable[str],
     split: str,
+    output_dir: Path | None = None,
+    filename_prefix: str = "torch_brain",
 ) -> Path:
     session_ids = sorted(dict.fromkeys(str(session_id) for session_id in session_ids))
     payload = [
@@ -64,7 +66,8 @@ def build_torch_brain_config(
             ]
         }
     ]
-    target = workspace.splits / f"torch_brain_{split}.yaml"
+    target_dir = output_dir or workspace.splits
+    target = target_dir / f"{filename_prefix}_{split}.yaml"
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(payload, handle, sort_keys=False)
@@ -95,6 +98,9 @@ def build_dataset_bundle(
     split_manifest: SplitManifest,
     split: str,
     transform=None,
+    config_dir: Path | None = None,
+    config_name_prefix: str = "torch_brain",
+    dataset_split: str | None = None,
 ) -> TorchBrainDatasetBundle:
     session_ids = split_session_ids(split_manifest, split)
     config_path = build_torch_brain_config(
@@ -102,11 +108,13 @@ def build_dataset_bundle(
         dataset_id=split_manifest.dataset_id,
         session_ids=session_ids,
         split=split,
+        output_dir=config_dir,
+        filename_prefix=config_name_prefix,
     )
     dataset = load_torch_brain_dataset(
         root=workspace.prepared,
         config_path=config_path,
-        split=split,
+        split=dataset_split,
         transform=transform,
     )
     return TorchBrainDatasetBundle(
