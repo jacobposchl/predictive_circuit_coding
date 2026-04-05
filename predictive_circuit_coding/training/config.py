@@ -1,0 +1,349 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+@dataclass(frozen=True)
+class DataRuntimeConfig:
+    bin_width_ms: float
+    context_bins: int
+    patch_bins: int
+    min_unit_spikes: int
+    max_units: int | None
+    padding_strategy: str
+    include_trials: bool
+    include_stimulus_presentations: bool
+    include_optotagging: bool
+
+    @property
+    def bin_width_s(self) -> float:
+        return float(self.bin_width_ms) / 1000.0
+
+    @property
+    def context_duration_s(self) -> float:
+        return float(self.context_bins) * self.bin_width_s
+
+    @property
+    def patches_per_window(self) -> int:
+        return int(self.context_bins // self.patch_bins)
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    d_model: int
+    num_heads: int
+    temporal_layers: int
+    spatial_layers: int
+    dropout: float
+    mlp_ratio: float
+    l2_normalize_tokens: bool
+    norm_eps: float
+
+
+@dataclass(frozen=True)
+class ObjectiveConfig:
+    predictive_target_type: str
+    continuation_baseline_type: str
+    predictive_loss: str
+    reconstruction_loss: str
+    reconstruction_weight: float
+    exclude_final_prediction_patch: bool
+
+
+@dataclass(frozen=True)
+class OptimizationConfig:
+    learning_rate: float
+    weight_decay: float
+    grad_clip_norm: float | None
+    batch_size: int
+    scheduler_type: str = "none"
+    scheduler_warmup_steps: int = 0
+
+
+@dataclass(frozen=True)
+class ArtifactConfig:
+    checkpoint_dir: Path
+    summary_path: Path
+    checkpoint_prefix: str
+    save_config_snapshot: bool
+
+
+@dataclass(frozen=True)
+class SplitConfig:
+    train: str = "train"
+    valid: str = "valid"
+    discovery: str = "discovery"
+    test: str = "test"
+
+
+@dataclass(frozen=True)
+class TrainingRuntimeConfig:
+    num_epochs: int = 1
+    train_steps_per_epoch: int = 8
+    validation_steps: int = 2
+    checkpoint_every_epochs: int = 1
+    evaluate_every_epochs: int = 1
+    resume_checkpoint: Path | None = None
+    dataloader_workers: int = 0
+    train_window_seed: int = 0
+    log_every_steps: int = 1
+
+
+@dataclass(frozen=True)
+class ExecutionConfig:
+    device: str = "cpu"
+    mixed_precision: bool = False
+
+
+@dataclass(frozen=True)
+class EvaluationConfig:
+    max_batches: int = 4
+    sequential_step_s: float | None = None
+
+
+@dataclass(frozen=True)
+class DiscoveryConfig:
+    target_label: str = "stimulus_change"
+    max_batches: int = 6
+    probe_epochs: int = 25
+    probe_learning_rate: float = 1.0e-2
+    top_k_candidates: int = 32
+    min_candidate_score: float = 0.0
+    cluster_similarity_threshold: float = 0.9
+    min_cluster_size: int = 2
+    stability_rounds: int = 4
+    recurrence_similarity_threshold: float = 0.9
+    shuffle_seed: int = 17
+
+
+@dataclass(frozen=True)
+class ExperimentConfig:
+    dataset_id: str
+    split_name: str
+    seed: int
+    data_runtime: DataRuntimeConfig
+    model: ModelConfig
+    objective: ObjectiveConfig
+    optimization: OptimizationConfig
+    artifacts: ArtifactConfig
+    splits: SplitConfig = field(default_factory=SplitConfig)
+    training: TrainingRuntimeConfig = field(default_factory=TrainingRuntimeConfig)
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
+    config_path: Path = Path("experiment.yaml")
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["config_path"] = str(self.config_path)
+        payload["artifacts"]["checkpoint_dir"] = str(self.artifacts.checkpoint_dir)
+        payload["artifacts"]["summary_path"] = str(self.artifacts.summary_path)
+        if self.training.resume_checkpoint is not None:
+            payload["training"]["resume_checkpoint"] = str(self.training.resume_checkpoint)
+        return payload
+
+
+def _resolve_path(base_dir: Path, value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = (base_dir / path).resolve()
+    return path
+
+
+def _resolve_optional_path(base_dir: Path, value: str | None) -> Path | None:
+    if value in (None, ""):
+        return None
+    return _resolve_path(base_dir, str(value))
+
+
+def load_experiment_config(path: str | Path) -> ExperimentConfig:
+    config_path = Path(path).resolve()
+    with config_path.open("r", encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle)
+
+    config_dir = config_path.parent
+    runtime = raw["data_runtime"]
+    model = raw["model"]
+    objective = raw["objective"]
+    optimization = raw["optimization"]
+    artifacts = raw["artifacts"]
+    split_raw = raw.get("splits", {})
+    training_raw = raw.get("training", {})
+    execution_raw = raw.get("execution", {})
+    evaluation_raw = raw.get("evaluation", {})
+    discovery_raw = raw.get("discovery", {})
+
+    cfg = ExperimentConfig(
+        dataset_id=str(raw["dataset_id"]),
+        split_name=str(raw.get("split_name", "train")),
+        seed=int(raw.get("seed", 0)),
+        data_runtime=DataRuntimeConfig(
+            bin_width_ms=float(runtime.get("bin_width_ms", 20.0)),
+            context_bins=int(runtime.get("context_bins", 500)),
+            patch_bins=int(runtime.get("patch_bins", 50)),
+            min_unit_spikes=int(runtime.get("min_unit_spikes", 0)),
+            max_units=int(runtime["max_units"]) if runtime.get("max_units") is not None else None,
+            padding_strategy=str(runtime.get("padding_strategy", "mask")),
+            include_trials=bool(runtime.get("include_trials", True)),
+            include_stimulus_presentations=bool(runtime.get("include_stimulus_presentations", True)),
+            include_optotagging=bool(runtime.get("include_optotagging", True)),
+        ),
+        model=ModelConfig(
+            d_model=int(model.get("d_model", 256)),
+            num_heads=int(model.get("num_heads", 8)),
+            temporal_layers=int(model.get("temporal_layers", 2)),
+            spatial_layers=int(model.get("spatial_layers", 2)),
+            dropout=float(model.get("dropout", 0.1)),
+            mlp_ratio=float(model.get("mlp_ratio", 4.0)),
+            l2_normalize_tokens=bool(model.get("l2_normalize_tokens", True)),
+            norm_eps=float(model.get("norm_eps", 1.0e-5)),
+        ),
+        objective=ObjectiveConfig(
+            predictive_target_type=str(objective.get("predictive_target_type", "delta")),
+            continuation_baseline_type=str(objective.get("continuation_baseline_type", "previous_patch")),
+            predictive_loss=str(objective.get("predictive_loss", "mse")),
+            reconstruction_loss=str(objective.get("reconstruction_loss", "mse")),
+            reconstruction_weight=float(objective.get("reconstruction_weight", 0.2)),
+            exclude_final_prediction_patch=bool(objective.get("exclude_final_prediction_patch", True)),
+        ),
+        optimization=OptimizationConfig(
+            learning_rate=float(optimization.get("learning_rate", 1.0e-4)),
+            weight_decay=float(optimization.get("weight_decay", 1.0e-4)),
+            grad_clip_norm=(
+                float(optimization["grad_clip_norm"])
+                if optimization.get("grad_clip_norm") is not None
+                else None
+            ),
+            batch_size=int(optimization.get("batch_size", 4)),
+            scheduler_type=str(optimization.get("scheduler_type", "none")),
+            scheduler_warmup_steps=int(optimization.get("scheduler_warmup_steps", 0)),
+        ),
+        artifacts=ArtifactConfig(
+            checkpoint_dir=_resolve_path(config_dir, str(artifacts.get("checkpoint_dir", "artifacts/checkpoints"))),
+            summary_path=_resolve_path(config_dir, str(artifacts.get("summary_path", "artifacts/training_summary.json"))),
+            checkpoint_prefix=str(artifacts.get("checkpoint_prefix", "pcc")),
+            save_config_snapshot=bool(artifacts.get("save_config_snapshot", True)),
+        ),
+        splits=SplitConfig(
+            train=str(split_raw.get("train", "train")),
+            valid=str(split_raw.get("valid", "valid")),
+            discovery=str(split_raw.get("discovery", "discovery")),
+            test=str(split_raw.get("test", "test")),
+        ),
+        training=TrainingRuntimeConfig(
+            num_epochs=int(training_raw.get("num_epochs", 1)),
+            train_steps_per_epoch=int(training_raw.get("train_steps_per_epoch", 8)),
+            validation_steps=int(training_raw.get("validation_steps", 2)),
+            checkpoint_every_epochs=int(training_raw.get("checkpoint_every_epochs", 1)),
+            evaluate_every_epochs=int(training_raw.get("evaluate_every_epochs", 1)),
+            resume_checkpoint=_resolve_optional_path(config_dir, training_raw.get("resume_checkpoint")),
+            dataloader_workers=int(training_raw.get("dataloader_workers", 0)),
+            train_window_seed=int(training_raw.get("train_window_seed", 0)),
+            log_every_steps=int(training_raw.get("log_every_steps", 1)),
+        ),
+        execution=ExecutionConfig(
+            device=str(execution_raw.get("device", "cpu")),
+            mixed_precision=bool(execution_raw.get("mixed_precision", False)),
+        ),
+        evaluation=EvaluationConfig(
+            max_batches=int(evaluation_raw.get("max_batches", 4)),
+            sequential_step_s=(
+                float(evaluation_raw["sequential_step_s"])
+                if evaluation_raw.get("sequential_step_s") is not None
+                else None
+            ),
+        ),
+        discovery=DiscoveryConfig(
+            target_label=str(discovery_raw.get("target_label", "stimulus_change")),
+            max_batches=int(discovery_raw.get("max_batches", 6)),
+            probe_epochs=int(discovery_raw.get("probe_epochs", 25)),
+            probe_learning_rate=float(discovery_raw.get("probe_learning_rate", 1.0e-2)),
+            top_k_candidates=int(discovery_raw.get("top_k_candidates", 32)),
+            min_candidate_score=float(discovery_raw.get("min_candidate_score", 0.0)),
+            cluster_similarity_threshold=float(discovery_raw.get("cluster_similarity_threshold", 0.9)),
+            min_cluster_size=int(discovery_raw.get("min_cluster_size", 2)),
+            stability_rounds=int(discovery_raw.get("stability_rounds", 4)),
+            recurrence_similarity_threshold=float(discovery_raw.get("recurrence_similarity_threshold", 0.9)),
+            shuffle_seed=int(discovery_raw.get("shuffle_seed", 17)),
+        ),
+        config_path=config_path,
+    )
+    validate_experiment_config(cfg)
+    return cfg
+
+
+def validate_experiment_config(config: ExperimentConfig) -> None:
+    if config.data_runtime.bin_width_ms <= 0:
+        raise ValueError("data_runtime.bin_width_ms must be > 0")
+    if config.data_runtime.context_bins <= 0:
+        raise ValueError("data_runtime.context_bins must be > 0")
+    if config.data_runtime.patch_bins <= 0:
+        raise ValueError("data_runtime.patch_bins must be > 0")
+    if config.data_runtime.context_bins % config.data_runtime.patch_bins != 0:
+        raise ValueError("data_runtime.context_bins must be divisible by data_runtime.patch_bins")
+    if config.data_runtime.padding_strategy != "mask":
+        raise ValueError("Only mask padding_strategy is currently supported")
+    if config.model.d_model <= 0:
+        raise ValueError("model.d_model must be > 0")
+    if config.model.num_heads <= 0:
+        raise ValueError("model.num_heads must be > 0")
+    if config.model.d_model % config.model.num_heads != 0:
+        raise ValueError("model.d_model must be divisible by model.num_heads")
+    if config.model.temporal_layers < 1:
+        raise ValueError("model.temporal_layers must be >= 1")
+    if config.model.spatial_layers < 1:
+        raise ValueError("model.spatial_layers must be >= 1")
+    if not 0.0 <= config.model.dropout < 1.0:
+        raise ValueError("model.dropout must be in [0, 1)")
+    if config.objective.predictive_target_type not in {"delta", "next_patch_counts"}:
+        raise ValueError("objective.predictive_target_type must be 'delta' or 'next_patch_counts'")
+    if config.objective.continuation_baseline_type not in {"previous_patch", "zeros"}:
+        raise ValueError("objective.continuation_baseline_type must be 'previous_patch' or 'zeros'")
+    if config.objective.predictive_loss != "mse":
+        raise ValueError("Only mse predictive_loss is currently supported")
+    if config.objective.reconstruction_loss != "mse":
+        raise ValueError("Only mse reconstruction_loss is currently supported")
+    if config.objective.reconstruction_weight < 0:
+        raise ValueError("objective.reconstruction_weight must be >= 0")
+    if config.optimization.learning_rate <= 0:
+        raise ValueError("optimization.learning_rate must be > 0")
+    if config.optimization.weight_decay < 0:
+        raise ValueError("optimization.weight_decay must be >= 0")
+    if config.optimization.batch_size < 1:
+        raise ValueError("optimization.batch_size must be >= 1")
+    if config.optimization.scheduler_type not in {"none", "cosine"}:
+        raise ValueError("optimization.scheduler_type must be 'none' or 'cosine'")
+    if config.training.num_epochs < 1:
+        raise ValueError("training.num_epochs must be >= 1")
+    if config.training.train_steps_per_epoch < 1:
+        raise ValueError("training.train_steps_per_epoch must be >= 1")
+    if config.training.validation_steps < 1:
+        raise ValueError("training.validation_steps must be >= 1")
+    if config.training.checkpoint_every_epochs < 1:
+        raise ValueError("training.checkpoint_every_epochs must be >= 1")
+    if config.training.evaluate_every_epochs < 1:
+        raise ValueError("training.evaluate_every_epochs must be >= 1")
+    if config.training.log_every_steps < 1:
+        raise ValueError("training.log_every_steps must be >= 1")
+    if config.execution.device not in {"cpu", "cuda", "auto"}:
+        raise ValueError("execution.device must be one of 'cpu', 'cuda', or 'auto'")
+    if config.evaluation.max_batches < 1:
+        raise ValueError("evaluation.max_batches must be >= 1")
+    if config.discovery.target_label != "stimulus_change":
+        raise ValueError("discovery.target_label currently must be 'stimulus_change'")
+    if config.discovery.max_batches < 1:
+        raise ValueError("discovery.max_batches must be >= 1")
+    if config.discovery.probe_epochs < 1:
+        raise ValueError("discovery.probe_epochs must be >= 1")
+    if config.discovery.top_k_candidates < 1:
+        raise ValueError("discovery.top_k_candidates must be >= 1")
+    if config.discovery.min_cluster_size < 1:
+        raise ValueError("discovery.min_cluster_size must be >= 1")
+    if not 0.0 <= config.discovery.cluster_similarity_threshold <= 1.0:
+        raise ValueError("discovery.cluster_similarity_threshold must be in [0, 1]")
+    if config.discovery.stability_rounds < 1:
+        raise ValueError("discovery.stability_rounds must be >= 1")

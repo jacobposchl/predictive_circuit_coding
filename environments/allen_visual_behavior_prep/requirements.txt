@@ -1,0 +1,11 @@
+allensdk==2.16.2
+temporaldata==0.1.1
+numpy==1.23.5
+pandas==1.5.3
+scipy==1.10.1
+h5py==3.8.0
+pynwb==2.2.0
+psycopg2-binary==2.9.10
+ray==2.54.1
+rich==13.3.2
+pydantic>=2,<3

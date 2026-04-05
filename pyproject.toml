@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "predictive-circuit-coding"
+version = "0.1.0"
+description = "Data foundation and model pipeline for predictive circuit coding on neural population recordings."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "h5py>=3.10.0",
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+    "pyyaml>=6.0.1",
+    "rich>=13.7.0",
+    "temporaldata>=0.1.3",
+    "tqdm>=4.66.0",
+    "pytorch_brain>=0.1.0",
+    "brainsets>=0.1.2; python_version < '3.12'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+]
+notebook = [
+    "ipywidgets>=8.1.0",
+]
+
+[project.scripts]
+pcc-prepare-data = "predictive_circuit_coding.cli.prepare_data:main"
+pcc-train = "predictive_circuit_coding.cli.train:main"
+pcc-evaluate = "predictive_circuit_coding.cli.evaluate:main"
+pcc-discover = "predictive_circuit_coding.cli.discover:main"
+pcc-validate = "predictive_circuit_coding.cli.validate:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["predictive_circuit_coding*"]
+exclude = ["tests*", "documents*", "configs*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

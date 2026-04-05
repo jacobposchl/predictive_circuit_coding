@@ -1,0 +1,26 @@
+.venv/
+.venv-allen-prep/
+.pytest_cache/
+__pycache__/
+.ipynb_checkpoints/
+
+*.pyc
+*.pyo
+*.egg-info/
+.DS_Store
+*.h5
+*.nwb
+*.csv
+
+# Local Allen cache and temporary downloads
+tmp_vbn_cache/
+data/allen_visual_behavior_neuropixels/raw/
+
+# Generated prepared data and local bundle outputs
+data/allen_visual_behavior_neuropixels/prepared/
+data/allen_visual_behavior_neuropixels/manifests/
+data/allen_visual_behavior_neuropixels/splits/
+data/allen_visual_behavior_neuropixels/logs/
+
+# Training, evaluation, discovery, and validation outputs
+artifacts/
