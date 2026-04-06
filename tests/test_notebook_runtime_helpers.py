@@ -10,6 +10,7 @@ from predictive_circuit_coding.utils import (
     NotebookDatasetConfig,
     prepare_notebook_runtime_context,
     resolve_notebook_checkpoint,
+    restore_latest_exported_artifacts,
 )
 
 
@@ -113,3 +114,27 @@ def test_resolve_notebook_checkpoint_prefers_training_summary_checkpoint_path(tm
 
     resolved = resolve_notebook_checkpoint(summary_path=summary_path, checkpoint_dir=checkpoint_dir)
     assert resolved == checkpoint_path
+
+
+def test_restore_latest_exported_artifacts_restores_latest_train_run(tmp_path: Path) -> None:
+    export_root = tmp_path / "exports"
+    old_run = export_root / "train_run_20240101_010101"
+    new_run = export_root / "train_run_20240102_010101"
+    for run_dir in (old_run, new_run):
+        checkpoint_dir = run_dir / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoint_dir / "pcc_best.pt").write_text(run_dir.name, encoding="utf-8")
+        (run_dir / "training_summary.json").write_text("{}", encoding="utf-8")
+        (run_dir / "colab_runtime_experiment.yaml").write_text("dataset_id: allen_visual_behavior_neuropixels\n", encoding="utf-8")
+
+    local_artifact_root = tmp_path / "artifacts"
+    runtime_experiment_config = tmp_path / "colab_runtime_experiment.yaml"
+    restored = restore_latest_exported_artifacts(
+        drive_export_root=export_root,
+        local_artifact_root=local_artifact_root,
+        runtime_experiment_config=runtime_experiment_config,
+    )
+
+    assert restored == new_run
+    assert (local_artifact_root / "checkpoints" / "pcc_best.pt").read_text(encoding="utf-8") == new_run.name
+    assert runtime_experiment_config.read_text(encoding="utf-8").startswith("dataset_id:")

@@ -12,6 +12,7 @@ from predictive_circuit_coding.utils.notebook import (
     format_duration,
     prepare_notebook_runtime_context,
     resolve_notebook_checkpoint,
+    restore_latest_exported_artifacts,
     run_streaming_command,
     verify_paths_exist,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "format_duration",
     "prepare_notebook_runtime_context",
     "resolve_notebook_checkpoint",
+    "restore_latest_exported_artifacts",
     "run_streaming_command",
     "verify_paths_exist",
 ]

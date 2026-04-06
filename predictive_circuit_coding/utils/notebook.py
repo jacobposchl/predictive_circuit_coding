@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -94,6 +95,7 @@ class NotebookRuntimeContext:
     selected_session_count: int
     profile_path: Path
     selection_output_name: str
+    exported_runtime_config_path: Path
 
 
 def _load_selected_session_ids(
@@ -200,6 +202,8 @@ def prepare_notebook_runtime_context(
         selected_session_count = len(session_ids)
 
     runtime_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    exported_runtime_config_path = artifact_path / "colab_runtime_experiment.yaml"
+    exported_runtime_config_path.write_text(runtime_path.read_text(encoding="utf-8"), encoding="utf-8")
     dataset_selection_active = any(
         value not in (None, [], "", {})
         for key, value in payload.get("dataset_selection", {}).items()
@@ -249,6 +253,7 @@ def prepare_notebook_runtime_context(
         selected_session_count=selected_session_count,
         profile_path=profile_path,
         selection_output_name=selection_output_name,
+        exported_runtime_config_path=exported_runtime_config_path,
     )
 
 
@@ -369,6 +374,35 @@ def resolve_notebook_checkpoint(
     if epoch_candidates:
         return epoch_candidates[-1]
     raise FileNotFoundError(f"No checkpoint found under {resolved_checkpoint_dir}")
+
+
+def restore_latest_exported_artifacts(
+    *,
+    drive_export_root: str | Path,
+    local_artifact_root: str | Path,
+    runtime_experiment_config: str | Path | None = None,
+    run_prefix: str = "train_run_",
+) -> Path | None:
+    export_root = Path(drive_export_root)
+    if not export_root.exists():
+        return None
+    run_candidates = sorted(
+        [path for path in export_root.iterdir() if path.is_dir() and path.name.startswith(run_prefix)],
+        key=lambda path: path.name,
+    )
+    if not run_candidates:
+        return None
+    latest_run = run_candidates[-1]
+    artifact_root = Path(local_artifact_root)
+    if artifact_root.exists():
+        shutil.rmtree(artifact_root)
+    shutil.copytree(latest_run, artifact_root)
+    if runtime_experiment_config is not None:
+        runtime_target = Path(runtime_experiment_config)
+        exported_runtime_config = artifact_root / "colab_runtime_experiment.yaml"
+        if exported_runtime_config.exists():
+            runtime_target.write_text(exported_runtime_config.read_text(encoding="utf-8"), encoding="utf-8")
+    return latest_run
 
 
 @dataclass
