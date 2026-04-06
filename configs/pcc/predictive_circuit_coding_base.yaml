@@ -9,10 +9,10 @@ splits:
   test: test
 
 dataset_selection:
-  output_name: familiar_g_concept_check
+  output_name: familiar_g_retry_1
   experience_levels: [Familiar]
   image_sets: [G]
-  session_types: [EPHYS_1_images_G_5uL_reward]
+  session_types: []
   session_ids: []
   subject_ids: []
   exclude_session_ids: []
@@ -36,6 +36,7 @@ dataset_selection:
   valid_fraction: 0.2
   discovery_fraction: 0.15
   test_fraction: 0.15
+
 
 data_runtime:
   bin_width_ms: 20.0
