@@ -8,10 +8,14 @@ import yaml
 from predictive_circuit_coding.utils import (
     NotebookCommandStreamFormatter,
     NotebookDatasetConfig,
+    output_indicates_missing_positive_labels,
     prepare_notebook_runtime_context,
     resolve_notebook_checkpoint,
     restore_latest_exported_artifacts,
+    run_streaming_command,
 )
+import pytest
+import subprocess
 
 
 def test_notebook_command_stream_formatter_compacts_wrapped_step_logs() -> None:
@@ -82,6 +86,10 @@ def test_prepare_notebook_runtime_context_writes_notebook_only_subset_config(tmp
     assert runtime_payload["artifacts"]["summary_path"] == str((tmp_path / "artifacts" / "training_summary.json").resolve())
     assert runtime_payload["dataset_selection"]["split_primary_axis"] == "session"
     assert runtime_payload["dataset_selection"]["output_name"] == "familiar_2_session_subset"
+    assert runtime_payload["discovery"]["sampling_strategy"] == "label_balanced"
+    assert runtime_payload["discovery"]["min_positive_windows"] == 4
+    assert runtime_payload["discovery"]["negative_to_positive_ratio"] == 1.0
+    assert runtime_payload["discovery"]["search_max_batches"] == 64
 
     session_ids_file = tmp_path / "artifacts" / "familiar_2_session_ids.txt"
     assert session_ids_file.read_text(encoding="utf-8").splitlines() == ["101", "102"]
@@ -138,3 +146,25 @@ def test_restore_latest_exported_artifacts_restores_latest_train_run(tmp_path: P
     assert restored == new_run
     assert (local_artifact_root / "checkpoints" / "pcc_best.pt").read_text(encoding="utf-8") == new_run.name
     assert runtime_experiment_config.read_text(encoding="utf-8").startswith("dataset_id:")
+
+
+def test_run_streaming_command_captures_output_on_failure(tmp_path: Path) -> None:
+    with pytest.raises(subprocess.CalledProcessError) as excinfo:
+        run_streaming_command(
+            [
+                "python",
+                "-c",
+                "print(\"Cannot fit additive probe because no positive 'stimulus_change' labels were found in the sampled windows.\"); raise SystemExit(1)",
+            ],
+            cwd=tmp_path,
+            step_log_every=16,
+        )
+
+    assert "no positive 'stimulus_change' labels" in (excinfo.value.output or "")
+
+
+def test_output_indicates_missing_positive_labels_is_target_label_agnostic() -> None:
+    assert output_indicates_missing_positive_labels(
+        "Cannot fit additive probe because no positive 'behavioral_choice.hit' labels were found in the sampled windows."
+    )
+    assert not output_indicates_missing_positive_labels("Some unrelated subprocess error")

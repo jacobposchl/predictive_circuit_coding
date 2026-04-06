@@ -33,12 +33,13 @@ def fit_additive_probe(
     labels: torch.Tensor,
     epochs: int,
     learning_rate: float,
+    label_name: str = "label",
 ) -> ProbeFitResult:
     if tokens.numel() == 0 or token_mask.numel() == 0 or labels.numel() == 0:
         raise ValueError("Cannot fit additive probe because no frozen-token batches were collected.")
     if float(labels.sum().item()) <= 0.0:
         raise ValueError(
-            "Cannot fit additive probe because no positive 'stimulus_change' labels were found in the sampled windows."
+            f"Cannot fit additive probe because no positive '{label_name}' labels were found in the sampled windows."
         )
     model = AdditiveTokenProbe(tokens.shape[-1])
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)

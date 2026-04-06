@@ -73,6 +73,7 @@ def validate_discovery_artifact(
         labels=discovery_collection.labels,
         epochs=experiment_config.discovery.probe_epochs,
         learning_rate=experiment_config.discovery.probe_learning_rate,
+        label_name=experiment_config.discovery.target_label,
     )
     rng = random.Random(experiment_config.discovery.shuffle_seed)
     shuffled_labels = discovery_collection.labels.clone()
@@ -85,6 +86,7 @@ def validate_discovery_artifact(
         labels=shuffled_labels,
         epochs=experiment_config.discovery.probe_epochs,
         learning_rate=experiment_config.discovery.probe_learning_rate,
+        label_name=experiment_config.discovery.target_label,
     )
 
     test_collection = extract_frozen_tokens(

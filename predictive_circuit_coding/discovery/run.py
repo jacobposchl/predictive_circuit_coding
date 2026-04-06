@@ -32,6 +32,7 @@ def discover_motifs(
         labels=collection.labels,
         epochs=experiment_config.discovery.probe_epochs,
         learning_rate=experiment_config.discovery.probe_learning_rate,
+        label_name=experiment_config.discovery.target_label,
     )
     scored_records = score_token_records(
         records=collection.records,
@@ -44,8 +45,9 @@ def discover_motifs(
     )
     if not candidates:
         raise ValueError(
-            "No candidate tokens were selected from the discovery split. Lower the candidate threshold, "
-            "increase discovery coverage, or confirm that positive 'stimulus_change' labels exist in the sampled windows."
+            f"No candidate tokens were selected from the discovery split for target label "
+            f"'{experiment_config.discovery.target_label}'. Lower the candidate threshold, "
+            "increase discovery coverage, or confirm that positive target-label windows exist in the sampled windows."
         )
     clustered_candidates, cluster_stats = cluster_candidate_tokens(
         candidates=candidates,

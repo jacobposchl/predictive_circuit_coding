@@ -153,6 +153,12 @@ def prepare_notebook_runtime_context(
 
     payload = yaml.safe_load(base_path.read_text(encoding="utf-8"))
     payload.setdefault("training", {})["log_every_steps"] = int(step_log_every)
+    discovery = payload.setdefault("discovery", {})
+    discovery["sampling_strategy"] = "label_balanced"
+    discovery["min_positive_windows"] = int(discovery.get("min_positive_windows", 4) or 4)
+    discovery["negative_to_positive_ratio"] = float(discovery.get("negative_to_positive_ratio", 1.0) or 1.0)
+    default_search_batches = max(int(discovery.get("max_batches", 16) or 16), 64)
+    discovery["search_max_batches"] = int(discovery.get("search_max_batches", default_search_batches) or default_search_batches)
     artifacts = payload.setdefault("artifacts", {})
     artifacts["checkpoint_dir"] = str(checkpoint_dir.resolve())
     artifacts["summary_path"] = str(summary_path.resolve())
@@ -259,6 +265,7 @@ def prepare_notebook_runtime_context(
 
 _STEP_LOG_PATTERN = re.compile(r"epoch=(?P<epoch>\d+) step=(?P<step>\d+):(?P<metrics>.*)")
 _METRIC_CONTINUATION_PATTERN = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*=")
+_NO_POSITIVE_LABELS_PATTERN = re.compile(r"no positive '.*?' labels")
 
 
 def _extract_metric(metrics_blob: str, metric_name: str) -> str:
@@ -331,6 +338,7 @@ def run_streaming_command(
     env = dict(os.environ)
     env["PYTHONUNBUFFERED"] = "1"
     formatter = NotebookCommandStreamFormatter(step_log_every=step_log_every)
+    captured_output: list[str] = []
     process = subprocess.Popen(
         command,
         cwd=str(cwd) if cwd else None,
@@ -343,13 +351,19 @@ def run_streaming_command(
     assert process.stdout is not None
     for line in process.stdout:
         for output_line in formatter.feed(line):
+            captured_output.append(output_line)
             output_stream.write(output_line)
     for output_line in formatter.finalize():
+        captured_output.append(output_line)
         output_stream.write(output_line)
     return_code = process.wait()
     if return_code != 0:
-        raise subprocess.CalledProcessError(return_code, command)
+        raise subprocess.CalledProcessError(return_code, command, output="".join(captured_output))
     return return_code
+
+
+def output_indicates_missing_positive_labels(output: str) -> bool:
+    return bool(_NO_POSITIVE_LABELS_PATTERN.search(output.lower()))
 
 
 def resolve_notebook_checkpoint(

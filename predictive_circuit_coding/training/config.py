@@ -167,6 +167,10 @@ class EvaluationConfig:
 class DiscoveryConfig:
     target_label: str = "stimulus_change"
     max_batches: int = 6
+    sampling_strategy: str = "sequential"
+    min_positive_windows: int = 1
+    negative_to_positive_ratio: float = 1.0
+    search_max_batches: int | None = None
     probe_epochs: int = 25
     probe_learning_rate: float = 1.0e-2
     top_k_candidates: int = 32
@@ -376,6 +380,14 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         discovery=DiscoveryConfig(
             target_label=str(discovery_raw.get("target_label", "stimulus_change")),
             max_batches=int(discovery_raw.get("max_batches", 6)),
+            sampling_strategy=str(discovery_raw.get("sampling_strategy", "sequential")),
+            min_positive_windows=int(discovery_raw.get("min_positive_windows", 1)),
+            negative_to_positive_ratio=float(discovery_raw.get("negative_to_positive_ratio", 1.0)),
+            search_max_batches=(
+                int(discovery_raw["search_max_batches"])
+                if discovery_raw.get("search_max_batches") is not None
+                else None
+            ),
             probe_epochs=int(discovery_raw.get("probe_epochs", 25)),
             probe_learning_rate=float(discovery_raw.get("probe_learning_rate", 1.0e-2)),
             top_k_candidates=int(discovery_raw.get("top_k_candidates", 32)),
@@ -479,10 +491,18 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("execution.device must be one of 'cpu', 'cuda', or 'auto'")
     if config.evaluation.max_batches < 1:
         raise ValueError("evaluation.max_batches must be >= 1")
-    if config.discovery.target_label != "stimulus_change":
-        raise ValueError("discovery.target_label currently must be 'stimulus_change'")
+    if not config.discovery.target_label.strip():
+        raise ValueError("discovery.target_label must not be empty")
     if config.discovery.max_batches < 1:
         raise ValueError("discovery.max_batches must be >= 1")
+    if config.discovery.sampling_strategy not in {"sequential", "label_balanced"}:
+        raise ValueError("discovery.sampling_strategy must be 'sequential' or 'label_balanced'")
+    if config.discovery.min_positive_windows < 1:
+        raise ValueError("discovery.min_positive_windows must be >= 1")
+    if config.discovery.negative_to_positive_ratio < 0.0:
+        raise ValueError("discovery.negative_to_positive_ratio must be >= 0")
+    if config.discovery.search_max_batches is not None and config.discovery.search_max_batches < 1:
+        raise ValueError("discovery.search_max_batches must be >= 1 when provided")
     if config.discovery.probe_epochs < 1:
         raise ValueError("discovery.probe_epochs must be >= 1")
     if config.discovery.top_k_candidates < 1:
