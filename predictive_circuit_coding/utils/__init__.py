@@ -5,8 +5,14 @@ from predictive_circuit_coding.utils.dependencies import (
     ensure_optional_dependency,
 )
 from predictive_circuit_coding.utils.notebook import (
+    NotebookDatasetConfig,
+    NotebookRuntimeContext,
+    NotebookCommandStreamFormatter,
     NotebookStageReporter,
     format_duration,
+    prepare_notebook_runtime_context,
+    resolve_notebook_checkpoint,
+    run_streaming_command,
     verify_paths_exist,
 )
 
@@ -16,7 +22,13 @@ __all__ = [
     "ensure_optional_dependency",
     "build_dependency_table",
     "get_console",
+    "NotebookDatasetConfig",
+    "NotebookRuntimeContext",
+    "NotebookCommandStreamFormatter",
     "NotebookStageReporter",
     "format_duration",
+    "prepare_notebook_runtime_context",
+    "resolve_notebook_checkpoint",
+    "run_streaming_command",
     "verify_paths_exist",
 ]
