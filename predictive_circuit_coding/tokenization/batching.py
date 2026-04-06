@@ -21,6 +21,20 @@ def _normalize_string(value: Any) -> str:
     return str(value)
 
 
+def _normalize_annotation_scalar(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        value = value.item()
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, float) and np.isnan(value):
+        return None
+    if isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
 def _safe_attr(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default) if obj is not None else default
 
@@ -28,19 +42,11 @@ def _safe_attr(obj: Any, name: str, default: Any = None) -> Any:
 def _extract_interval_annotations(sample, config: DataRuntimeConfig, *, window_start_s: float, window_end_s: float) -> dict[str, Any]:
     annotations: dict[str, Any] = {}
     field_specs = (
-        (
-            "trials",
-            config.include_trials,
-            ("go", "hit", "miss", "false_alarm", "correct_reject", "change_frame", "is_change"),
-        ),
-        (
-            "stimulus_presentations",
-            config.include_stimulus_presentations,
-            ("stimulus_name", "image_name", "is_change", "active", "rewarded"),
-        ),
-        ("optotagging", config.include_optotagging, ("condition", "level", "duration")),
+        ("trials", config.include_trials),
+        ("stimulus_presentations", config.include_stimulus_presentations),
+        ("optotagging", config.include_optotagging),
     )
-    for field_name, enabled, extra_fields in field_specs:
+    for field_name, enabled in field_specs:
         if not enabled:
             continue
         interval = getattr(sample, field_name, None)
@@ -57,12 +63,18 @@ def _extract_interval_annotations(sample, config: DataRuntimeConfig, *, window_s
             "start_s": tuple((starts_np[mask] - window_start_s).tolist()),
             "end_s": tuple((ends_np[mask] - window_start_s).tolist()),
         }
-        for extra in extra_fields:
+        interval_keys = list(interval.keys()) if hasattr(interval, "keys") else []
+        for extra in interval_keys:
+            if extra in {"start", "end"}:
+                continue
             values = _safe_attr(interval, extra)
             if values is None:
                 continue
             selected = np.asarray(values, dtype=object)[mask].tolist()
-            payload[extra] = tuple(_normalize_string(value) for value in selected)
+            if extra == "timestamps":
+                payload["timestamps_s"] = tuple(float(value) - window_start_s for value in selected)
+                continue
+            payload[extra] = tuple(_normalize_annotation_scalar(value) for value in selected)
         annotations[field_name] = payload
     return annotations
 

@@ -42,6 +42,14 @@ def _build_window_sample(*, session_id: str, subject_id: str, window_start_s: fl
             go=np.asarray([True], dtype=bool),
             hit=np.asarray([True], dtype=bool),
             is_change=np.asarray([True], dtype=bool),
+            catch=np.asarray([False], dtype=bool),
+            miss=np.asarray([False], dtype=bool),
+            false_alarm=np.asarray([False], dtype=bool),
+            correct_reject=np.asarray([False], dtype=bool),
+            aborted=np.asarray([False], dtype=bool),
+            auto_rewarded=np.asarray([False], dtype=bool),
+            response_time=np.asarray([0.25], dtype=np.float64),
+            change_frame=np.asarray([12], dtype=np.int32),
         ),
         stimulus_presentations=Interval(
             start=np.asarray([window_start_s + 0.0], dtype=np.float64),
@@ -49,6 +57,48 @@ def _build_window_sample(*, session_id: str, subject_id: str, window_start_s: fl
             stimulus_name=np.asarray(["images"], dtype=object),
             image_name=np.asarray(["im1"], dtype=object),
             is_change=np.asarray([False], dtype=bool),
+            active=np.asarray([True], dtype=bool),
+            rewarded=np.asarray([False], dtype=bool),
+            omitted=np.asarray([False], dtype=bool),
+            flashes_since_change=np.asarray([3], dtype=np.int32),
+        ),
+        optotagging=Interval(
+            start=np.asarray([window_start_s + 0.75], dtype=np.float64),
+            end=np.asarray([window_start_s + 0.76], dtype=np.float64),
+            condition=np.asarray(["pulse"], dtype=object),
+            level=np.asarray([0.8], dtype=np.float64),
+            duration=np.asarray([0.01], dtype=np.float64),
+            stimulus_name=np.asarray(["opto"], dtype=object),
+        ),
+        domain=domain,
+    )
+
+
+def _build_real_allen_named_window_sample(*, session_id: str, subject_id: str, window_start_s: float):
+    from temporaldata import ArrayDict, Data, Interval, IrregularTimeSeries
+
+    domain = Interval(
+        start=np.asarray([window_start_s], dtype=np.float64),
+        end=np.asarray([window_start_s + 10.0], dtype=np.float64),
+    )
+    return Data(
+        brainset=Data(id="allen_visual_behavior_neuropixels"),
+        session=Data(id=session_id),
+        subject=Data(id=subject_id),
+        units=ArrayDict(
+            id=np.asarray(["u0", "u1"], dtype=object),
+            structure_acronym=np.asarray(["VISp", "LP"], dtype=object),
+            probe_vertical_position=np.asarray([100.0, 200.0], dtype=np.float32),
+        ),
+        spikes=IrregularTimeSeries(
+            timestamps=np.asarray([window_start_s + 0.1, window_start_s + 0.3], dtype=np.float64),
+            unit_index=np.asarray([0, 1], dtype=np.int64),
+            domain=domain,
+        ),
+        trials=Interval(
+            start=np.asarray([window_start_s + 0.5], dtype=np.float64),
+            end=np.asarray([window_start_s + 1.0], dtype=np.float64),
+            go=np.asarray([True], dtype=bool),
         ),
         domain=domain,
     )
@@ -109,4 +159,36 @@ def test_population_window_collator_bins_counts_and_preserves_provenance():
     assert batch.provenance.patch_end_s[0, 0].item() == 6.0
     assert "trials" in batch.provenance.event_annotations[0]
     assert "stimulus_presentations" in batch.provenance.event_annotations[0]
-    assert batch.provenance.event_annotations[0]["trials"]["is_change"] == ("True",)
+    assert batch.provenance.event_annotations[0]["trials"]["is_change"] == (True,)
+    assert batch.provenance.event_annotations[0]["trials"]["change_frame"] == (12,)
+    assert batch.provenance.event_annotations[0]["trials"]["response_time"] == (0.25,)
+    assert batch.provenance.event_annotations[0]["stimulus_presentations"]["active"] == (True,)
+    assert batch.provenance.event_annotations[0]["stimulus_presentations"]["flashes_since_change"] == (3,)
+    assert batch.provenance.event_annotations[0]["optotagging"]["condition"] == ("pulse",)
+    assert batch.provenance.event_annotations[0]["optotagging"]["level"] == (0.8,)
+
+
+def test_population_window_collator_supports_real_allen_unit_field_names():
+    config = DataRuntimeConfig(
+        bin_width_ms=20.0,
+        context_bins=500,
+        patch_bins=50,
+        min_unit_spikes=0,
+        max_units=None,
+        padding_strategy="mask",
+        include_trials=True,
+        include_stimulus_presentations=True,
+        include_optotagging=True,
+    )
+    collator = build_population_window_collator(config)
+    batch = collator([
+        _build_real_allen_named_window_sample(
+            session_id="session_real_names",
+            subject_id="mouse_real_names",
+            window_start_s=0.0,
+        )
+    ])
+
+    assert batch.provenance.unit_ids[0] == ("u0", "u1")
+    assert batch.provenance.unit_regions[0] == ("VISp", "LP")
+    assert torch.equal(batch.provenance.unit_depth_um[0], torch.tensor([100.0, 200.0], dtype=torch.float32))
