@@ -19,7 +19,7 @@ def iter_sampler_batches(
     sampler,
     collator,
     batch_size: int,
-    max_batches: int,
+    max_batches: int | None,
 ) -> Iterator:
     pending = []
     yielded = 0
@@ -29,7 +29,7 @@ def iter_sampler_batches(
             yield collator(pending)
             yielded += 1
             pending = []
-            if yielded >= max_batches:
+            if max_batches is not None and yielded >= max_batches:
                 return
-    if pending and yielded < max_batches:
+    if pending and (max_batches is None or yielded < max_batches):
         yield collator(pending)

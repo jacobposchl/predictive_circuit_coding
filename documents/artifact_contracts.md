@@ -150,6 +150,21 @@ Required CSV columns:
 - `representative_unit_id`
 - `representative_patch_index`
 
+## Discovery Decode Coverage Summary JSON
+
+`pcc-discover` also emits a decode-coverage summary JSON next to the main discovery artifact.
+
+Required keys:
+
+- `split_name`
+- `target_label`
+- `total_scanned_windows`
+- `positive_window_count`
+- `negative_window_count`
+- `selected_positive_count`
+- `selected_negative_count`
+- `sessions_with_positive_windows`
+
 ## Validation Summary JSON
 
 Required keys:
@@ -193,3 +208,7 @@ Required keys:
 - `dataset_id`
 - `inputs`
 - `outputs`
+
+For `pcc-discover`, `outputs` must also include:
+
+- `decode_coverage_summary_path`

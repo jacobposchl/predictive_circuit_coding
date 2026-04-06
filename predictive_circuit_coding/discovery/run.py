@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from predictive_circuit_coding.decoding import extract_frozen_tokens, fit_additive_probe, score_token_records
@@ -7,17 +8,39 @@ from predictive_circuit_coding.discovery.candidates import select_candidate_toke
 from predictive_circuit_coding.discovery.clustering import cluster_candidate_tokens
 from predictive_circuit_coding.discovery.stability import estimate_clustering_stability
 from predictive_circuit_coding.training.config import ExperimentConfig
-from predictive_circuit_coding.training.contracts import DecoderSummary, DiscoveryArtifact, write_json_payload
+from predictive_circuit_coding.training.contracts import (
+    DecoderSummary,
+    DiscoveryArtifact,
+    DiscoveryCoverageSummary,
+    write_json_payload,
+)
 
 
-def discover_motifs(
+@dataclass(frozen=True)
+class DiscoveryRunResult:
+    artifact: DiscoveryArtifact
+    coverage_summary: DiscoveryCoverageSummary
+
+
+def _ensure_binary_label_coverage(summary: DiscoveryCoverageSummary) -> None:
+    if summary.positive_window_count > 0 and summary.negative_window_count > 0:
+        return
+    raise ValueError(
+        "Cannot build discovery probe inputs because the requested split does not provide both classes for the "
+        f"target label '{summary.target_label}'. Split='{summary.split_name}', scanned_windows="
+        f"{summary.total_scanned_windows}, positive_windows={summary.positive_window_count}, "
+        f"negative_windows={summary.negative_window_count}, positive_sessions={list(summary.sessions_with_positive_windows)}."
+    )
+
+
+def prepare_discovery_collection(
     *,
     experiment_config: ExperimentConfig,
     data_config_path: str | Path,
     checkpoint_path: str | Path,
     split_name: str,
     dataset_view=None,
-) -> DiscoveryArtifact:
+):
     collection = extract_frozen_tokens(
         experiment_config=experiment_config,
         data_config_path=data_config_path,
@@ -26,6 +49,17 @@ def discover_motifs(
         max_batches=experiment_config.discovery.max_batches,
         dataset_view=dataset_view,
     )
+    return collection
+
+
+def discover_motifs_from_collection(
+    *,
+    experiment_config: ExperimentConfig,
+    checkpoint_path: str | Path,
+    split_name: str,
+    collection,
+) -> DiscoveryRunResult:
+    _ensure_binary_label_coverage(collection.coverage_summary)
     probe_fit = fit_additive_probe(
         tokens=collection.tokens,
         token_mask=collection.token_mask,
@@ -66,7 +100,7 @@ def discover_motifs(
         rounds=experiment_config.discovery.stability_rounds,
         seed=experiment_config.discovery.shuffle_seed,
     )
-    return DiscoveryArtifact(
+    artifact = DiscoveryArtifact(
         dataset_id=experiment_config.dataset_id,
         split_name=split_name,
         checkpoint_path=str(checkpoint_path),
@@ -81,7 +115,38 @@ def discover_motifs(
         cluster_stats=cluster_stats,
         stability_summary=stability_summary,
     )
+    return DiscoveryRunResult(
+        artifact=artifact,
+        coverage_summary=collection.coverage_summary,
+    )
+
+
+def discover_motifs(
+    *,
+    experiment_config: ExperimentConfig,
+    data_config_path: str | Path,
+    checkpoint_path: str | Path,
+    split_name: str,
+    dataset_view=None,
+) -> DiscoveryRunResult:
+    collection = prepare_discovery_collection(
+        experiment_config=experiment_config,
+        data_config_path=data_config_path,
+        checkpoint_path=checkpoint_path,
+        split_name=split_name,
+        dataset_view=dataset_view,
+    )
+    return discover_motifs_from_collection(
+        experiment_config=experiment_config,
+        checkpoint_path=checkpoint_path,
+        split_name=split_name,
+        collection=collection,
+    )
 
 
 def write_discovery_artifact(artifact: DiscoveryArtifact, path: str | Path) -> Path:
     return write_json_payload(artifact.to_dict(), path)
+
+
+def write_discovery_coverage_summary(summary: DiscoveryCoverageSummary, path: str | Path) -> Path:
+    return write_json_payload(summary.to_dict(), path)

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 from pathlib import Path
+import random
 
 import torch
 
@@ -10,7 +10,7 @@ from predictive_circuit_coding.data import resolve_runtime_dataset_view
 from predictive_circuit_coding.decoding.labels import extract_binary_labels
 from predictive_circuit_coding.training.artifacts import load_training_checkpoint
 from predictive_circuit_coding.training.config import ExperimentConfig
-from predictive_circuit_coding.training.contracts import FrozenTokenRecord
+from predictive_circuit_coding.training.contracts import DiscoveryCoverageSummary, FrozenTokenRecord
 from predictive_circuit_coding.training.factories import build_model_from_config, build_tokenizer_from_config
 from predictive_circuit_coding.training.runtime import iter_sampler_batches, resolve_device
 from predictive_circuit_coding.windowing import (
@@ -26,22 +26,91 @@ class FrozenTokenCollection:
     token_mask: torch.Tensor
     labels: torch.Tensor
     records: tuple[FrozenTokenRecord, ...]
+    coverage_summary: DiscoveryCoverageSummary
+
+
+def _session_stratified_subsample(
+    *,
+    indices: torch.Tensor,
+    session_ids: tuple[str, ...],
+    target_count: int,
+    seed: int,
+) -> torch.Tensor:
+    if target_count >= len(indices):
+        return indices
+    grouped_indices: dict[str, list[int]] = {}
+    for index in indices.tolist():
+        grouped_indices.setdefault(session_ids[index], []).append(int(index))
+    ordered_sessions = sorted(grouped_indices)
+    rng = random.Random(seed)
+    for session_id in ordered_sessions:
+        rng.shuffle(grouped_indices[session_id])
+    selected: list[int] = []
+    while len(selected) < target_count:
+        made_progress = False
+        for session_id in ordered_sessions:
+            session_pool = grouped_indices[session_id]
+            if not session_pool:
+                continue
+            selected.append(session_pool.pop())
+            made_progress = True
+            if len(selected) >= target_count:
+                break
+        if not made_progress:
+            break
+    selected.sort()
+    return torch.tensor(selected, dtype=torch.long)
 
 
 def _select_label_balanced_indices(
     *,
     labels: torch.Tensor,
-    negative_to_positive_ratio: float,
-) -> torch.Tensor:
+    session_ids: tuple[str, ...],
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     positive_indices = torch.nonzero(labels > 0.0, as_tuple=False).flatten()
-    if len(positive_indices) == 0:
-        return positive_indices
     negative_indices = torch.nonzero(labels <= 0.0, as_tuple=False).flatten()
-    negative_budget = int(math.ceil(len(positive_indices) * max(negative_to_positive_ratio, 0.0)))
-    if negative_budget > 0:
-        negative_indices = negative_indices[:negative_budget]
-        return torch.cat((positive_indices, negative_indices), dim=0)
-    return positive_indices
+    if len(positive_indices) == 0 or len(negative_indices) == 0:
+        return torch.empty(0, dtype=torch.long), positive_indices, negative_indices
+    target_count = min(len(positive_indices), len(negative_indices))
+    selected_positive = _session_stratified_subsample(
+        indices=positive_indices,
+        session_ids=session_ids,
+        target_count=target_count,
+        seed=seed,
+    )
+    selected_negative = _session_stratified_subsample(
+        indices=negative_indices,
+        session_ids=session_ids,
+        target_count=target_count,
+        seed=seed + 1,
+    )
+    selected_indices = torch.cat((selected_positive, selected_negative), dim=0).sort().values
+    return selected_indices, selected_positive, selected_negative
+
+
+def _build_coverage_summary(
+    *,
+    split_name: str,
+    target_label: str,
+    labels: torch.Tensor,
+    session_ids: tuple[str, ...],
+    selected_indices: torch.Tensor | None = None,
+) -> DiscoveryCoverageSummary:
+    positive_indices = torch.nonzero(labels > 0.0, as_tuple=False).flatten()
+    negative_indices = torch.nonzero(labels <= 0.0, as_tuple=False).flatten()
+    selected_labels = labels if selected_indices is None else labels[selected_indices]
+    sessions_with_positive_windows = tuple(sorted({session_ids[index] for index in positive_indices.tolist()}))
+    return DiscoveryCoverageSummary(
+        split_name=split_name,
+        target_label=target_label,
+        total_scanned_windows=int(labels.numel()),
+        positive_window_count=int(len(positive_indices)),
+        negative_window_count=int(len(negative_indices)),
+        selected_positive_count=int((selected_labels > 0.0).sum().item()),
+        selected_negative_count=int((selected_labels <= 0.0).sum().item()),
+        sessions_with_positive_windows=sessions_with_positive_windows,
+    )
 
 
 def extract_frozen_tokens(
@@ -86,11 +155,10 @@ def extract_frozen_tokens(
     mask_chunks: list[torch.Tensor] = []
     label_chunks: list[torch.Tensor] = []
     sample_record_groups: list[tuple[FrozenTokenRecord, ...]] = []
-    positive_window_count = 0
-    search_max_batches = (
-        experiment_config.discovery.search_max_batches
+    sample_session_ids: list[str] = []
+    sampler_max_batches = (
+        None
         if experiment_config.discovery.sampling_strategy == "label_balanced"
-        and experiment_config.discovery.search_max_batches is not None
         else (max_batches or experiment_config.discovery.max_batches)
     )
 
@@ -100,7 +168,7 @@ def extract_frozen_tokens(
             sampler=sampler,
             collator=tokenizer,
             batch_size=experiment_config.optimization.batch_size,
-            max_batches=search_max_batches,
+            max_batches=sampler_max_batches,
         ):
             labels = extract_binary_labels(batch, target_label=experiment_config.discovery.target_label)
             device_batch = batch.to(device)
@@ -108,13 +176,13 @@ def extract_frozen_tokens(
             tokens = output.tokens.detach().cpu()
             mask = output.patch_mask.detach().cpu()
             batch_labels = labels.detach().cpu()
-            positive_window_count += int((batch_labels > 0.0).sum().item())
 
             flat_tokens = tokens.reshape(tokens.shape[0], -1, tokens.shape[-1])
             flat_mask = mask.reshape(mask.shape[0], -1)
             token_chunks.append(flat_tokens)
             mask_chunks.append(flat_mask)
             label_chunks.append(batch_labels)
+            sample_session_ids.extend(str(session_id) for session_id in batch.provenance.session_ids)
 
             for batch_index in range(tokens.shape[0]):
                 sample_records: list[FrozenTokenRecord] = []
@@ -141,11 +209,6 @@ def extract_frozen_tokens(
                             )
                         )
                 sample_record_groups.append(tuple(sample_records))
-            if (
-                experiment_config.discovery.sampling_strategy == "label_balanced"
-                and positive_window_count >= experiment_config.discovery.min_positive_windows
-            ):
-                break
     if hasattr(bundle.dataset, "_close_open_files"):
         bundle.dataset._close_open_files()
     if not token_chunks or not sample_record_groups:
@@ -156,16 +219,22 @@ def extract_frozen_tokens(
     labels = torch.cat(label_chunks, dim=0)
     tokens = torch.cat(token_chunks, dim=0)
     token_mask = torch.cat(mask_chunks, dim=0)
+    session_ids = tuple(sample_session_ids)
+    if len(session_ids) != int(labels.shape[0]):
+        raise ValueError("Internal error: sampled session provenance does not align with collected discovery labels.")
     if experiment_config.discovery.sampling_strategy == "label_balanced":
-        selected_indices = _select_label_balanced_indices(
+        selected_indices, _, _ = _select_label_balanced_indices(
             labels=labels,
-            negative_to_positive_ratio=experiment_config.discovery.negative_to_positive_ratio,
+            session_ids=session_ids,
+            seed=experiment_config.seed,
         )
-        if len(selected_indices) == 0:
-            raise ValueError(
-                f"Cannot collect discovery windows because no positive '{experiment_config.discovery.target_label}' "
-                "labels were found in the sampled windows."
-            )
+        coverage_summary = _build_coverage_summary(
+            split_name=split_name,
+            target_label=experiment_config.discovery.target_label,
+            labels=labels,
+            session_ids=session_ids,
+            selected_indices=selected_indices,
+        )
         tokens = tokens[selected_indices]
         token_mask = token_mask[selected_indices]
         labels = labels[selected_indices]
@@ -174,10 +243,17 @@ def extract_frozen_tokens(
             selected_records.extend(sample_record_groups[index])
         records = tuple(selected_records)
     else:
+        coverage_summary = _build_coverage_summary(
+            split_name=split_name,
+            target_label=experiment_config.discovery.target_label,
+            labels=labels,
+            session_ids=session_ids,
+        )
         records = tuple(record for group in sample_record_groups for record in group)
     return FrozenTokenCollection(
         tokens=tokens,
         token_mask=token_mask,
         labels=labels,
         records=records,
+        coverage_summary=coverage_summary,
     )

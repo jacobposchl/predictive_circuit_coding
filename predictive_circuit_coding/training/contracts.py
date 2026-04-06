@@ -197,6 +197,23 @@ class DecoderSummary:
 
 
 @dataclass(frozen=True)
+class DiscoveryCoverageSummary:
+    split_name: str
+    target_label: str
+    total_scanned_windows: int
+    positive_window_count: int
+    negative_window_count: int
+    selected_positive_count: int
+    selected_negative_count: int
+    sessions_with_positive_windows: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["sessions_with_positive_windows"] = list(self.sessions_with_positive_windows)
+        return payload
+
+
+@dataclass(frozen=True)
 class CandidateTokenRecord:
     candidate_id: str
     cluster_id: int

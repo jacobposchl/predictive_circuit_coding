@@ -356,7 +356,13 @@ Outputs:
 
 Subset experiments do not require reprocessing raw Allen sessions.
 
-The repo now treats the full processed session store as canonical and uses `dataset_selection` in `configs/pcc/predictive_circuit_coding_base.yaml` to define run-time subsets.
+The repo now treats the full processed session store as canonical. The normal Colab workflow is notebook-first:
+
+- the training notebook defines the subset with simple scalars such as `EXPERIENCE_LEVEL`, `MAX_SESSIONS`, and split fractions
+- the notebook materializes the runtime subset automatically against the canonical processed store
+- the discovery notebook reuses that saved runtime config and exact subset, then only overrides the decode target
+
+The lower-level `dataset_selection` block in `configs/pcc/predictive_circuit_coding_base.yaml` is still supported for compatibility and scripting, but it is no longer the primary notebook UX.
 
 Selection supports:
 
@@ -372,7 +378,7 @@ When a subset is active:
 - the repo writes derived `torch_brain_selected_*.yaml` files
 - Stage 5-7 commands consume those derived artifacts automatically
 
-You can materialize the subset explicitly before training:
+You can still materialize the subset explicitly before training:
 
 ```bash
 pcc-prepare-data materialize-runtime-selection --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
@@ -406,6 +412,7 @@ Outputs:
 - training summary JSON
 - training run-manifest sidecar
 - if `dataset_selection` is active, the run-manifest also records the derived selected split manifest and selected session catalog paths
+- the training notebook also saves the realized runtime experiment config inside `artifacts/` so discovery can reuse the exact subset later
 
 ### 5. Colab evaluation
 
@@ -428,6 +435,10 @@ Outputs:
 
 Purpose:
 
+- scan the requested split with the same fixed-window geometry used for discovery
+- label every scanned window for the chosen decode target
+- build a deterministic balanced positive/negative discovery set when `sampling_strategy == label_balanced`
+- write a decode-coverage summary before probe fitting
 - extract frozen tokens
 - fit the additive probe
 - score candidates
@@ -446,6 +457,7 @@ pcc-discover --config configs/pcc/predictive_circuit_coding_base.yaml --data-con
 
 Outputs:
 
+- discovery decode-coverage summary JSON
 - discovery artifact JSON
 - cluster summary JSON
 - cluster summary CSV
@@ -482,10 +494,11 @@ Responsibilities:
 - mount Drive
 - install the repo and notebook extras
 - run preflight checks
-- allow the user to keep the full processed dataset on Drive and choose subsets by editing `dataset_selection` in the experiment config
+- define the subset with simple notebook scalars such as `EXPERIENCE_LEVEL`, `MAX_SESSIONS`, and split fractions
+- materialize the runtime subset automatically
 - launch training
 - launch evaluation
-- surface stage boundaries, elapsed time, and checkpoint reminders
+- surface stage boundaries, elapsed time, checkpoint reminders, and realized split counts
 
 ### Discovery and validation notebook
 
@@ -493,10 +506,11 @@ Responsibilities:
 
 Responsibilities:
 
-- select a checkpoint
+- reuse the saved training runtime config and subset
+- select a decode target
 - run discovery
 - run validation
-- inspect cluster summaries and validation outputs directly in notebook tables
+- inspect decode coverage, cluster summaries, and validation outputs directly in notebook tables
 
 ### Notebook rules
 
@@ -518,19 +532,22 @@ The main artifact sequence is:
 3. evaluation summary  
    produced by held-out evaluation
 
-4. discovery artifact  
+4. discovery decode-coverage summary  
+   produced by discovery, records how many positive and negative windows were found and selected for the chosen decode target
+
+5. discovery artifact  
    produced by discovery, contains token-level candidates and cluster assignments
 
-5. cluster summary JSON / CSV  
+6. cluster summary JSON / CSV  
    produced by discovery, gives human-readable cluster-level summaries
 
-6. validation JSON / CSV  
+7. validation JSON / CSV  
    produced by validation, records shuffled-label and recurrence-style checks
 
-7. run-manifest sidecars  
+8. run-manifest sidecars  
    produced by all Stage 5-7 CLIs so a user can reconstruct which config, checkpoint, split, and outputs belonged to the run
 
-8. selected session catalogs and selected split manifests  
+9. selected session catalogs and selected split manifests  
    produced only when `dataset_selection` is active so subset runs remain reproducible without touching canonical `.h5` files
 
 Use [artifact_contracts.md](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/documents/artifact_contracts.md) for exact shapes and required keys.

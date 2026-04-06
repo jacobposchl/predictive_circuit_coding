@@ -102,6 +102,8 @@ def _write_experiment_config(
     *,
     resume_checkpoint: str | None = None,
     min_candidate_score: float = -100.0,
+    discovery_sampling_strategy: str = "sequential",
+    discovery_max_batches: int = 1,
 ) -> Path:
     config_dir = tmp_path / "configs" / "pcc"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -168,7 +170,8 @@ def _write_experiment_config(
                 "  sequential_step_s: 2.0",
                 "discovery:",
                 "  target_label: stimulus_change",
-                "  max_batches: 1",
+                f"  max_batches: {discovery_max_batches}",
+                f"  sampling_strategy: {discovery_sampling_strategy}",
                 "  probe_epochs: 10",
                 "  probe_learning_rate: 0.05",
                 "  top_k_candidates: 8",
@@ -198,6 +201,7 @@ def _write_session(
     subject_id: str,
     split_name: str,
     has_positive_change: bool = True,
+    positive_change_start_s: float = 1.20,
 ) -> None:
     from temporaldata import ArrayDict, Data, Interval, IrregularTimeSeries
 
@@ -230,8 +234,8 @@ def _write_session(
             hit=np.asarray([False, True], dtype=bool),
         ),
         stimulus_presentations=Interval(
-            start=np.asarray([0.20, 1.20], dtype=np.float64),
-            end=np.asarray([0.40, 1.40], dtype=np.float64),
+            start=np.asarray([0.20, positive_change_start_s], dtype=np.float64),
+            end=np.asarray([0.40, positive_change_start_s + 0.20], dtype=np.float64),
             stimulus_name=np.asarray(["images", "images"], dtype=object),
             image_name=np.asarray(["im0", "im1"], dtype=object),
             is_change=is_change,
@@ -266,6 +270,7 @@ def _build_workspace(
     *,
     discovery_has_positive: bool = True,
     include_discovery_assignment: bool = True,
+    discovery_positive_change_start_s: float = 1.20,
 ) -> tuple[Path, Path]:
     prep_config_path = _write_preparation_config(tmp_path)
     prep_config = load_preparation_config(prep_config_path)
@@ -290,6 +295,7 @@ def _build_workspace(
             subject_id=subject_id,
             split_name=split_name,
             has_positive_change=has_positive,
+            positive_change_start_s=discovery_positive_change_start_s if split_name == "discovery" else 1.20,
         )
         records.append(
             SessionRecord(
@@ -443,7 +449,11 @@ def test_evaluate_cli_fails_for_empty_split(tmp_path: Path):
 
 
 def test_discover_cli_fails_when_no_positive_labels(tmp_path: Path):
-    prep_config_path, experiment_config_path = _build_workspace(tmp_path, discovery_has_positive=False)
+    prep_config_path, _ = _build_workspace(tmp_path, discovery_has_positive=False)
+    experiment_config_path = _write_experiment_config(
+        tmp_path,
+        discovery_sampling_strategy="label_balanced",
+    )
 
     try:
         train_main(["--config", str(experiment_config_path), "--data-config", str(prep_config_path)])
@@ -451,7 +461,9 @@ def test_discover_cli_fails_when_no_positive_labels(tmp_path: Path):
         assert exc.code == 0
 
     checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best.pt"
-    with pytest.raises(ValueError, match="no positive 'stimulus_change' labels"):
+    discovery_output_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best_discovery_discovery.json"
+    coverage_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best_discovery_discovery_decode_coverage.json"
+    with pytest.raises(ValueError, match="does not provide both classes"):
         discover_main(
             [
                 "--config",
@@ -462,8 +474,62 @@ def test_discover_cli_fails_when_no_positive_labels(tmp_path: Path):
                 str(checkpoint_path),
                 "--split",
                 "discovery",
+                "--output",
+                str(discovery_output_path),
             ]
         )
+    assert coverage_path.is_file()
+    coverage_payload = json.loads(coverage_path.read_text(encoding="utf-8"))
+    assert coverage_payload["positive_window_count"] == 0
+    assert coverage_payload["negative_window_count"] > 0
+    assert not discovery_output_path.exists()
+
+
+def test_discover_cli_label_balanced_scans_full_split_and_finds_late_positive_windows(tmp_path: Path):
+    prep_config_path, _ = _build_workspace(
+        tmp_path,
+        discovery_has_positive=True,
+        discovery_positive_change_start_s=2.20,
+    )
+    experiment_config_path = _write_experiment_config(
+        tmp_path,
+        discovery_sampling_strategy="label_balanced",
+        discovery_max_batches=1,
+    )
+
+    try:
+        train_main(["--config", str(experiment_config_path), "--data-config", str(prep_config_path)])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best.pt"
+    discovery_output_path = tmp_path / "artifacts" / "checkpoints" / "late_positive_discovery.json"
+    coverage_path = tmp_path / "artifacts" / "checkpoints" / "late_positive_discovery_decode_coverage.json"
+
+    try:
+        discover_main(
+            [
+                "--config",
+                str(experiment_config_path),
+                "--data-config",
+                str(prep_config_path),
+                "--checkpoint",
+                str(checkpoint_path),
+                "--split",
+                "discovery",
+                "--output",
+                str(discovery_output_path),
+            ]
+        )
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    coverage_payload = json.loads(coverage_path.read_text(encoding="utf-8"))
+    assert coverage_payload["total_scanned_windows"] == 2
+    assert coverage_payload["positive_window_count"] == 1
+    assert coverage_payload["negative_window_count"] == 1
+    assert coverage_payload["selected_positive_count"] == 1
+    assert coverage_payload["selected_negative_count"] == 1
 
 
 def test_discover_cli_fails_when_no_candidates_are_selected(tmp_path: Path):

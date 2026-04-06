@@ -407,6 +407,9 @@ def _run_preview(output_root: Path) -> None:
     checkpoint_path = root / "artifacts" / "checkpoints" / "pcc_preview_best.pt"
     evaluation_path = root / "artifacts" / "checkpoints" / "pcc_preview_best_test_evaluation.json"
     discovery_path = root / "artifacts" / "checkpoints" / "pcc_preview_best_discovery_discovery.json"
+    decode_coverage_json_path = (
+        root / "artifacts" / "checkpoints" / "pcc_preview_best_discovery_discovery_decode_coverage.json"
+    )
     cluster_summary_json_path = (
         root / "artifacts" / "checkpoints" / "pcc_preview_best_discovery_discovery_cluster_summary.json"
     )
@@ -496,6 +499,7 @@ def _run_preview(output_root: Path) -> None:
 
     evaluation_payload = json.loads(evaluation_path.read_text(encoding="utf-8"))
     discovery_payload = json.loads(discovery_path.read_text(encoding="utf-8"))
+    decode_coverage_payload = json.loads(decode_coverage_json_path.read_text(encoding="utf-8"))
     cluster_summary_payload = json.loads(cluster_summary_json_path.read_text(encoding="utf-8"))
     validation_payload = json.loads(validation_json_path.read_text(encoding="utf-8"))
 
@@ -514,11 +518,14 @@ def _run_preview(output_root: Path) -> None:
     _print_metric_block(
         "Discovery preview",
         {
+            "scanned_windows": decode_coverage_payload.get("total_scanned_windows"),
+            "selected_positive": decode_coverage_payload.get("selected_positive_count"),
+            "selected_negative": decode_coverage_payload.get("selected_negative_count"),
             "candidate_count": len(discovery_payload.get("candidates", [])),
             "cluster_count": cluster_summary_payload.get("cluster_count"),
             "probe_accuracy": discovery_payload.get("decoder_summary", {}).get("metrics", {}).get("probe_accuracy"),
         },
-        keys=["candidate_count", "cluster_count", "probe_accuracy"],
+        keys=["scanned_windows", "selected_positive", "selected_negative", "candidate_count", "cluster_count", "probe_accuracy"],
     )
     _print_metric_block(
         "Validation preview",
@@ -545,6 +552,7 @@ def _run_preview(output_root: Path) -> None:
     console.print(f"  checkpoint: {checkpoint_path}")
     console.print(f"  evaluation_summary: {evaluation_path}")
     console.print(f"  discovery_artifact: {discovery_path}")
+    console.print(f"  decode_coverage_json: {decode_coverage_json_path}")
     console.print(f"  cluster_summary_json: {cluster_summary_json_path}")
     console.print(f"  cluster_summary_csv: {cluster_summary_csv_path}")
     console.print(f"  validation_json: {validation_json_path}")

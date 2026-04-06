@@ -155,10 +155,7 @@ def prepare_notebook_runtime_context(
     payload.setdefault("training", {})["log_every_steps"] = int(step_log_every)
     discovery = payload.setdefault("discovery", {})
     discovery["sampling_strategy"] = "label_balanced"
-    discovery["min_positive_windows"] = int(discovery.get("min_positive_windows", 4) or 4)
-    discovery["negative_to_positive_ratio"] = float(discovery.get("negative_to_positive_ratio", 1.0) or 1.0)
-    default_search_batches = max(int(discovery.get("max_batches", 16) or 16), 64)
-    discovery["search_max_batches"] = int(discovery.get("search_max_batches", default_search_batches) or default_search_batches)
+    discovery.pop("search_max_batches", None)
     artifacts = payload.setdefault("artifacts", {})
     artifacts["checkpoint_dir"] = str(checkpoint_dir.resolve())
     artifacts["summary_path"] = str(summary_path.resolve())
@@ -261,6 +258,57 @@ def prepare_notebook_runtime_context(
         selection_output_name=selection_output_name,
         exported_runtime_config_path=exported_runtime_config_path,
     )
+
+
+def build_notebook_discovery_runtime_config(
+    *,
+    source_experiment_config: str | Path,
+    runtime_experiment_config: str | Path,
+    artifact_root: str | Path,
+    decode_type: str,
+    step_log_every: int,
+) -> Path:
+    source_path = Path(source_experiment_config)
+    runtime_path = Path(runtime_experiment_config)
+    artifact_path = Path(artifact_root)
+    checkpoint_dir = artifact_path / "checkpoints"
+    summary_path = artifact_path / "training_summary.json"
+    payload = yaml.safe_load(source_path.read_text(encoding="utf-8"))
+    payload.setdefault("training", {})["log_every_steps"] = int(step_log_every)
+    discovery = payload.setdefault("discovery", {})
+    discovery["target_label"] = str(decode_type)
+    discovery["sampling_strategy"] = "label_balanced"
+    discovery.pop("search_max_batches", None)
+    artifacts = payload.setdefault("artifacts", {})
+    artifacts["checkpoint_dir"] = str(checkpoint_dir.resolve())
+    artifacts["summary_path"] = str(summary_path.resolve())
+    runtime_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    return runtime_path
+
+
+def load_notebook_split_counts(
+    *,
+    data_config_path: str | Path,
+    dataset_selection_active: bool,
+    selection_output_name: str | None = None,
+) -> dict[str, int]:
+    from predictive_circuit_coding.data import build_workspace, load_preparation_config, load_split_manifest
+
+    prep_config = load_preparation_config(data_config_path)
+    workspace = build_workspace(prep_config)
+    if dataset_selection_active:
+        if not selection_output_name:
+            raise ValueError("selection_output_name is required when dataset_selection_active is True.")
+        split_manifest_path = workspace.splits / "selections" / selection_output_name / "selected_split_manifest.json"
+    else:
+        split_manifest_path = workspace.split_manifest_path
+    if not split_manifest_path.exists():
+        raise FileNotFoundError(f"Split manifest not found: {split_manifest_path}")
+    split_manifest = load_split_manifest(split_manifest_path)
+    counts: dict[str, int] = {}
+    for assignment in split_manifest.assignments:
+        counts[assignment.split] = counts.get(assignment.split, 0) + 1
+    return counts
 
 
 _STEP_LOG_PATTERN = re.compile(r"epoch=(?P<epoch>\d+) step=(?P<step>\d+):(?P<metrics>.*)")

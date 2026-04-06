@@ -353,6 +353,7 @@ def test_stage_5_and_6_cli_workflow_runs_end_to_end(tmp_path: Path):
     checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best.pt"
     evaluation_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best_test_evaluation.json"
     discovery_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best_discovery_discovery.json"
+    discovery_coverage_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best_discovery_discovery_decode_coverage.json"
     cluster_summary_json_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best_discovery_discovery_cluster_summary.json"
     cluster_summary_csv_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best_discovery_discovery_cluster_summary.csv"
     validation_json_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best_discovery_discovery_validation.json"
@@ -423,6 +424,7 @@ def test_stage_5_and_6_cli_workflow_runs_end_to_end(tmp_path: Path):
     assert training_summary_path.is_file()
     assert evaluation_path.is_file()
     assert discovery_path.is_file()
+    assert discovery_coverage_path.is_file()
     assert cluster_summary_json_path.is_file()
     assert cluster_summary_csv_path.is_file()
     assert validation_json_path.is_file()
@@ -434,16 +436,22 @@ def test_stage_5_and_6_cli_workflow_runs_end_to_end(tmp_path: Path):
 
     evaluation_payload = json.loads(evaluation_path.read_text(encoding="utf-8"))
     discovery_payload = json.loads(discovery_path.read_text(encoding="utf-8"))
+    discovery_coverage_payload = json.loads(discovery_coverage_path.read_text(encoding="utf-8"))
     cluster_summary_payload = json.loads(cluster_summary_json_path.read_text(encoding="utf-8"))
     validation_payload = json.loads(validation_json_path.read_text(encoding="utf-8"))
     training_sidecar_payload = json.loads(training_sidecar_path.read_text(encoding="utf-8"))
     evaluation_sidecar_payload = json.loads(evaluation_sidecar_path.read_text(encoding="utf-8"))
+    discovery_sidecar_payload = json.loads(discovery_sidecar_path.read_text(encoding="utf-8"))
 
     assert evaluation_payload["split_name"] == "test"
     assert "predictive_improvement" in evaluation_payload["metrics"]
     assert discovery_payload["split_name"] == "discovery"
     assert "decoder_summary" in discovery_payload
     assert isinstance(discovery_payload["candidates"], list)
+    assert discovery_coverage_payload["split_name"] == "discovery"
+    assert discovery_coverage_payload["target_label"] == "stimulus_change"
+    assert discovery_coverage_payload["positive_window_count"] >= 1
+    assert discovery_coverage_payload["negative_window_count"] >= 1
     assert "clusters" in cluster_summary_payload
     assert cluster_summary_payload["cluster_count"] >= 1
     assert validation_payload["candidate_count"] == len(discovery_payload["candidates"])
@@ -454,6 +462,8 @@ def test_stage_5_and_6_cli_workflow_runs_end_to_end(tmp_path: Path):
     assert "outputs" in training_sidecar_payload
     assert evaluation_sidecar_payload["command_name"] == "evaluate"
     assert evaluation_sidecar_payload["outputs"]["evaluation_summary_path"] == str(evaluation_path)
+    assert discovery_sidecar_payload["command_name"] == "discover"
+    assert discovery_sidecar_payload["outputs"]["decode_coverage_summary_path"] == str(discovery_coverage_path)
 
 
 def test_train_model_writes_fallback_best_checkpoint_when_validation_metric_is_nan(tmp_path: Path, monkeypatch):

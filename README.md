@@ -35,18 +35,24 @@ Each Stage 5-7 command writes:
 
 - its main artifact
 - a JSON run-manifest sidecar that records the config paths, split names, input artifacts, and output artifacts used for that run
-- `pcc-discover` also writes companion cluster summary JSON and CSV outputs for easier inspection
+- `pcc-discover` also writes a decode-coverage summary JSON plus companion cluster summary JSON and CSV outputs for easier inspection
 
 ## Dataset Selection
 
-The canonical local dataset can contain the full processed Allen session store. Subset experiments are now handled at runtime through `dataset_selection` in [predictive_circuit_coding_base.yaml](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/configs/pcc/predictive_circuit_coding_base.yaml), not by reprocessing raw data.
+The canonical local dataset can contain the full processed Allen session store. Normal Colab runs are now notebook-first:
+
+- the training notebook defines the subset with simple scalars like `EXPERIENCE_LEVEL`, `MAX_SESSIONS`, and split fractions
+- the notebook materializes the runtime subset automatically
+- the discovery notebook reuses that exact saved subset and only asks for `DECODE_TYPE`
 
 You can:
 
 - process the full dataset once
 - rebuild the rich session catalog cheaply
-- select subsets by metadata like `experience_level`, `session_type`, `image_set`, `subject_id`, `brain_regions_any`, or explicit `session_ids_file`
+- select notebook subsets by metadata like `experience_level` and `max_sessions`
 - recompute split manifests for the selected subset without recreating `.h5` files
+
+The lower-level `dataset_selection` block in [predictive_circuit_coding_base.yaml](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/configs/pcc/predictive_circuit_coding_base.yaml) is still supported for compatibility, but it is no longer the primary notebook workflow.
 
 ## Notebooks
 
@@ -56,6 +62,10 @@ The repo ends with two Colab notebooks:
 - [discover_validate_inspect_colab.ipynb](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/notebooks/discover_validate_inspect_colab.ipynb)
 
 They are intentionally thin and call the same CLI surface listed above.
+
+- the training notebook owns subset choice and split fractions
+- the discovery notebook reuses the saved training runtime config and only overrides the decode target
+- discovery runs label-balanced decoding windows on the subset's `discovery` split and writes a decode-coverage summary before probe fitting
 
 ## Documentation
 
@@ -91,13 +101,13 @@ Training problems:
 
 - if `split_manifest.json` is missing, rerun local prep first
 - if `session_catalog.json` is missing, run `pcc-prepare-data build-session-catalog`
-- if a runtime subset should be used, edit `dataset_selection` in the experiment config and optionally run `pcc-prepare-data materialize-runtime-selection` before launching Colab
+- if a notebook subset should be used, change the subset scalars in the training notebook and rerun from the top
 - if a resume checkpoint is missing, clear `training.resume_checkpoint` or point it at a real checkpoint
 - if a checkpoint dataset mismatch is reported, use a checkpoint produced from the same dataset/config family
 
 Discovery problems:
 
-- if no positive `stimulus_change` labels are found, increase discovery coverage or adjust the sampled window coverage
+- if discovery fails because the split does not provide both classes for the chosen decode target, inspect the emitted `*_decode_coverage.json` summary and rerun training with a larger or more suitable notebook subset
 - if no candidate tokens are selected, lower `discovery.min_candidate_score` or increase `discovery.max_batches`
 - if clustering produces no motif clusters, lower `discovery.cluster_similarity_threshold` or reduce `discovery.min_cluster_size`
 

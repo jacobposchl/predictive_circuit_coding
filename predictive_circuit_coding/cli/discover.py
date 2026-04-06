@@ -14,10 +14,12 @@ from predictive_circuit_coding.cli.common import (
 )
 from predictive_circuit_coding.discovery import (
     build_discovery_cluster_report,
-    discover_motifs,
+    discover_motifs_from_collection,
+    prepare_discovery_collection,
     write_discovery_artifact,
     write_discovery_cluster_report_csv,
     write_discovery_cluster_report_json,
+    write_discovery_coverage_summary,
 )
 from predictive_circuit_coding.training import load_experiment_config
 from predictive_circuit_coding.training.logging import StageLogger
@@ -46,31 +48,59 @@ def _cluster_report_paths(discovery_output_path: str | Path) -> tuple[Path, Path
     )
 
 
+def _coverage_summary_path(discovery_output_path: str | Path) -> Path:
+    output = Path(discovery_output_path)
+    return output.with_name(f"{output.stem}_decode_coverage.json")
+
+
 def _run(args: argparse.Namespace) -> int:
     console = get_cli_console()
     config = load_experiment_config(args.config)
     dataset_view = require_runtime_view(experiment_config=config, data_config_path=args.data_config)
     logger = StageLogger(name="pcc-discover")
-    logger.log_stage("preflight", expected_next="discovery artifact")
+    logger.log_stage("preflight", expected_next="decode coverage summary + discovery artifact")
     require_non_empty_split(dataset_view=dataset_view, split_name=args.split)
     checkpoint_path = require_checkpoint_matches_dataset(
         checkpoint_path=args.checkpoint,
         dataset_id=config.dataset_id,
     )
-    logger.log_stage("discovery", expected_next="discovery artifact json")
-    artifact = discover_motifs(
+    output_path = Path(args.output) if args.output else _default_output_path(checkpoint_path, args.split)
+    coverage_summary_path = _coverage_summary_path(output_path)
+    collection = prepare_discovery_collection(
         experiment_config=config,
         data_config_path=args.data_config,
         checkpoint_path=checkpoint_path,
         split_name=args.split,
         dataset_view=dataset_view,
     )
-    output_path = Path(args.output) if args.output else _default_output_path(checkpoint_path, args.split)
+    write_discovery_coverage_summary(collection.coverage_summary, coverage_summary_path)
+    logger.log(
+        "Decode coverage: "
+        f"split={collection.coverage_summary.split_name}, "
+        f"target_label={collection.coverage_summary.target_label}, "
+        f"scanned_windows={collection.coverage_summary.total_scanned_windows}, "
+        f"positive_windows={collection.coverage_summary.positive_window_count}, "
+        f"negative_windows={collection.coverage_summary.negative_window_count}, "
+        f"selected_positive={collection.coverage_summary.selected_positive_count}, "
+        f"selected_negative={collection.coverage_summary.selected_negative_count}"
+    )
+    logger.log(
+        f"Positive-window sessions: {list(collection.coverage_summary.sessions_with_positive_windows)}"
+    )
+    logger.log_stage("discovery", expected_next="discovery artifact json")
+    result = discover_motifs_from_collection(
+        experiment_config=config,
+        checkpoint_path=checkpoint_path,
+        split_name=args.split,
+        collection=collection,
+    )
+    artifact = result.artifact
     write_discovery_artifact(artifact, output_path)
     cluster_report = build_discovery_cluster_report(artifact)
     cluster_report_json, cluster_report_csv = _cluster_report_paths(output_path)
     write_discovery_cluster_report_json(cluster_report, cluster_report_json)
     write_discovery_cluster_report_csv(cluster_report, cluster_report_csv)
+    print_artifact(console, label="Decode coverage summary", path=coverage_summary_path)
     print_artifact(console, label="Discovery artifact", path=output_path)
     print_artifact(console, label="Cluster summary JSON", path=cluster_report_json)
     print_artifact(console, label="Cluster summary CSV", path=cluster_report_csv)
@@ -88,6 +118,7 @@ def _run(args: argparse.Namespace) -> int:
             "dataset_selection_active": dataset_view.selection_active,
         },
         outputs={
+            "decode_coverage_summary_path": str(coverage_summary_path),
             "discovery_artifact_path": str(output_path),
             "cluster_summary_json": str(cluster_report_json),
             "cluster_summary_csv": str(cluster_report_csv),
