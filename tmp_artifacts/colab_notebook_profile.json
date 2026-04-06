@@ -1,0 +1,93 @@
+{
+  "runtime_experiment_config": "C:\\Users\\Jacob Poschl\\Desktop\\population-dynamics\\tmp_runtime_experiment.yaml",
+  "checkpoint_dir": "C:\\Users\\Jacob Poschl\\Desktop\\population-dynamics\\tmp_artifacts\\checkpoints",
+  "summary_path": "C:\\Users\\Jacob Poschl\\Desktop\\population-dynamics\\tmp_artifacts\\training_summary.json",
+  "checkpoint_path": "C:\\Users\\Jacob Poschl\\Desktop\\population-dynamics\\tmp_artifacts\\checkpoints\\pcc_best.pt",
+  "dataset_selection_active": true,
+  "selection_output_name": "familiar_10_session_subset",
+  "step_log_every": 16,
+  "dataset_config": {
+    "use_full_dataset": false,
+    "experience_level": "Familiar",
+    "max_sessions": 10,
+    "split_seed": 7,
+    "split_primary_axis": "session",
+    "train_fraction": 0.6,
+    "valid_fraction": 0.2,
+    "discovery_fraction": 0.1,
+    "test_fraction": 0.1
+  },
+  "selected_session_count": 10,
+  "selected_sessions_preview": [
+    {
+      "session_id": "1044385384",
+      "subject_id": "524761",
+      "experience_level": "Familiar",
+      "image_set": "G",
+      "session_type": "EPHYS_1_images_G_5uL_reward"
+    },
+    {
+      "session_id": "1047969464",
+      "subject_id": "509808",
+      "experience_level": "Familiar",
+      "image_set": "G",
+      "session_type": "EPHYS_1_images_G_3uL_reward"
+    },
+    {
+      "session_id": "1047977240",
+      "subject_id": "524925",
+      "experience_level": "Familiar",
+      "image_set": "G",
+      "session_type": "EPHYS_1_images_G_3uL_reward"
+    },
+    {
+      "session_id": "1049273528",
+      "subject_id": "521466",
+      "experience_level": "Familiar",
+      "image_set": "G",
+      "session_type": "EPHYS_1_images_G_3uL_reward"
+    },
+    {
+      "session_id": "1052342277",
+      "subject_id": "530862",
+      "experience_level": "Familiar",
+      "image_set": "G",
+      "session_type": "EPHYS_1_images_G_3uL_reward"
+    },
+    {
+      "session_id": "1053709239",
+      "subject_id": "532246",
+      "experience_level": "Familiar",
+      "image_set": "G",
+      "session_type": "EPHYS_1_images_G_3uL_reward"
+    },
+    {
+      "session_id": "1053718935",
+      "subject_id": "527749",
+      "experience_level": "Familiar",
+      "image_set": "G",
+      "session_type": "EPHYS_1_images_G_3uL_reward"
+    },
+    {
+      "session_id": "1055221968",
+      "subject_id": "533537",
+      "experience_level": "Familiar",
+      "image_set": "G",
+      "session_type": "EPHYS_1_images_G_3uL_reward"
+    },
+    {
+      "session_id": "1055240613",
+      "subject_id": "533539",
+      "experience_level": "Familiar",
+      "image_set": "G",
+      "session_type": "EPHYS_1_images_G_3uL_reward"
+    },
+    {
+      "session_id": "1062755779",
+      "subject_id": "541234",
+      "experience_level": "Familiar",
+      "image_set": "G",
+      "session_type": "EPHYS_1_images_G_3uL_reward"
+    }
+  ]
+}

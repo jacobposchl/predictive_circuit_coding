@@ -1,0 +1,103 @@
+dataset_id: allen_visual_behavior_neuropixels
+split_name: train
+seed: 7
+splits:
+  train: train
+  valid: valid
+  discovery: discovery
+  test: test
+dataset_selection:
+  output_name: familiar_10_session_subset
+  session_ids: []
+  subject_ids: []
+  exclude_session_ids: []
+  exclude_subject_ids: []
+  session_ids_file: C:\Users\Jacob Poschl\Desktop\population-dynamics\tmp_artifacts\familiar_10_session_ids.txt
+  subject_ids_file: null
+  exclude_session_ids_file: null
+  exclude_subject_ids_file: null
+  experience_levels: []
+  session_types: []
+  image_sets: []
+  session_numbers: []
+  project_codes: []
+  brain_regions_any: []
+  min_n_units: null
+  max_n_units: null
+  min_trial_count: null
+  max_trial_count: null
+  min_duration_s: null
+  max_duration_s: null
+  split_seed: 7
+  split_primary_axis: session
+  train_fraction: 0.6
+  valid_fraction: 0.2
+  discovery_fraction: 0.1
+  test_fraction: 0.1
+data_runtime:
+  bin_width_ms: 20.0
+  context_bins: 500
+  patch_bins: 50
+  min_unit_spikes: 0
+  max_units: null
+  padding_strategy: mask
+  include_trials: true
+  include_stimulus_presentations: true
+  include_optotagging: true
+model:
+  d_model: 256
+  num_heads: 8
+  temporal_layers: 2
+  spatial_layers: 2
+  dropout: 0.1
+  mlp_ratio: 4.0
+  l2_normalize_tokens: true
+  norm_eps: 1.0e-05
+objective:
+  predictive_target_type: delta
+  continuation_baseline_type: previous_patch
+  predictive_loss: mse
+  reconstruction_loss: mse
+  reconstruction_weight: 0.2
+  exclude_final_prediction_patch: true
+optimization:
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+  batch_size: 4
+  scheduler_type: cosine
+  scheduler_warmup_steps: 0
+training:
+  num_epochs: 8
+  train_steps_per_epoch: 128
+  validation_steps: 16
+  checkpoint_every_epochs: 1
+  evaluate_every_epochs: 1
+  resume_checkpoint: null
+  dataloader_workers: 0
+  train_window_seed: 11
+  log_every_steps: 16
+execution:
+  device: auto
+  mixed_precision: true
+evaluation:
+  max_batches: 16
+  sequential_step_s: null
+discovery:
+  target_label: stimulus_change
+  max_batches: 16
+  probe_epochs: 50
+  probe_learning_rate: 0.01
+  top_k_candidates: 64
+  min_candidate_score: 0.0
+  cluster_similarity_threshold: 0.9
+  min_cluster_size: 2
+  stability_rounds: 8
+  recurrence_similarity_threshold: 0.9
+  shuffle_seed: 17
+  sampling_strategy: label_balanced
+artifacts:
+  checkpoint_dir: C:\Users\Jacob Poschl\Desktop\population-dynamics\tmp_artifacts\checkpoints
+  summary_path: C:\Users\Jacob Poschl\Desktop\population-dynamics\tmp_artifacts\training_summary.json
+  checkpoint_prefix: pcc
+  save_config_snapshot: true

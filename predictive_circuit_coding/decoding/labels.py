@@ -7,8 +7,10 @@ import torch
 from predictive_circuit_coding.training.contracts import PopulationWindowBatch
 
 
-LABEL_ALIASES: dict[str, str] = {
-    "stimulus_change": "stimulus_presentations.is_change",
+LABEL_ALIASES: dict[str, tuple[str, ...]] = {
+    # Allen sampled windows can surface change labels either on stimulus presentations
+    # or on trials, depending on which interval payload survives into the sampled view.
+    "stimulus_change": ("stimulus_presentations.is_change", "trials.is_change"),
 }
 
 
@@ -23,12 +25,12 @@ def _coerce_bool(value: Any) -> bool:
     return text in {"1", "true", "yes", "y"}
 
 
-def _resolve_target_label_path(target_label: str) -> tuple[str, ...]:
-    normalized = LABEL_ALIASES.get(target_label, target_label)
-    parts = tuple(part for part in normalized.split(".") if part)
-    if not parts:
+def _resolve_target_label_paths(target_label: str) -> tuple[tuple[str, ...], ...]:
+    candidates = LABEL_ALIASES.get(target_label, (target_label,))
+    paths = tuple(tuple(part for part in candidate.split(".") if part) for candidate in candidates)
+    if not paths or any(not path for path in paths):
         raise ValueError("target_label must not be empty")
-    return parts
+    return paths
 
 
 def _lookup_nested_value(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
@@ -43,14 +45,20 @@ def _lookup_nested_value(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
 
 
 def extract_binary_labels(batch: PopulationWindowBatch, *, target_label: str) -> torch.Tensor:
-    path = _resolve_target_label_path(target_label)
+    paths = _resolve_target_label_paths(target_label)
     labels = []
     for annotation in batch.provenance.event_annotations:
-        values = _lookup_nested_value(annotation, path)
-        if isinstance(values, (tuple, list)):
-            labels.append(1.0 if any(_coerce_bool(value) for value in values) else 0.0)
-        else:
-            labels.append(1.0 if _coerce_bool(values) else 0.0)
+        label = 0.0
+        for path in paths:
+            values = _lookup_nested_value(annotation, path)
+            if isinstance(values, (tuple, list)):
+                if any(_coerce_bool(value) for value in values):
+                    label = 1.0
+                    break
+            elif _coerce_bool(values):
+                label = 1.0
+                break
+        labels.append(label)
     return torch.tensor(labels, dtype=torch.float32)
 
 

@@ -46,11 +46,15 @@ def test_extract_binary_labels_supports_alias_and_nested_paths() -> None:
                 "stimulus_presentations": {"is_change": [False, False]},
                 "behavior": {"outcome": {"hit": [0, 1]}},
             },
+            {
+                "trials": {"is_change": [False, True]},
+                "behavior": {"outcome": {"hit": [False, False]}},
+            },
         )
     )
 
     stimulus_change = extract_binary_labels(batch, target_label="stimulus_change")
     behavioral_hit = extract_binary_labels(batch, target_label="behavior.outcome.hit")
 
-    assert torch.equal(stimulus_change, torch.tensor([1.0, 0.0], dtype=torch.float32))
-    assert torch.equal(behavioral_hit, torch.tensor([0.0, 1.0], dtype=torch.float32))
+    assert torch.equal(stimulus_change, torch.tensor([1.0, 0.0, 1.0], dtype=torch.float32))
+    assert torch.equal(behavioral_hit, torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32))

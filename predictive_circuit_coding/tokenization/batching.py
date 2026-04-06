@@ -28,7 +28,11 @@ def _safe_attr(obj: Any, name: str, default: Any = None) -> Any:
 def _extract_interval_annotations(sample, config: DataRuntimeConfig, *, window_start_s: float, window_end_s: float) -> dict[str, Any]:
     annotations: dict[str, Any] = {}
     field_specs = (
-        ("trials", config.include_trials, ("go", "hit", "miss", "false_alarm", "correct_reject", "change_frame")),
+        (
+            "trials",
+            config.include_trials,
+            ("go", "hit", "miss", "false_alarm", "correct_reject", "change_frame", "is_change"),
+        ),
         (
             "stimulus_presentations",
             config.include_stimulus_presentations,

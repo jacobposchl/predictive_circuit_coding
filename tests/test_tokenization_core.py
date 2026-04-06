@@ -41,6 +41,7 @@ def _build_window_sample(*, session_id: str, subject_id: str, window_start_s: fl
             end=np.asarray([window_start_s + 1.0], dtype=np.float64),
             go=np.asarray([True], dtype=bool),
             hit=np.asarray([True], dtype=bool),
+            is_change=np.asarray([True], dtype=bool),
         ),
         stimulus_presentations=Interval(
             start=np.asarray([window_start_s + 0.0], dtype=np.float64),
@@ -108,3 +109,4 @@ def test_population_window_collator_bins_counts_and_preserves_provenance():
     assert batch.provenance.patch_end_s[0, 0].item() == 6.0
     assert "trials" in batch.provenance.event_annotations[0]
     assert "stimulus_presentations" in batch.provenance.event_annotations[0]
+    assert batch.provenance.event_annotations[0]["trials"]["is_change"] == ("True",)
