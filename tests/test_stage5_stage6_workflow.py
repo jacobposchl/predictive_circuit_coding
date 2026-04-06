@@ -23,6 +23,8 @@ from predictive_circuit_coding.data import (
     write_temporaldata_session,
 )
 from predictive_circuit_coding.decoding import fit_additive_probe
+from predictive_circuit_coding.training import load_experiment_config, train_model
+from predictive_circuit_coding.training.contracts import EvaluationSummary
 
 
 def _write_preparation_config(tmp_path: Path) -> Path:
@@ -452,3 +454,45 @@ def test_stage_5_and_6_cli_workflow_runs_end_to_end(tmp_path: Path):
     assert "outputs" in training_sidecar_payload
     assert evaluation_sidecar_payload["command_name"] == "evaluate"
     assert evaluation_sidecar_payload["outputs"]["evaluation_summary_path"] == str(evaluation_path)
+
+
+def test_train_model_writes_fallback_best_checkpoint_when_validation_metric_is_nan(tmp_path: Path, monkeypatch):
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    experiment_config = load_experiment_config(experiment_config_path)
+
+    def _nan_evaluation(**kwargs):
+        checkpoint_path = kwargs.get("checkpoint_path", "")
+        return EvaluationSummary(
+            dataset_id="allen_visual_behavior_neuropixels",
+            split_name="valid",
+            checkpoint_path=str(checkpoint_path),
+            metrics={
+                "predictive_loss": 0.0,
+                "reconstruction_loss": 0.0,
+                "predictive_raw_mse": 0.0,
+                "predictive_baseline_mse": 0.0,
+                "predictive_improvement": float("nan"),
+                "token_coverage": 1.0,
+            },
+            losses={
+                "predictive_loss": 0.0,
+                "reconstruction_loss": 0.0,
+                "total_loss": 0.0,
+            },
+            window_count=1,
+        )
+
+    monkeypatch.setattr(
+        "predictive_circuit_coding.training.loop.evaluate_checkpoint_on_split",
+        _nan_evaluation,
+    )
+
+    result = train_model(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        train_split="train",
+        valid_split="valid",
+    )
+
+    assert result.checkpoint_path.is_file()
+    assert result.checkpoint_path.name == "pcc_test_best.pt"

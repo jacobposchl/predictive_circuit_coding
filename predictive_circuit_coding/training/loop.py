@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+import math
 
 import torch
 
@@ -112,6 +113,8 @@ def train_model(
     best_metric = float("-inf")
     best_epoch = 0
     best_checkpoint_path = experiment_config.artifacts.checkpoint_dir / f"{experiment_config.artifacts.checkpoint_prefix}_best.pt"
+    latest_epoch_checkpoint_path: Path | None = None
+    latest_epoch_checkpoint: TrainingCheckpoint | None = None
 
     if experiment_config.training.resume_checkpoint is not None:
         state = load_training_checkpoint(experiment_config.training.resume_checkpoint, map_location=device)
@@ -228,7 +231,20 @@ def train_model(
             )
             epoch_path = experiment_config.artifacts.checkpoint_dir / f"{experiment_config.artifacts.checkpoint_prefix}_epoch_{epoch:03d}.pt"
             save_training_checkpoint(checkpoint, epoch_path)
+            latest_epoch_checkpoint_path = epoch_path
+            latest_epoch_checkpoint = checkpoint
             logger.log_artifact(label="epoch checkpoint", path=epoch_path)
+
+    if not best_checkpoint_path.exists() and latest_epoch_checkpoint is not None:
+        save_training_checkpoint(latest_epoch_checkpoint, best_checkpoint_path)
+        logger.log(
+            "best checkpoint metric was not set cleanly; using the latest epoch checkpoint as a fallback"
+        )
+        logger.log_artifact(label="fallback best checkpoint", path=best_checkpoint_path)
+        if best_epoch == 0:
+            best_epoch = latest_epoch_checkpoint.epoch
+        if not math.isfinite(best_metric):
+            best_metric = 0.0
 
     return TrainingRunResult(
         checkpoint_path=best_checkpoint_path,
