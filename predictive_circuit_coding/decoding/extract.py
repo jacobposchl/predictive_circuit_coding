@@ -121,6 +121,9 @@ def extract_frozen_tokens(
     split_name: str,
     max_batches: int | None = None,
     dataset_view=None,
+    include_token_tensors: bool = True,
+    include_records: bool = True,
+    positive_records_only: bool = False,
 ) -> FrozenTokenCollection:
     dataset_view = dataset_view or resolve_runtime_dataset_view(
         experiment_config=experiment_config,
@@ -173,52 +176,65 @@ def extract_frozen_tokens(
             labels = extract_binary_labels(batch, target_label=experiment_config.discovery.target_label)
             device_batch = batch.to(device)
             output = model(device_batch)
-            tokens = output.tokens.detach().cpu()
-            mask = output.patch_mask.detach().cpu()
             batch_labels = labels.detach().cpu()
+            tokens = output.tokens.detach().cpu() if (include_token_tensors or include_records) else None
+            mask = output.patch_mask.detach().cpu() if (include_token_tensors or include_records) else None
 
-            flat_tokens = tokens.reshape(tokens.shape[0], -1, tokens.shape[-1])
-            flat_mask = mask.reshape(mask.shape[0], -1)
-            token_chunks.append(flat_tokens)
-            mask_chunks.append(flat_mask)
+            if include_token_tensors:
+                assert tokens is not None
+                assert mask is not None
+                flat_tokens = tokens.reshape(tokens.shape[0], -1, tokens.shape[-1])
+                flat_mask = mask.reshape(mask.shape[0], -1)
+                token_chunks.append(flat_tokens)
+                mask_chunks.append(flat_mask)
             label_chunks.append(batch_labels)
             sample_session_ids.extend(str(session_id) for session_id in batch.provenance.session_ids)
 
-            for batch_index in range(tokens.shape[0]):
-                sample_records: list[FrozenTokenRecord] = []
-                for unit_index, unit_id in enumerate(batch.provenance.unit_ids[batch_index]):
-                    for patch_index in range(tokens.shape[2]):
-                        if not bool(batch.patch_mask[batch_index, unit_index, patch_index].item()):
-                            continue
-                        sample_records.append(
-                            FrozenTokenRecord(
-                                recording_id=batch.provenance.recording_ids[batch_index],
-                                session_id=batch.provenance.session_ids[batch_index],
-                                subject_id=batch.provenance.subject_ids[batch_index],
-                                unit_id=unit_id,
-                                unit_region=batch.provenance.unit_regions[batch_index][unit_index],
-                                unit_depth_um=float(batch.provenance.unit_depth_um[batch_index, unit_index].item()),
-                                patch_index=int(patch_index),
-                                patch_start_s=float(batch.provenance.patch_start_s[batch_index, patch_index].item()),
-                                patch_end_s=float(batch.provenance.patch_end_s[batch_index, patch_index].item()),
-                                window_start_s=float(batch.provenance.window_start_s[batch_index].item()),
-                                window_end_s=float(batch.provenance.window_end_s[batch_index].item()),
-                                label=int(batch_labels[batch_index].item()),
-                                score=0.0,
-                                embedding=tuple(float(value) for value in tokens[batch_index, unit_index, patch_index].tolist()),
+            if include_records:
+                assert tokens is not None
+                for batch_index in range(tokens.shape[0]):
+                    sample_label = int(batch_labels[batch_index].item())
+                    if positive_records_only and sample_label <= 0:
+                        sample_record_groups.append(tuple())
+                        continue
+                    sample_records: list[FrozenTokenRecord] = []
+                    for unit_index, unit_id in enumerate(batch.provenance.unit_ids[batch_index]):
+                        for patch_index in range(tokens.shape[2]):
+                            if not bool(batch.patch_mask[batch_index, unit_index, patch_index].item()):
+                                continue
+                            sample_records.append(
+                                FrozenTokenRecord(
+                                    recording_id=batch.provenance.recording_ids[batch_index],
+                                    session_id=batch.provenance.session_ids[batch_index],
+                                    subject_id=batch.provenance.subject_ids[batch_index],
+                                    unit_id=unit_id,
+                                    unit_region=batch.provenance.unit_regions[batch_index][unit_index],
+                                    unit_depth_um=float(batch.provenance.unit_depth_um[batch_index, unit_index].item()),
+                                    patch_index=int(patch_index),
+                                    patch_start_s=float(batch.provenance.patch_start_s[batch_index, patch_index].item()),
+                                    patch_end_s=float(batch.provenance.patch_end_s[batch_index, patch_index].item()),
+                                    window_start_s=float(batch.provenance.window_start_s[batch_index].item()),
+                                    window_end_s=float(batch.provenance.window_end_s[batch_index].item()),
+                                    label=sample_label,
+                                    score=0.0,
+                                    embedding=tuple(float(value) for value in tokens[batch_index, unit_index, patch_index].tolist()),
+                                )
                             )
-                        )
-                sample_record_groups.append(tuple(sample_records))
+                    sample_record_groups.append(tuple(sample_records))
     if hasattr(bundle.dataset, "_close_open_files"):
         bundle.dataset._close_open_files()
-    if not token_chunks or not sample_record_groups:
+    if not label_chunks:
         raise ValueError(
             f"No windows were sampled from split '{split_name}'. Check that the split contains prepared sessions "
             "and that the configured context window fits within the sampled recording intervals."
         )
     labels = torch.cat(label_chunks, dim=0)
-    tokens = torch.cat(token_chunks, dim=0)
-    token_mask = torch.cat(mask_chunks, dim=0)
+    if include_token_tensors:
+        tokens = torch.cat(token_chunks, dim=0)
+        token_mask = torch.cat(mask_chunks, dim=0)
+    else:
+        tokens = torch.empty((0, 0, 0), dtype=torch.float32)
+        token_mask = torch.empty((0, 0), dtype=torch.bool)
     session_ids = tuple(sample_session_ids)
     if len(session_ids) != int(labels.shape[0]):
         raise ValueError("Internal error: sampled session provenance does not align with collected discovery labels.")
@@ -235,12 +251,14 @@ def extract_frozen_tokens(
             session_ids=session_ids,
             selected_indices=selected_indices,
         )
-        tokens = tokens[selected_indices]
-        token_mask = token_mask[selected_indices]
+        if include_token_tensors:
+            tokens = tokens[selected_indices]
+            token_mask = token_mask[selected_indices]
         labels = labels[selected_indices]
         selected_records: list[FrozenTokenRecord] = []
-        for index in selected_indices.tolist():
-            selected_records.extend(sample_record_groups[index])
+        if include_records:
+            for index in selected_indices.tolist():
+                selected_records.extend(sample_record_groups[index])
         records = tuple(selected_records)
     else:
         coverage_summary = _build_coverage_summary(
@@ -249,7 +267,7 @@ def extract_frozen_tokens(
             labels=labels,
             session_ids=session_ids,
         )
-        records = tuple(record for group in sample_record_groups for record in group)
+        records = tuple(record for group in sample_record_groups for record in group) if include_records else tuple()
     return FrozenTokenCollection(
         tokens=tokens,
         token_mask=token_mask,

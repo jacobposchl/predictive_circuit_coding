@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 from pathlib import Path
 import random
@@ -59,6 +60,7 @@ def validate_discovery_artifact(
         raise ValueError(
             "Validation cannot run because the discovery artifact contains no candidate tokens."
         )
+    artifact_decoder_metrics = dict(artifact.get("decoder_summary", {}).get("metrics", {}))
     discovery_collection = extract_frozen_tokens(
         experiment_config=experiment_config,
         data_config_path=data_config_path,
@@ -66,14 +68,7 @@ def validate_discovery_artifact(
         split_name=experiment_config.splits.discovery,
         max_batches=experiment_config.discovery.max_batches,
         dataset_view=dataset_view,
-    )
-    real_fit = fit_additive_probe(
-        tokens=discovery_collection.tokens,
-        token_mask=discovery_collection.token_mask,
-        labels=discovery_collection.labels,
-        epochs=experiment_config.discovery.probe_epochs,
-        learning_rate=experiment_config.discovery.probe_learning_rate,
-        label_name=experiment_config.discovery.target_label,
+        include_records=False,
     )
     rng = random.Random(experiment_config.discovery.shuffle_seed)
     shuffled_labels = discovery_collection.labels.clone()
@@ -88,6 +83,9 @@ def validate_discovery_artifact(
         learning_rate=experiment_config.discovery.probe_learning_rate,
         label_name=experiment_config.discovery.target_label,
     )
+    del discovery_collection
+    del shuffled_labels
+    gc.collect()
 
     test_collection = extract_frozen_tokens(
         experiment_config=experiment_config,
@@ -96,6 +94,9 @@ def validate_discovery_artifact(
         split_name=experiment_config.splits.test,
         max_batches=experiment_config.evaluation.max_batches,
         dataset_view=dataset_view,
+        include_token_tensors=False,
+        include_records=True,
+        positive_records_only=True,
     )
     centroids = _candidate_centroids(artifact["candidates"])
     positive_test_records = [record for record in test_collection.records if record.label == 1]
@@ -113,7 +114,7 @@ def validate_discovery_artifact(
         dataset_id=experiment_config.dataset_id,
         checkpoint_path=str(checkpoint_path),
         discovery_artifact_path=str(discovery_artifact_path),
-        real_label_metrics=real_fit.metrics,
+        real_label_metrics=artifact_decoder_metrics,
         shuffled_label_metrics=shuffled_fit.metrics,
         baseline_sensitivity_summary={
             "evaluated_baseline_type": metadata.get("continuation_baseline_type", experiment_config.objective.continuation_baseline_type),
