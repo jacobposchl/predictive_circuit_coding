@@ -90,7 +90,7 @@ def _write_preparation_config(tmp_path: Path) -> Path:
     return config_path
 
 
-def _write_experiment_config(tmp_path: Path) -> Path:
+def _write_experiment_config(tmp_path: Path, *, discovery_sampling_strategy: str = "sequential") -> Path:
     config_dir = tmp_path / "configs" / "pcc"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "experiment.yaml"
@@ -164,6 +164,7 @@ def _write_experiment_config(tmp_path: Path) -> Path:
                 "  min_cluster_size: 1",
                 "  stability_rounds: 3",
                 "  shuffle_seed: 19",
+                f"  sampling_strategy: {discovery_sampling_strategy}",
                 "artifacts:",
                 "  checkpoint_dir: ../../artifacts/checkpoints",
                 "  summary_path: ../../artifacts/training_summary.json",
@@ -514,3 +515,67 @@ def test_train_model_writes_fallback_best_checkpoint_when_validation_metric_is_n
 
     assert result.checkpoint_path.is_file()
     assert result.checkpoint_path.name == "pcc_test_best.pt"
+
+
+def test_validation_caps_discovery_extraction_when_sampling_strategy_is_label_balanced(tmp_path: Path):
+    """Regression test: validate_discovery_artifact must respect evaluation.max_batches even when
+    the configured discovery sampling_strategy is 'label_balanced'.  Previously, label_balanced
+    silently ignored max_batches and scanned the entire split, exhausting RAM on large datasets.
+    The fix adds sampling_strategy_override='sequential' to the internal discovery extraction call."""
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    # Overwrite experiment config with label_balanced strategy.
+    experiment_config_path = _write_experiment_config(
+        tmp_path, discovery_sampling_strategy="label_balanced"
+    )
+
+    try:
+        train_main(["--config", str(experiment_config_path), "--data-config", str(prep_config_path)])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best.pt"
+    discovery_path = tmp_path / "artifacts" / "checkpoints" / "pcc_lb_discovery.json"
+    try:
+        discover_main(
+            [
+                "--config",
+                str(experiment_config_path),
+                "--data-config",
+                str(prep_config_path),
+                "--checkpoint",
+                str(checkpoint_path),
+                "--split",
+                "discovery",
+                "--output",
+                str(discovery_path),
+            ]
+        )
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    validation_json_path = tmp_path / "artifacts" / "checkpoints" / "pcc_lb_validation.json"
+    try:
+        validate_main(
+            [
+                "--config",
+                str(experiment_config_path),
+                "--data-config",
+                str(prep_config_path),
+                "--checkpoint",
+                str(checkpoint_path),
+                "--discovery-artifact",
+                str(discovery_path),
+                "--output-json",
+                str(validation_json_path),
+            ]
+        )
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    import json as _json
+
+    payload = _json.loads(validation_json_path.read_text(encoding="utf-8"))
+    assert "real_label_metrics" in payload
+    assert "shuffled_label_metrics" in payload
+    assert "held_out_test_metrics" in payload
+    assert "held_out_similarity_summary" in payload

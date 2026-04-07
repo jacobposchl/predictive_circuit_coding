@@ -540,11 +540,16 @@ def extract_frozen_tokens(
         tokens = torch.zeros((total_windows, max_seq_len, token_dim), dtype=torch.float32)
         token_mask = torch.zeros((total_windows, max_seq_len), dtype=torch.bool)
         offset = 0
-        for tok_chunk, mask_chunk in zip(token_chunks, mask_chunks):
+        for i in range(len(token_chunks)):
+            tok_chunk = token_chunks[i]
+            mask_chunk = mask_chunks[i]
             n, seq = tok_chunk.shape[0], tok_chunk.shape[1]
             tokens[offset:offset + n, :seq] = tok_chunk
             token_mask[offset:offset + n, :seq] = mask_chunk
             offset += n
+            token_chunks[i] = None  # type: ignore[assignment]
+            mask_chunks[i] = None  # type: ignore[assignment]
+            del tok_chunk, mask_chunk
         del token_chunks, mask_chunks
     else:
         tokens = torch.empty((0, 0, 0), dtype=torch.float32)

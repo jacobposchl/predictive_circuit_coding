@@ -147,6 +147,8 @@ def validate_discovery_artifact(
 
     # Cap the discovery re-extraction to evaluation.max_batches — the shuffle control is a
     # relative statistical check and does not require the full discovery pass.
+    # Override to "sequential" so max_batches is actually respected: "label_balanced" ignores
+    # max_batches and scans the entire split, which can exhaust CPU RAM on large datasets.
     discovery_collection = extract_frozen_tokens(
         experiment_config=experiment_config,
         data_config_path=data_config_path,
@@ -155,6 +157,7 @@ def validate_discovery_artifact(
         max_batches=experiment_config.evaluation.max_batches,
         dataset_view=dataset_view,
         include_records=False,
+        sampling_strategy_override="sequential",
         model=shared_model,
     )
     if artifact_probe_state is None:
