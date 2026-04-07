@@ -85,7 +85,6 @@ def discover_motifs_from_collection(
         )
     clustered_candidates, cluster_stats = cluster_candidate_tokens(
         candidates=candidates,
-        similarity_threshold=experiment_config.discovery.cluster_similarity_threshold,
         min_cluster_size=experiment_config.discovery.min_cluster_size,
     )
     if int(cluster_stats.get("cluster_count", 0)) <= 0:
@@ -93,13 +92,7 @@ def discover_motifs_from_collection(
             "Discovery selected candidate tokens but clustering produced no non-noise motif clusters. "
             "Relax the clustering threshold or reduce the minimum cluster size."
         )
-    stability_summary = estimate_clustering_stability(
-        candidates=clustered_candidates,
-        similarity_threshold=experiment_config.discovery.cluster_similarity_threshold,
-        min_cluster_size=experiment_config.discovery.min_cluster_size,
-        rounds=experiment_config.discovery.stability_rounds,
-        seed=experiment_config.discovery.shuffle_seed,
-    )
+    cluster_quality_summary = estimate_clustering_stability(cluster_stats=cluster_stats)
     artifact = DiscoveryArtifact(
         dataset_id=experiment_config.dataset_id,
         split_name=split_name,
@@ -110,10 +103,11 @@ def discover_motifs_from_collection(
             epochs=experiment_config.discovery.probe_epochs,
             learning_rate=experiment_config.discovery.probe_learning_rate,
             metrics=probe_fit.metrics,
+            probe_state=probe_fit.state_dict,
         ),
         candidates=clustered_candidates,
         cluster_stats=cluster_stats,
-        stability_summary=stability_summary,
+        cluster_quality_summary=cluster_quality_summary,
     )
     return DiscoveryRunResult(
         artifact=artifact,

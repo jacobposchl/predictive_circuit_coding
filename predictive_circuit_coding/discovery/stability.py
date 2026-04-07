@@ -1,38 +1,14 @@
 from __future__ import annotations
 
-import random
-
-from predictive_circuit_coding.discovery.clustering import cluster_candidate_tokens
-from predictive_circuit_coding.training.contracts import CandidateTokenRecord
+from typing import Any
 
 
-def estimate_clustering_stability(
-    *,
-    candidates: tuple[CandidateTokenRecord, ...],
-    similarity_threshold: float,
-    min_cluster_size: int,
-    rounds: int,
-    seed: int,
-) -> dict[str, float]:
-    if not candidates:
-        return {"mean_cluster_count": 0.0, "mean_non_noise_fraction": 0.0}
-    rng = random.Random(seed)
-    cluster_counts: list[float] = []
-    non_noise_fractions: list[float] = []
-    candidates_list = list(candidates)
-    for _ in range(rounds):
-        shuffled = candidates_list[:]
-        rng.shuffle(shuffled)
-        clustered, stats = cluster_candidate_tokens(
-            candidates=tuple(shuffled),
-            similarity_threshold=similarity_threshold,
-            min_cluster_size=min_cluster_size,
-        )
-        cluster_counts.append(stats["cluster_count"])
-        non_noise_fractions.append(
-            sum(1 for candidate in clustered if candidate.cluster_id != -1) / max(1, len(clustered))
-        )
+def estimate_clustering_stability(*, cluster_stats: dict[str, Any]) -> dict[str, Any]:
     return {
-        "mean_cluster_count": float(sum(cluster_counts) / len(cluster_counts)),
-        "mean_non_noise_fraction": float(sum(non_noise_fractions) / len(non_noise_fractions)),
+        "silhouette_score": cluster_stats.get("silhouette_score"),
+        "non_noise_fraction": cluster_stats.get("non_noise_fraction", 0.0),
+        "cluster_persistence_mean": cluster_stats.get("cluster_persistence_mean"),
+        "cluster_persistence_min": cluster_stats.get("cluster_persistence_min"),
+        "cluster_persistence_max": cluster_stats.get("cluster_persistence_max"),
+        "cluster_persistence_by_cluster": cluster_stats.get("cluster_persistence_by_cluster", {}),
     }

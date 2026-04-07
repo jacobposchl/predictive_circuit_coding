@@ -62,6 +62,7 @@ def _run(args: argparse.Namespace) -> int:
             "valid_split": valid_split,
             "runtime_split_manifest_path": str(dataset_view.split_manifest_path),
             "runtime_session_catalog_path": str(dataset_view.session_catalog_path),
+            "runtime_subset_active": config.runtime_subset is not None,
             "dataset_selection_active": dataset_view.selection_active,
             "resume_checkpoint": str(config.training.resume_checkpoint) if config.training.resume_checkpoint else None,
         },

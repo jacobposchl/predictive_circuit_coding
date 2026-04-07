@@ -26,6 +26,26 @@ class ProbeFitResult:
     metrics: dict[str, float]
 
 
+def _compute_probe_metrics(
+    *,
+    model: AdditiveTokenProbe,
+    tokens: torch.Tensor,
+    token_mask: torch.Tensor,
+    labels: torch.Tensor,
+) -> dict[str, float]:
+    with torch.no_grad():
+        sample_logits, _ = model(tokens, token_mask)
+        probabilities = torch.sigmoid(sample_logits)
+        predictions = (probabilities >= 0.5).to(dtype=labels.dtype)
+        accuracy = float((predictions == labels).to(dtype=torch.float32).mean().item())
+        loss = float(F.binary_cross_entropy_with_logits(sample_logits, labels).item())
+    return {
+        "probe_accuracy": accuracy,
+        "probe_bce": loss,
+        "positive_rate": float(labels.mean().item()),
+    }
+
+
 def fit_additive_probe(
     *,
     tokens: torch.Tensor,
@@ -49,17 +69,32 @@ def fit_additive_probe(
         loss = F.binary_cross_entropy_with_logits(sample_logits, labels)
         loss.backward()
         optimizer.step()
-    with torch.no_grad():
-        sample_logits, per_token_logits = model(tokens, token_mask)
-        probabilities = torch.sigmoid(sample_logits)
-        predictions = (probabilities >= 0.5).to(dtype=labels.dtype)
-        accuracy = float((predictions == labels).to(dtype=torch.float32).mean().item())
-        loss = float(F.binary_cross_entropy_with_logits(sample_logits, labels).item())
     return ProbeFitResult(
         state_dict=model.state_dict(),
-        metrics={
-            "probe_accuracy": accuracy,
-            "probe_bce": loss,
-            "positive_rate": float(labels.mean().item()),
-        },
+        metrics=_compute_probe_metrics(
+            model=model,
+            tokens=tokens,
+            token_mask=token_mask,
+            labels=labels,
+        ),
+    )
+
+
+def evaluate_additive_probe(
+    *,
+    state_dict: dict,
+    tokens: torch.Tensor,
+    token_mask: torch.Tensor,
+    labels: torch.Tensor,
+) -> dict[str, float]:
+    if tokens.numel() == 0 or token_mask.numel() == 0 or labels.numel() == 0:
+        raise ValueError("Cannot evaluate additive probe because no frozen-token batches were collected.")
+    model = AdditiveTokenProbe(tokens.shape[-1])
+    model.load_state_dict(state_dict)
+    model.eval()
+    return _compute_probe_metrics(
+        model=model,
+        tokens=tokens,
+        token_mask=token_mask,
+        labels=labels,
     )

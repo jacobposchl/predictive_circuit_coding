@@ -13,6 +13,7 @@ _CONFIG_EXPORTS = {
     "ModelConfig",
     "ObjectiveConfig",
     "OptimizationConfig",
+    "RuntimeSubsetConfig",
     "SplitConfig",
     "TrainingRuntimeConfig",
     "load_experiment_config",

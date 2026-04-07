@@ -81,6 +81,14 @@ class SplitConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeSubsetConfig:
+    split_manifest_path: Path
+    session_catalog_path: Path
+    config_dir: Path
+    config_name_prefix: str = "torch_brain_runtime"
+
+
+@dataclass(frozen=True)
 class DatasetSelectionConfig:
     output_name: str = "runtime_selection"
     session_ids: tuple[str, ...] = ()
@@ -175,10 +183,8 @@ class DiscoveryConfig:
     probe_learning_rate: float = 1.0e-2
     top_k_candidates: int = 32
     min_candidate_score: float = 0.0
-    cluster_similarity_threshold: float = 0.9
     min_cluster_size: int = 2
     stability_rounds: int = 4
-    recurrence_similarity_threshold: float = 0.9
     shuffle_seed: int = 17
 
 
@@ -194,6 +200,7 @@ class ExperimentConfig:
     artifacts: ArtifactConfig
     splits: SplitConfig = field(default_factory=SplitConfig)
     dataset_selection: DatasetSelectionConfig = field(default_factory=DatasetSelectionConfig)
+    runtime_subset: RuntimeSubsetConfig | None = None
     training: TrainingRuntimeConfig = field(default_factory=TrainingRuntimeConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
@@ -216,6 +223,13 @@ class ExperimentConfig:
                 payload["dataset_selection"][key] = str(value)
         if self.training.resume_checkpoint is not None:
             payload["training"]["resume_checkpoint"] = str(self.training.resume_checkpoint)
+        if self.runtime_subset is not None:
+            payload["runtime_subset"] = {
+                "split_manifest_path": str(self.runtime_subset.split_manifest_path),
+                "session_catalog_path": str(self.runtime_subset.session_catalog_path),
+                "config_dir": str(self.runtime_subset.config_dir),
+                "config_name_prefix": self.runtime_subset.config_name_prefix,
+            }
         return payload
 
 
@@ -245,6 +259,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     artifacts = raw["artifacts"]
     split_raw = raw.get("splits", {})
     selection_raw = raw.get("dataset_selection", {})
+    runtime_subset_raw = raw.get("runtime_subset", {})
     training_raw = raw.get("training", {})
     execution_raw = raw.get("execution", {})
     evaluation_raw = raw.get("evaluation", {})
@@ -354,6 +369,16 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
                 float(selection_raw["test_fraction"]) if selection_raw.get("test_fraction") is not None else None
             ),
         ),
+        runtime_subset=(
+            RuntimeSubsetConfig(
+                split_manifest_path=_resolve_path(config_dir, str(runtime_subset_raw["split_manifest_path"])),
+                session_catalog_path=_resolve_path(config_dir, str(runtime_subset_raw["session_catalog_path"])),
+                config_dir=_resolve_path(config_dir, str(runtime_subset_raw["config_dir"])),
+                config_name_prefix=str(runtime_subset_raw.get("config_name_prefix", "torch_brain_runtime")),
+            )
+            if runtime_subset_raw
+            else None
+        ),
         training=TrainingRuntimeConfig(
             num_epochs=int(training_raw.get("num_epochs", 1)),
             train_steps_per_epoch=int(training_raw.get("train_steps_per_epoch", 8)),
@@ -392,10 +417,8 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
             probe_learning_rate=float(discovery_raw.get("probe_learning_rate", 1.0e-2)),
             top_k_candidates=int(discovery_raw.get("top_k_candidates", 32)),
             min_candidate_score=float(discovery_raw.get("min_candidate_score", 0.0)),
-            cluster_similarity_threshold=float(discovery_raw.get("cluster_similarity_threshold", 0.9)),
             min_cluster_size=int(discovery_raw.get("min_cluster_size", 2)),
             stability_rounds=int(discovery_raw.get("stability_rounds", 4)),
-            recurrence_similarity_threshold=float(discovery_raw.get("recurrence_similarity_threshold", 0.9)),
             shuffle_seed=int(discovery_raw.get("shuffle_seed", 17)),
         ),
         config_path=config_path,
@@ -491,6 +514,15 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("execution.device must be one of 'cpu', 'cuda', or 'auto'")
     if config.evaluation.max_batches < 1:
         raise ValueError("evaluation.max_batches must be >= 1")
+    if config.runtime_subset is not None:
+        if not config.runtime_subset.split_manifest_path.is_file():
+            raise FileNotFoundError(
+                f"runtime_subset.split_manifest_path not found: {config.runtime_subset.split_manifest_path}"
+            )
+        if not config.runtime_subset.session_catalog_path.is_file():
+            raise FileNotFoundError(
+                f"runtime_subset.session_catalog_path not found: {config.runtime_subset.session_catalog_path}"
+            )
     if not config.discovery.target_label.strip():
         raise ValueError("discovery.target_label must not be empty")
     if config.discovery.max_batches < 1:
@@ -509,7 +541,5 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("discovery.top_k_candidates must be >= 1")
     if config.discovery.min_cluster_size < 1:
         raise ValueError("discovery.min_cluster_size must be >= 1")
-    if not 0.0 <= config.discovery.cluster_similarity_threshold <= 1.0:
-        raise ValueError("discovery.cluster_similarity_threshold must be in [0, 1]")
     if config.discovery.stability_rounds < 1:
         raise ValueError("discovery.stability_rounds must be >= 1")

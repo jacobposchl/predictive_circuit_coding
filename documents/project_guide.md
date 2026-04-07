@@ -108,7 +108,7 @@ Every token and every discovered candidate must remain traceable back to:
 
 - candidate selection
 - clustering
-- stability estimation
+- cluster-quality estimation
 - cluster-level reporting
 
 `predictive_circuit_coding/evaluation/`
@@ -120,7 +120,7 @@ Every token and every discovered candidate must remain traceable back to:
 
 - downstream falsification-style checks
 - label shuffle control
-- recurrence checks
+- held-out motif-similarity discrimination
 - provenance-integrity checks
 
 `predictive_circuit_coding/utils/`
@@ -245,7 +245,6 @@ This is the experiment config.
 It controls:
 
 - runtime data parameters such as bin width and patching
-- dataset selection filters and subset split recomputation
 - model hyperparameters
 - objective settings
 - optimization settings
@@ -273,7 +272,6 @@ Preparation config answers:
 Experiment config answers:
 
 - how do we batch windows
-- which subset of the canonical processed dataset should be used for this run
 - how do we train the model
 - how do we evaluate and discover motifs
 - where do runtime artifacts go
@@ -359,30 +357,18 @@ Subset experiments do not require reprocessing raw Allen sessions.
 The repo now treats the full processed session store as canonical. The normal Colab workflow is notebook-first:
 
 - the training notebook defines the subset with simple scalars such as `EXPERIENCE_LEVEL`, `MAX_SESSIONS`, and split fractions
-- the notebook materializes the runtime subset automatically against the canonical processed store
+- the notebook writes an artifact-local runtime subset bundle under `artifacts/runtime_subset/`
 - the discovery notebook reuses that saved runtime config and exact subset, then only overrides the decode target
 
-The lower-level `dataset_selection` block in `configs/pcc/predictive_circuit_coding_base.yaml` is still supported for compatibility and scripting, but it is no longer the primary notebook UX.
+The runtime subset bundle includes:
 
-Selection supports:
+- `selected_session_catalog.json`
+- `selected_session_catalog.csv`
+- `selected_split_manifest.json`
+- split-specific `torch_brain_runtime_*.yaml` files
+- notebook profile and runtime metadata
 
-- exact inclusion via `session_ids`, `subject_ids`, and corresponding `*_file` options
-- metadata filtering via fields like `experience_levels`, `session_types`, `image_sets`, `project_codes`, `session_numbers`, and `brain_regions_any`
-- numeric filtering via `n_units`, `trial_count`, and `duration_s`
-- exclusion lists for session and subject IDs
-
-When a subset is active:
-
-- the repo writes `selected_session_catalog.json`
-- the repo recomputes a `selected_split_manifest.json`
-- the repo writes derived `torch_brain_selected_*.yaml` files
-- Stage 5-7 commands consume those derived artifacts automatically
-
-You can still materialize the subset explicitly before training:
-
-```bash
-pcc-prepare-data materialize-runtime-selection --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
-```
+Stage 5-7 commands consume those artifact-local subset assets automatically when `runtime_subset` is present in the runtime experiment config.
 
 ### 4. Colab training
 
@@ -411,7 +397,7 @@ Outputs:
 - checkpoint `.pt`
 - training summary JSON
 - training run-manifest sidecar
-- if `dataset_selection` is active, the run-manifest also records the derived selected split manifest and selected session catalog paths
+- if a notebook runtime subset is active, the run-manifest records the artifact-local split manifest and session catalog paths
 - the training notebook also saves the realized runtime experiment config inside `artifacts/` so discovery can reuse the exact subset later
 
 ### 5. Colab evaluation
@@ -442,7 +428,7 @@ Purpose:
 - extract frozen tokens
 - fit the additive probe
 - score candidates
-- cluster candidates
+- cluster candidates with HDBSCAN in normalized embedding space
 - write human-readable cluster summaries
 
 Notebook:
@@ -468,6 +454,8 @@ Outputs:
 Purpose:
 
 - run conservative downstream checks on the discovery result
+- evaluate fixed discovery-fit probe transfer on the untouched test split
+- evaluate threshold-free held-out motif-similarity discrimination on the untouched test split
 
 CLI:
 
@@ -495,7 +483,7 @@ Responsibilities:
 - install the repo and notebook extras
 - run preflight checks
 - define the subset with simple notebook scalars such as `EXPERIENCE_LEVEL`, `MAX_SESSIONS`, and split fractions
-- materialize the runtime subset automatically
+- write the artifact-local runtime subset bundle automatically
 - launch training
 - launch evaluation
 - surface stage boundaries, elapsed time, checkpoint reminders, and realized split counts
@@ -510,7 +498,7 @@ Responsibilities:
 - select a decode target
 - run discovery
 - run validation
-- inspect decode coverage, cluster summaries, and validation outputs directly in notebook tables
+- inspect decode coverage, cluster summaries, held-out probe transfer, and held-out motif-similarity outputs directly in notebook tables
 
 ### Notebook rules
 
@@ -542,13 +530,13 @@ The main artifact sequence is:
    produced by discovery, gives human-readable cluster-level summaries
 
 7. validation JSON / CSV  
-   produced by validation, records shuffled-label and recurrence-style checks
+   produced by validation, records shuffled-label controls, held-out probe transfer, and held-out motif-similarity discrimination
 
 8. run-manifest sidecars  
    produced by all Stage 5-7 CLIs so a user can reconstruct which config, checkpoint, split, and outputs belonged to the run
 
-9. selected session catalogs and selected split manifests  
-   produced only when `dataset_selection` is active so subset runs remain reproducible without touching canonical `.h5` files
+9. artifact-local runtime subset bundle  
+   produced by the training notebook so subset runs remain reproducible without touching canonical `.h5` files or canonical split directories
 
 Use [artifact_contracts.md](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/documents/artifact_contracts.md) for exact shapes and required keys.
 

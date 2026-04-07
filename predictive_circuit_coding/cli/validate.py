@@ -86,6 +86,7 @@ def _run(args: argparse.Namespace) -> int:
             "test_split": config.splits.test,
             "runtime_split_manifest_path": str(dataset_view.split_manifest_path),
             "runtime_session_catalog_path": str(dataset_view.session_catalog_path),
+            "runtime_subset_active": config.runtime_subset is not None,
             "dataset_selection_active": dataset_view.selection_active,
         },
         outputs={
@@ -96,11 +97,9 @@ def _run(args: argparse.Namespace) -> int:
     print_artifact(console, label="Run manifest", path=sidecar_path)
     console.print(f"Real probe accuracy: {summary.real_label_metrics.get('probe_accuracy', 0.0):.6f}")
     console.print(f"Shuffled probe accuracy: {summary.shuffled_label_metrics.get('probe_accuracy', 0.0):.6f}")
-    if summary.recurrence_summary.get("recurrence_hit_count", 0) == 0:
-        warn(
-            console,
-            "Validation found no held-out recurrence hits. This is not a crash condition, but it weakens the motif-stability story for this run.",
-        )
+    console.print(f"Held-out test probe accuracy: {summary.held_out_test_metrics.get('probe_accuracy', 0.0):.6f}")
+    console.print(f"Held-out similarity ROC-AUC: {summary.held_out_similarity_summary.get('window_roc_auc', 0.0):.6f}")
+    console.print(f"Held-out similarity PR-AUC: {summary.held_out_similarity_summary.get('window_pr_auc', 0.0):.6f}")
     return 0
 
 

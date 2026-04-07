@@ -33,6 +33,7 @@ def build_discovery_cluster_report(artifact: DiscoveryArtifact) -> dict[str, obj
         clusters.append(
             {
                 "cluster_id": cluster_id,
+                "cluster_persistence": artifact.cluster_quality_summary.get("cluster_persistence_by_cluster", {}).get(str(cluster_id), artifact.cluster_quality_summary.get("cluster_persistence_by_cluster", {}).get(cluster_id)),
                 "candidate_count": len(members),
                 "session_count": len(set(sessions)),
                 "subject_count": len(set(subjects)),
@@ -57,6 +58,7 @@ def build_discovery_cluster_report(artifact: DiscoveryArtifact) -> dict[str, obj
         "checkpoint_path": artifact.checkpoint_path,
         "cluster_count": len(clusters),
         "candidate_count": len(artifact.candidates),
+        "cluster_quality_summary": artifact.cluster_quality_summary,
         "clusters": clusters,
     }
 
@@ -74,6 +76,7 @@ def write_discovery_cluster_report_csv(report: dict[str, object], path: str | Pa
             fieldnames=[
                 "cluster_id",
                 "candidate_count",
+                "cluster_persistence",
                 "session_count",
                 "subject_count",
                 "mean_score",
@@ -96,6 +99,7 @@ def write_discovery_cluster_report_csv(report: dict[str, object], path: str | Pa
                 {
                     "cluster_id": cluster["cluster_id"],
                     "candidate_count": cluster["candidate_count"],
+                    "cluster_persistence": cluster["cluster_persistence"],
                     "session_count": cluster["session_count"],
                     "subject_count": cluster["subject_count"],
                     "mean_score": cluster["mean_score"],

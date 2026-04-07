@@ -19,25 +19,27 @@ Each record must retain:
 - processed-session scan fields such as `session_id`, `subject_id`, `duration_s`, `n_units`, `brain_regions`, `trial_count`, `prepared_session_path`, and `raw_data_path`
 - promoted Allen session metadata such as `session_type`, `image_set`, `experience_level`, `session_number`, and `project_code` when available
 
-## Selected Session Catalog JSON
+## Runtime Subset Bundle
 
-Location:
+Notebook-driven subset runs materialize their realized subset under the run artifact root instead of under the canonical local data tree.
 
-- `data/<dataset_id>/manifests/selections/<output_name>/selected_session_catalog.json`
+Typical location:
+
+- `artifacts/runtime_subset/`
+
+Required files:
+
+- `selected_session_catalog.json`
+- `selected_session_catalog.csv`
+- `selected_split_manifest.json`
+- `splits/torch_brain_runtime_train.yaml`
+- `splits/torch_brain_runtime_valid.yaml`
+- `splits/torch_brain_runtime_discovery.yaml`
+- `splits/torch_brain_runtime_test.yaml`
 
 Purpose:
 
-- records the exact metadata-filtered session subset used by a runtime-selected experiment
-
-## Selected Split Manifest JSON
-
-Location:
-
-- `data/<dataset_id>/splits/selections/<output_name>/selected_split_manifest.json`
-
-Purpose:
-
-- records the recomputed train/valid/discovery/test assignment for a runtime-selected subset
+- records the exact notebook-defined subset and recomputed split assignment used by the runtime experiment
 
 ## Training Checkpoint
 
@@ -106,7 +108,15 @@ Required keys:
 - `decoder_summary`
 - `candidates`
 - `cluster_stats`
-- `stability_summary`
+- `cluster_quality_summary`
+
+`decoder_summary` must include:
+
+- `target_label`
+- `epochs`
+- `learning_rate`
+- `metrics`
+- `probe_state`
 
 Each candidate token record must retain:
 
@@ -129,12 +139,14 @@ Required JSON keys:
 - `checkpoint_path`
 - `cluster_count`
 - `candidate_count`
+- `cluster_quality_summary`
 - `clusters`
 
 Required CSV columns:
 
 - `cluster_id`
 - `candidate_count`
+- `cluster_persistence`
 - `session_count`
 - `subject_count`
 - `mean_score`
@@ -174,12 +186,21 @@ Required keys:
 - `discovery_artifact_path`
 - `real_label_metrics`
 - `shuffled_label_metrics`
+- `held_out_test_metrics`
+- `held_out_similarity_summary`
 - `baseline_sensitivity_summary`
 - `candidate_count`
 - `cluster_count`
-- `stability_summary`
-- `recurrence_summary`
+- `cluster_quality_summary`
 - `provenance_issues`
+
+`held_out_similarity_summary` must include:
+
+- `window_roc_auc`
+- `window_pr_auc`
+- `positive_window_count`
+- `negative_window_count`
+- `per_session_roc_auc`
 
 ## Validation Summary CSV
 
@@ -192,14 +213,17 @@ Required columns:
 - `cluster_count`
 - `real_probe_accuracy`
 - `shuffled_probe_accuracy`
+- `held_out_test_probe_accuracy`
+- `held_out_similarity_roc_auc`
+- `held_out_similarity_pr_auc`
 - `real_probe_bce`
 - `shuffled_probe_bce`
-- `recurrence_rate`
+- `held_out_test_probe_bce`
 - `provenance_issue_count`
 
 ## Run-Manifest Sidecars
 
-Stage 7 commands also emit sidecars next to their main output artifacts.
+Stage 5-7 commands also emit sidecars next to their main output artifacts.
 
 Required keys:
 
@@ -208,6 +232,12 @@ Required keys:
 - `dataset_id`
 - `inputs`
 - `outputs`
+
+For notebook-subset runs, `inputs` should retain:
+
+- `runtime_split_manifest_path`
+- `runtime_session_catalog_path`
+- `runtime_subset_active`
 
 For `pcc-discover`, `outputs` must also include:
 

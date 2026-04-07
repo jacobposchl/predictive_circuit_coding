@@ -4,10 +4,12 @@ import gc
 import json
 from pathlib import Path
 import random
+from typing import Any
 
 import torch
+from sklearn.metrics import average_precision_score, roc_auc_score
 
-from predictive_circuit_coding.decoding import extract_frozen_tokens, fit_additive_probe
+from predictive_circuit_coding.decoding import evaluate_additive_probe, extract_frozen_tokens, fit_additive_probe
 from predictive_circuit_coding.training.artifacts import load_training_checkpoint
 from predictive_circuit_coding.training.config import ExperimentConfig
 from predictive_circuit_coding.training.contracts import ValidationSummary
@@ -16,6 +18,15 @@ from predictive_circuit_coding.training.contracts import ValidationSummary
 def _load_discovery_artifact(path: str | Path) -> dict:
     with Path(path).open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _deserialize_probe_state(raw_state: dict[str, Any] | None) -> dict[str, torch.Tensor] | None:
+    if not raw_state:
+        return None
+    return {
+        str(key): torch.tensor(value, dtype=torch.float32)
+        for key, value in raw_state.items()
+    }
 
 
 def _candidate_centroids(candidates: list[dict]) -> list[torch.Tensor]:
@@ -32,6 +43,57 @@ def _cosine_similarity(lhs: torch.Tensor, rhs: torch.Tensor) -> float:
     lhs = lhs / lhs.norm().clamp_min(1.0e-8)
     rhs = rhs / rhs.norm().clamp_min(1.0e-8)
     return float(torch.dot(lhs, rhs).item())
+
+
+def _window_similarity_scores(
+    *,
+    tokens: torch.Tensor,
+    token_mask: torch.Tensor,
+    centroids: list[torch.Tensor],
+) -> torch.Tensor:
+    if tokens.numel() == 0 or token_mask.numel() == 0:
+        return torch.empty((0,), dtype=torch.float32)
+    if not centroids:
+        return torch.zeros((tokens.shape[0],), dtype=torch.float32)
+    normalized_tokens = tokens / tokens.norm(dim=-1, keepdim=True).clamp_min(1.0e-8)
+    centroid_tensor = torch.stack(
+        [centroid / centroid.norm().clamp_min(1.0e-8) for centroid in centroids],
+        dim=0,
+    )
+    similarities = torch.einsum("wtd,cd->wtc", normalized_tokens, centroid_tensor)
+    similarities = similarities.masked_fill(~token_mask.unsqueeze(-1), float("-inf"))
+    return similarities.amax(dim=(1, 2)).to(dtype=torch.float32)
+
+
+def _held_out_similarity_summary(
+    *,
+    labels: torch.Tensor,
+    window_session_ids: tuple[str, ...],
+    window_scores: torch.Tensor,
+) -> dict[str, Any]:
+    positive_count = int((labels > 0.0).sum().item())
+    negative_count = int((labels <= 0.0).sum().item())
+    if positive_count <= 0 or negative_count <= 0:
+        raise ValueError(
+            "Held-out motif similarity validation requires both positive and negative windows on the test split. "
+            f"Found positive_windows={positive_count}, negative_windows={negative_count}."
+        )
+    labels_np = labels.detach().cpu().numpy()
+    scores_np = window_scores.detach().cpu().numpy()
+    per_session_roc_auc: dict[str, float] = {}
+    for session_id in sorted(set(window_session_ids)):
+        indices = [index for index, value in enumerate(window_session_ids) if value == session_id]
+        session_labels = labels_np[indices]
+        if len(set(int(value) for value in session_labels.tolist())) < 2:
+            continue
+        per_session_roc_auc[session_id] = float(roc_auc_score(session_labels, scores_np[indices]))
+    return {
+        "window_roc_auc": float(roc_auc_score(labels_np, scores_np)),
+        "window_pr_auc": float(average_precision_score(labels_np, scores_np)),
+        "positive_window_count": positive_count,
+        "negative_window_count": negative_count,
+        "per_session_roc_auc": per_session_roc_auc,
+    }
 
 
 def _provenance_issues(candidates: list[dict]) -> tuple[str, ...]:
@@ -61,6 +123,7 @@ def validate_discovery_artifact(
             "Validation cannot run because the discovery artifact contains no candidate tokens."
         )
     artifact_decoder_metrics = dict(artifact.get("decoder_summary", {}).get("metrics", {}))
+    artifact_probe_state = _deserialize_probe_state(artifact.get("decoder_summary", {}).get("probe_state"))
     discovery_collection = extract_frozen_tokens(
         experiment_config=experiment_config,
         data_config_path=data_config_path,
@@ -70,6 +133,16 @@ def validate_discovery_artifact(
         dataset_view=dataset_view,
         include_records=False,
     )
+    if artifact_probe_state is None:
+        real_probe_fit = fit_additive_probe(
+            tokens=discovery_collection.tokens,
+            token_mask=discovery_collection.token_mask,
+            labels=discovery_collection.labels,
+            epochs=experiment_config.discovery.probe_epochs,
+            learning_rate=experiment_config.discovery.probe_learning_rate,
+            label_name=experiment_config.discovery.target_label,
+        )
+        artifact_probe_state = real_probe_fit.state_dict
     rng = random.Random(experiment_config.discovery.shuffle_seed)
     shuffled_labels = discovery_collection.labels.clone()
     permutation = list(range(len(shuffled_labels)))
@@ -94,18 +167,28 @@ def validate_discovery_artifact(
         split_name=experiment_config.splits.test,
         max_batches=experiment_config.evaluation.max_batches,
         dataset_view=dataset_view,
-        include_token_tensors=False,
+        include_token_tensors=True,
         include_records=True,
-        positive_records_only=True,
+        positive_records_only=False,
+        sampling_strategy_override="sequential",
+    )
+    held_out_test_metrics = evaluate_additive_probe(
+        state_dict=artifact_probe_state,
+        tokens=test_collection.tokens,
+        token_mask=test_collection.token_mask,
+        labels=test_collection.labels,
     )
     centroids = _candidate_centroids(artifact["candidates"])
-    positive_test_records = [record for record in test_collection.records if record.label == 1]
-    recurrence_hits = 0
-    if centroids:
-        for record in positive_test_records:
-            embedding = torch.tensor(record.embedding, dtype=torch.float32)
-            if max((_cosine_similarity(embedding, centroid) for centroid in centroids), default=-1.0) >= experiment_config.discovery.recurrence_similarity_threshold:
-                recurrence_hits += 1
+    window_scores = _window_similarity_scores(
+        tokens=test_collection.tokens,
+        token_mask=test_collection.token_mask,
+        centroids=centroids,
+    )
+    held_out_similarity_summary = _held_out_similarity_summary(
+        labels=test_collection.labels,
+        window_session_ids=test_collection.window_session_ids,
+        window_scores=window_scores,
+    )
 
     checkpoint_state = load_training_checkpoint(checkpoint_path, map_location="cpu")
     metadata = checkpoint_state.get("metadata", {})
@@ -116,17 +199,14 @@ def validate_discovery_artifact(
         discovery_artifact_path=str(discovery_artifact_path),
         real_label_metrics=artifact_decoder_metrics,
         shuffled_label_metrics=shuffled_fit.metrics,
+        held_out_test_metrics=held_out_test_metrics,
+        held_out_similarity_summary=held_out_similarity_summary,
         baseline_sensitivity_summary={
             "evaluated_baseline_type": metadata.get("continuation_baseline_type", experiment_config.objective.continuation_baseline_type),
             "comparison_available": False,
         },
         candidate_count=len(artifact["candidates"]),
         cluster_count=cluster_count,
-        stability_summary=artifact.get("stability_summary", {}),
-        recurrence_summary={
-            "positive_test_record_count": len(positive_test_records),
-            "recurrence_hit_count": recurrence_hits,
-            "recurrence_rate": (recurrence_hits / len(positive_test_records)) if positive_test_records else 0.0,
-        },
+        cluster_quality_summary=artifact.get("cluster_quality_summary", {}),
         provenance_issues=_provenance_issues(artifact["candidates"]),
     )

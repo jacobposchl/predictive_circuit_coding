@@ -23,7 +23,6 @@ The main human-facing guide for how the repo is organized and how to run the exp
 pcc-prepare-data prepare-allen-visual-behavior-neuropixels --config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
 pcc-prepare-data process-allen-visual-behavior-neuropixels --config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
 pcc-prepare-data build-session-catalog --config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
-pcc-prepare-data materialize-runtime-selection --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
 pcc-train --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
 pcc-evaluate --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_best.pt --split valid
 pcc-discover --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_best.pt --split discovery
@@ -42,7 +41,7 @@ Each Stage 5-7 command writes:
 The canonical local dataset can contain the full processed Allen session store. Normal Colab runs are now notebook-first:
 
 - the training notebook defines the subset with simple scalars like `EXPERIENCE_LEVEL`, `MAX_SESSIONS`, and split fractions
-- the notebook materializes the runtime subset automatically
+- the notebook writes an artifact-local runtime subset bundle under `artifacts/runtime_subset/`
 - the discovery notebook reuses that exact saved subset and only asks for `DECODE_TYPE`
 
 You can:
@@ -51,8 +50,6 @@ You can:
 - rebuild the rich session catalog cheaply
 - select notebook subsets by metadata like `experience_level` and `max_sessions`
 - recompute split manifests for the selected subset without recreating `.h5` files
-
-The lower-level `dataset_selection` block in [predictive_circuit_coding_base.yaml](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/configs/pcc/predictive_circuit_coding_base.yaml) is still supported for compatibility, but it is no longer the primary notebook workflow.
 
 ## Notebooks
 
@@ -66,6 +63,7 @@ They are intentionally thin and call the same CLI surface listed above.
 - the training notebook owns subset choice and split fractions
 - the discovery notebook reuses the saved training runtime config and only overrides the decode target
 - discovery runs label-balanced decoding windows on the subset's `discovery` split and writes a decode-coverage summary before probe fitting
+- validation reports discovery probe accuracy, shuffled discovery accuracy, held-out test probe accuracy, and held-out motif-similarity ROC-AUC / PR-AUC
 
 ## Documentation
 
@@ -109,11 +107,11 @@ Discovery problems:
 
 - if discovery fails because the split does not provide both classes for the chosen decode target, inspect the emitted `*_decode_coverage.json` summary and rerun training with a larger or more suitable notebook subset
 - if no candidate tokens are selected, lower `discovery.min_candidate_score` or increase `discovery.max_batches`
-- if clustering produces no motif clusters, lower `discovery.cluster_similarity_threshold` or reduce `discovery.min_cluster_size`
+- if clustering produces no motif clusters, reduce `discovery.min_cluster_size` or expand the discovery subset
 
 Validation problems:
 
-- if no recurrence hits are found, validation still succeeds, but the held-out recurrence story is weak for that run
+- if held-out motif similarity ROC-AUC / PR-AUC are weak, the discovered centroids are not separating positive vs negative test windows well on untouched data
 - if the discovery artifact dataset does not match the checkpoint/config dataset, rerun with aligned artifacts
 
 ## Verification

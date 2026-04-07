@@ -65,6 +65,7 @@ def _run(args: argparse.Namespace) -> int:
             "split": args.split,
             "runtime_split_manifest_path": str(dataset_view.split_manifest_path),
             "runtime_session_catalog_path": str(dataset_view.session_catalog_path),
+            "runtime_subset_active": config.runtime_subset is not None,
             "dataset_selection_active": dataset_view.selection_active,
         },
         outputs={

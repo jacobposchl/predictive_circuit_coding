@@ -68,6 +68,56 @@ def test_prepare_notebook_runtime_context_writes_notebook_only_subset_config(tmp
         ),
         encoding="utf-8",
     )
+    (tmp_path / "session_catalog.json").write_text(
+        json.dumps(
+            {
+                "dataset_id": "allen_visual_behavior_neuropixels",
+                "source_name": "allen_visual_behavior_neuropixels",
+                "records": [
+                    {
+                        "recording_id": "allen_visual_behavior_neuropixels/101",
+                        "session_id": "101",
+                        "subject_id": "mouse_a",
+                        "experience_level": "Familiar",
+                        "image_set": "G",
+                        "session_type": "type_a",
+                        "raw_data_path": "raw/101.nwb",
+                        "duration_s": 10.0,
+                        "n_units": 32,
+                        "brain_regions": ["VISp"],
+                        "trial_count": 20,
+                    },
+                    {
+                        "recording_id": "allen_visual_behavior_neuropixels/102",
+                        "session_id": "102",
+                        "subject_id": "mouse_b",
+                        "experience_level": "Familiar",
+                        "image_set": "H",
+                        "session_type": "type_b",
+                        "raw_data_path": "raw/102.nwb",
+                        "duration_s": 11.0,
+                        "n_units": 28,
+                        "brain_regions": ["VISam"],
+                        "trial_count": 18,
+                    },
+                    {
+                        "recording_id": "allen_visual_behavior_neuropixels/103",
+                        "session_id": "103",
+                        "subject_id": "mouse_c",
+                        "experience_level": "Novel",
+                        "image_set": "G",
+                        "session_type": "type_c",
+                        "raw_data_path": "raw/103.nwb",
+                        "duration_s": 12.0,
+                        "n_units": 16,
+                        "brain_regions": ["CA1"],
+                        "trial_count": 15,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     context = prepare_notebook_runtime_context(
         base_experiment_config=base_config_path,
@@ -86,17 +136,19 @@ def test_prepare_notebook_runtime_context_writes_notebook_only_subset_config(tmp
     assert runtime_payload["training"]["log_every_steps"] == 16
     assert runtime_payload["artifacts"]["checkpoint_dir"] == str((tmp_path / "artifacts" / "checkpoints").resolve())
     assert runtime_payload["artifacts"]["summary_path"] == str((tmp_path / "artifacts" / "training_summary.json").resolve())
-    assert runtime_payload["dataset_selection"]["split_primary_axis"] == "session"
-    assert runtime_payload["dataset_selection"]["output_name"] == "familiar_2_session_subset"
+    assert runtime_payload["dataset_selection"] == {}
+    assert runtime_payload["runtime_subset"]["split_manifest_path"] == str(
+        (tmp_path / "artifacts" / "runtime_subset" / "selected_split_manifest.json").resolve()
+    )
+    assert runtime_payload["runtime_subset"]["session_catalog_path"] == str(
+        (tmp_path / "artifacts" / "runtime_subset" / "selected_session_catalog.json").resolve()
+    )
     assert runtime_payload["discovery"]["sampling_strategy"] == "label_balanced"
     assert "search_max_batches" not in runtime_payload["discovery"]
-    assert runtime_payload["dataset_selection"]["train_fraction"] == 0.6
-    assert runtime_payload["dataset_selection"]["valid_fraction"] == 0.2
-    assert runtime_payload["dataset_selection"]["discovery_fraction"] == 0.1
-    assert runtime_payload["dataset_selection"]["test_fraction"] == 0.1
-
-    session_ids_file = tmp_path / "artifacts" / "familiar_2_session_ids.txt"
-    assert session_ids_file.read_text(encoding="utf-8").splitlines() == ["101", "102"]
+    assert (tmp_path / "artifacts" / "runtime_subset" / "selected_session_catalog.json").is_file()
+    assert (tmp_path / "artifacts" / "runtime_subset" / "selected_session_catalog.csv").is_file()
+    assert (tmp_path / "artifacts" / "runtime_subset" / "selected_split_manifest.json").is_file()
+    assert (tmp_path / "artifacts" / "runtime_subset" / "splits" / "torch_brain_runtime_train.yaml").is_file()
     profile_payload = json.loads(context.profile_path.read_text(encoding="utf-8"))
     assert profile_payload["selected_session_count"] == 2
     assert profile_payload["selected_sessions_preview"][0]["session_id"] == "101"
@@ -160,19 +212,12 @@ def test_build_notebook_discovery_runtime_config_only_overrides_decode_settings(
                 "dataset_id: allen_visual_behavior_neuropixels",
                 "training:",
                 "  log_every_steps: 8",
-                "dataset_selection:",
-                "  output_name: familiar_10_session_subset",
-                "  session_ids: []",
-                "  subject_ids: []",
-                "  exclude_session_ids: []",
-                "  exclude_subject_ids: []",
-                "  session_ids_file: some_ids.txt",
-                "  split_seed: 7",
-                "  split_primary_axis: session",
-                "  train_fraction: 0.6",
-                "  valid_fraction: 0.2",
-                "  discovery_fraction: 0.1",
-                "  test_fraction: 0.1",
+                "dataset_selection: {}",
+                "runtime_subset:",
+                f"  split_manifest_path: {(tmp_path / 'artifacts' / 'runtime_subset' / 'selected_split_manifest.json').resolve()}",
+                f"  session_catalog_path: {(tmp_path / 'artifacts' / 'runtime_subset' / 'selected_session_catalog.json').resolve()}",
+                f"  config_dir: {(tmp_path / 'artifacts' / 'runtime_subset' / 'splits').resolve()}",
+                "  config_name_prefix: torch_brain_runtime",
                 "discovery:",
                 "  target_label: stimulus_change",
                 "  sampling_strategy: sequential",
@@ -198,77 +243,14 @@ def test_build_notebook_discovery_runtime_config_only_overrides_decode_settings(
     assert payload["discovery"]["sampling_strategy"] == "label_balanced"
     assert "search_max_batches" not in payload["discovery"]
     assert payload["training"]["log_every_steps"] == 16
-    assert payload["dataset_selection"]["output_name"] == "familiar_10_session_subset"
+    assert payload["dataset_selection"] == {}
+    assert payload["runtime_subset"]["config_name_prefix"] == "torch_brain_runtime"
     assert payload["artifacts"]["checkpoint_dir"] == str((tmp_path / "artifacts" / "checkpoints").resolve())
     assert payload["artifacts"]["summary_path"] == str((tmp_path / "artifacts" / "training_summary.json").resolve())
 
 
-def test_load_notebook_split_counts_reads_selected_split_manifest(tmp_path: Path) -> None:
-    prep_config = tmp_path / "prep.yaml"
-    workspace_root = tmp_path / "data" / "allen_visual_behavior_neuropixels"
-    prep_config.write_text(
-        "\n".join(
-            [
-                "dataset:",
-                "  dataset_id: allen_visual_behavior_neuropixels",
-                "  source_name: allen_visual_behavior_neuropixels",
-                f"  workspace_root: {workspace_root.as_posix()}",
-                "  raw_subdir: raw",
-                "  prepared_subdir: prepared",
-                "  manifests_subdir: manifests",
-                "  splits_subdir: splits",
-                "  logs_subdir: logs",
-                "  prepared_session_subdir: sessions",
-                "  session_manifest_name: session_manifest.json",
-                "  split_manifest_name: split_manifest.json",
-                "preparation:",
-                "  session_table_format: csv",
-                "  session_id_field: session_id",
-                "  subject_id_field: subject_id",
-                "  raw_path_field: raw_data_path",
-                "  duration_field: duration_s",
-                "  n_units_field: n_units",
-                "  brain_regions_field: brain_regions",
-                "  trial_count_field: trial_count",
-                '  recording_id_template: "{dataset_id}/{session_id}"',
-                "splits:",
-                "  seed: 7",
-                "  primary_axis: session",
-                "  train_fraction: 0.6",
-                "  valid_fraction: 0.2",
-                "  discovery_fraction: 0.1",
-                "  test_fraction: 0.1",
-                "runtime:",
-                "  local_cpu_only: true",
-                "  training_surface: colab_a100",
-                "brainsets_pipeline:",
-                "  local_pipeline_path:",
-                "  runner_cores: 1",
-                "  use_active_environment: true",
-                "  processed_only_upload: true",
-                "  keep_raw_cache: true",
-                "  default_session_ids_file:",
-                "  default_max_sessions:",
-                "allen_sdk:",
-                "  cache_root:",
-                "  cleanup_raw_after_processing: false",
-                "unit_filtering:",
-                "  filter_by_validity: true",
-                "  filter_out_of_brain_units: true",
-                "  amplitude_cutoff_maximum: 0.1",
-                "  presence_ratio_minimum: 0.95",
-                "  isi_violations_maximum: 0.5",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    selected_split_manifest = (
-        workspace_root
-        / "splits"
-        / "selections"
-        / "familiar_10_session_subset"
-        / "selected_split_manifest.json"
-    )
+def test_load_notebook_split_counts_reads_runtime_split_manifest(tmp_path: Path) -> None:
+    selected_split_manifest = tmp_path / "artifacts" / "runtime_subset" / "selected_split_manifest.json"
     selected_split_manifest.parent.mkdir(parents=True, exist_ok=True)
     selected_split_manifest.write_text(
         json.dumps(
@@ -288,9 +270,7 @@ def test_load_notebook_split_counts_reads_selected_split_manifest(tmp_path: Path
     )
 
     split_counts = load_notebook_split_counts(
-        data_config_path=prep_config,
-        dataset_selection_active=True,
-        selection_output_name="familiar_10_session_subset",
+        split_manifest_path=selected_split_manifest,
     )
 
     assert split_counts == {"train": 2, "valid": 1, "discovery": 1}

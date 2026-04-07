@@ -49,9 +49,12 @@ def write_validation_summary_csv(summary: ValidationSummary, path: str | Path) -
                 "cluster_count",
                 "real_probe_accuracy",
                 "shuffled_probe_accuracy",
+                "held_out_test_probe_accuracy",
+                "held_out_similarity_roc_auc",
+                "held_out_similarity_pr_auc",
                 "real_probe_bce",
                 "shuffled_probe_bce",
-                "recurrence_rate",
+                "held_out_test_probe_bce",
                 "provenance_issue_count",
             ],
         )
@@ -65,9 +68,12 @@ def write_validation_summary_csv(summary: ValidationSummary, path: str | Path) -
                 "cluster_count": summary.cluster_count,
                 "real_probe_accuracy": summary.real_label_metrics.get("probe_accuracy", 0.0),
                 "shuffled_probe_accuracy": summary.shuffled_label_metrics.get("probe_accuracy", 0.0),
+                "held_out_test_probe_accuracy": summary.held_out_test_metrics.get("probe_accuracy", 0.0),
+                "held_out_similarity_roc_auc": summary.held_out_similarity_summary.get("window_roc_auc", 0.0),
+                "held_out_similarity_pr_auc": summary.held_out_similarity_summary.get("window_pr_auc", 0.0),
                 "real_probe_bce": summary.real_label_metrics.get("probe_bce", 0.0),
                 "shuffled_probe_bce": summary.shuffled_label_metrics.get("probe_bce", 0.0),
-                "recurrence_rate": summary.recurrence_summary.get("recurrence_rate", 0.0),
+                "held_out_test_probe_bce": summary.held_out_test_metrics.get("probe_bce", 0.0),
                 "provenance_issue_count": len(summary.provenance_issues),
             }
         )

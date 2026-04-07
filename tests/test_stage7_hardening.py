@@ -176,10 +176,8 @@ def _write_experiment_config(
                 "  probe_learning_rate: 0.05",
                 "  top_k_candidates: 8",
                 f"  min_candidate_score: {min_candidate_score}",
-                "  cluster_similarity_threshold: 0.0",
                 "  min_cluster_size: 1",
                 "  stability_rounds: 2",
-                "  recurrence_similarity_threshold: 0.0",
                 "  shuffle_seed: 19",
                 "artifacts:",
                 "  checkpoint_dir: ../../artifacts/checkpoints",
@@ -398,14 +396,23 @@ def test_discovery_cluster_report_summarizes_clusters():
             ),
         ),
         cluster_stats={"cluster_count": 1.0},
-        stability_summary={"mean_cluster_count": 1.0},
+        cluster_quality_summary={
+            "silhouette_score": None,
+            "non_noise_fraction": 1.0,
+            "cluster_persistence_mean": 0.75,
+            "cluster_persistence_min": 0.75,
+            "cluster_persistence_max": 0.75,
+            "cluster_persistence_by_cluster": {0: 0.75},
+        },
     )
 
     report = build_discovery_cluster_report(artifact)
 
     assert report["cluster_count"] == 1
     assert report["candidate_count"] == 2
+    assert report["cluster_quality_summary"]["cluster_persistence_mean"] == 0.75
     assert report["clusters"][0]["cluster_id"] == 0
+    assert report["clusters"][0]["cluster_persistence"] == 0.75
     assert report["clusters"][0]["top_regions"][0]["value"] == "VISp"
     assert report["clusters"][0]["representative_candidate_id"] == "candidate_0001"
 

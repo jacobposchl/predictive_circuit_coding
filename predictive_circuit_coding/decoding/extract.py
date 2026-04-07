@@ -27,6 +27,7 @@ class FrozenTokenCollection:
     labels: torch.Tensor
     records: tuple[FrozenTokenRecord, ...]
     coverage_summary: DiscoveryCoverageSummary
+    window_session_ids: tuple[str, ...]
 
 
 def _session_stratified_subsample(
@@ -124,6 +125,7 @@ def extract_frozen_tokens(
     include_token_tensors: bool = True,
     include_records: bool = True,
     positive_records_only: bool = False,
+    sampling_strategy_override: str | None = None,
 ) -> FrozenTokenCollection:
     dataset_view = dataset_view or resolve_runtime_dataset_view(
         experiment_config=experiment_config,
@@ -159,9 +161,10 @@ def extract_frozen_tokens(
     label_chunks: list[torch.Tensor] = []
     sample_record_groups: list[tuple[FrozenTokenRecord, ...]] = []
     sample_session_ids: list[str] = []
+    sampling_strategy = sampling_strategy_override or experiment_config.discovery.sampling_strategy
     sampler_max_batches = (
         None
-        if experiment_config.discovery.sampling_strategy == "label_balanced"
+        if sampling_strategy == "label_balanced"
         else (max_batches or experiment_config.discovery.max_batches)
     )
 
@@ -238,7 +241,7 @@ def extract_frozen_tokens(
     session_ids = tuple(sample_session_ids)
     if len(session_ids) != int(labels.shape[0]):
         raise ValueError("Internal error: sampled session provenance does not align with collected discovery labels.")
-    if experiment_config.discovery.sampling_strategy == "label_balanced":
+    if sampling_strategy == "label_balanced":
         selected_indices, _, _ = _select_label_balanced_indices(
             labels=labels,
             session_ids=session_ids,
@@ -274,4 +277,5 @@ def extract_frozen_tokens(
         labels=labels,
         records=records,
         coverage_summary=coverage_summary,
+        window_session_ids=tuple(session_ids[index] for index in selected_indices.tolist()) if sampling_strategy == "label_balanced" else session_ids,
     )

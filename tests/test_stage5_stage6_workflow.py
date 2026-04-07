@@ -161,10 +161,8 @@ def _write_experiment_config(tmp_path: Path) -> Path:
                 "  probe_learning_rate: 0.05",
                 "  top_k_candidates: 8",
                 "  min_candidate_score: -100.0",
-                "  cluster_similarity_threshold: 0.0",
                 "  min_cluster_size: 1",
                 "  stability_rounds: 3",
-                "  recurrence_similarity_threshold: 0.0",
                 "  shuffle_seed: 19",
                 "artifacts:",
                 "  checkpoint_dir: ../../artifacts/checkpoints",
@@ -454,9 +452,19 @@ def test_stage_5_and_6_cli_workflow_runs_end_to_end(tmp_path: Path):
     assert discovery_coverage_payload["negative_window_count"] >= 1
     assert "clusters" in cluster_summary_payload
     assert cluster_summary_payload["cluster_count"] >= 1
+    assert "cluster_quality_summary" in cluster_summary_payload
     assert validation_payload["candidate_count"] == len(discovery_payload["candidates"])
     assert "real_label_metrics" in validation_payload
     assert "shuffled_label_metrics" in validation_payload
+    assert "held_out_test_metrics" in validation_payload
+    assert "held_out_similarity_summary" in validation_payload
+    assert "cluster_quality_summary" in validation_payload
+    assert 0.0 <= validation_payload["held_out_test_metrics"]["probe_accuracy"] <= 1.0
+    assert 0.0 <= validation_payload["held_out_similarity_summary"]["window_roc_auc"] <= 1.0
+    assert 0.0 <= validation_payload["held_out_similarity_summary"]["window_pr_auc"] <= 1.0
+    assert "recurrence_summary" not in validation_payload
+    assert "stability_summary" not in discovery_payload
+    assert "cluster_quality_summary" in discovery_payload
     assert training_sidecar_payload["command_name"] == "train"
     assert training_sidecar_payload["dataset_id"] == "allen_visual_behavior_neuropixels"
     assert "outputs" in training_sidecar_payload

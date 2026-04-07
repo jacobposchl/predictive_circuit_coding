@@ -90,10 +90,8 @@ discovery:
   probe_learning_rate: 0.01
   top_k_candidates: 64
   min_candidate_score: 0.0
-  cluster_similarity_threshold: 0.9
   min_cluster_size: 2
   stability_rounds: 8
-  recurrence_similarity_threshold: 0.9
   shuffle_seed: 17
   sampling_strategy: label_balanced
 artifacts:

@@ -1,72 +1,99 @@
 from __future__ import annotations
 
-import math
+from collections.abc import Sequence
 
-import torch
+import hdbscan
+import numpy as np
+from sklearn.metrics import silhouette_score
 
 from predictive_circuit_coding.training.contracts import CandidateTokenRecord
 
 
-def _cosine_similarity(lhs: torch.Tensor, rhs: torch.Tensor) -> float:
-    lhs = lhs / lhs.norm().clamp_min(1.0e-8)
-    rhs = rhs / rhs.norm().clamp_min(1.0e-8)
-    return float(torch.dot(lhs, rhs).item())
+def _normalized_embeddings(candidates: Sequence[CandidateTokenRecord]) -> np.ndarray:
+    embeddings = np.asarray([candidate.embedding for candidate in candidates], dtype=np.float32)
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms = np.clip(norms, a_min=1.0e-8, a_max=None)
+    return embeddings / norms
+
+
+def _persistence_by_cluster(labels: np.ndarray, clusterer: hdbscan.HDBSCAN) -> dict[int, float]:
+    valid_cluster_ids = sorted(int(cluster_id) for cluster_id in np.unique(labels) if int(cluster_id) != -1)
+    persistences = getattr(clusterer, "cluster_persistence_", None)
+    if persistences is None:
+        return {}
+    return {
+        cluster_id: float(persistences[index])
+        for index, cluster_id in enumerate(valid_cluster_ids)
+        if index < len(persistences)
+    }
 
 
 def cluster_candidate_tokens(
     *,
     candidates: tuple[CandidateTokenRecord, ...],
-    similarity_threshold: float,
     min_cluster_size: int,
-) -> tuple[tuple[CandidateTokenRecord, ...], dict[str, float]]:
-    centroids: list[torch.Tensor] = []
-    cluster_members: list[list[int]] = []
-    assigned_cluster_ids: list[int] = []
-    embeddings = [torch.tensor(candidate.embedding, dtype=torch.float32) for candidate in candidates]
+) -> tuple[tuple[CandidateTokenRecord, ...], dict[str, float | dict[int, float] | None]]:
+    if not candidates:
+        return tuple(), {
+            "cluster_count": 0.0,
+            "noise_count": 0.0,
+            "non_noise_fraction": 0.0,
+            "silhouette_score": None,
+            "cluster_persistence_mean": None,
+            "cluster_persistence_min": None,
+            "cluster_persistence_max": None,
+            "cluster_persistence_by_cluster": {},
+        }
 
-    for index, embedding in enumerate(embeddings):
-        best_cluster = -1
-        best_similarity = -math.inf
-        for cluster_id, centroid in enumerate(centroids):
-            similarity = _cosine_similarity(embedding, centroid)
-            if similarity >= similarity_threshold and similarity > best_similarity:
-                best_similarity = similarity
-                best_cluster = cluster_id
-        if best_cluster == -1:
-            centroids.append(embedding.clone())
-            cluster_members.append([index])
-            assigned_cluster_ids.append(len(centroids) - 1)
-        else:
-            cluster_members[best_cluster].append(index)
-            centroids[best_cluster] = torch.stack([embeddings[item] for item in cluster_members[best_cluster]], dim=0).mean(dim=0)
-            assigned_cluster_ids.append(best_cluster)
+    embeddings = _normalized_embeddings(candidates)
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=max(2, int(min_cluster_size)),
+        metric="euclidean",
+        algorithm="best",
+        allow_single_cluster=True,
+    )
+    labels = clusterer.fit_predict(embeddings)
+    persistence_by_cluster = _persistence_by_cluster(labels, clusterer)
 
-    valid_clusters = {cluster_id for cluster_id, members in enumerate(cluster_members) if len(members) >= min_cluster_size}
-    clustered: list[CandidateTokenRecord] = []
-    for candidate, cluster_id in zip(candidates, assigned_cluster_ids):
-        final_cluster_id = cluster_id if cluster_id in valid_clusters else -1
-        clustered.append(
-            CandidateTokenRecord(
-                candidate_id=candidate.candidate_id,
-                cluster_id=final_cluster_id,
-                recording_id=candidate.recording_id,
-                session_id=candidate.session_id,
-                subject_id=candidate.subject_id,
-                unit_id=candidate.unit_id,
-                unit_region=candidate.unit_region,
-                unit_depth_um=candidate.unit_depth_um,
-                patch_index=candidate.patch_index,
-                patch_start_s=candidate.patch_start_s,
-                patch_end_s=candidate.patch_end_s,
-                window_start_s=candidate.window_start_s,
-                window_end_s=candidate.window_end_s,
-                label=candidate.label,
-                score=candidate.score,
-                embedding=candidate.embedding,
-            )
+    clustered = tuple(
+        CandidateTokenRecord(
+            candidate_id=candidate.candidate_id,
+            cluster_id=int(cluster_id),
+            recording_id=candidate.recording_id,
+            session_id=candidate.session_id,
+            subject_id=candidate.subject_id,
+            unit_id=candidate.unit_id,
+            unit_region=candidate.unit_region,
+            unit_depth_um=candidate.unit_depth_um,
+            patch_index=candidate.patch_index,
+            patch_start_s=candidate.patch_start_s,
+            patch_end_s=candidate.patch_end_s,
+            window_start_s=candidate.window_start_s,
+            window_end_s=candidate.window_end_s,
+            label=candidate.label,
+            score=candidate.score,
+            embedding=candidate.embedding,
         )
-    cluster_count = len(valid_clusters)
-    return tuple(clustered), {
+        for candidate, cluster_id in zip(candidates, labels.tolist(), strict=True)
+    )
+
+    non_noise_mask = labels != -1
+    non_noise_labels = labels[non_noise_mask]
+    cluster_count = len({int(cluster_id) for cluster_id in non_noise_labels.tolist()})
+    non_noise_fraction = float(non_noise_mask.mean()) if len(labels) else 0.0
+    if cluster_count >= 2 and int(non_noise_mask.sum()) >= 2:
+        silhouette = float(silhouette_score(embeddings[non_noise_mask], non_noise_labels, metric="cosine"))
+    else:
+        silhouette = None
+
+    persistence_values = list(persistence_by_cluster.values())
+    return clustered, {
         "cluster_count": float(cluster_count),
-        "noise_count": float(sum(1 for candidate in clustered if candidate.cluster_id == -1)),
+        "noise_count": float(int((labels == -1).sum())),
+        "non_noise_fraction": non_noise_fraction,
+        "silhouette_score": silhouette,
+        "cluster_persistence_mean": (float(np.mean(persistence_values)) if persistence_values else None),
+        "cluster_persistence_min": (float(np.min(persistence_values)) if persistence_values else None),
+        "cluster_persistence_max": (float(np.max(persistence_values)) if persistence_values else None),
+        "cluster_persistence_by_cluster": persistence_by_cluster,
     }

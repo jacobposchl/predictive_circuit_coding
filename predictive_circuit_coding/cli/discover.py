@@ -115,6 +115,7 @@ def _run(args: argparse.Namespace) -> int:
             "split": args.split,
             "runtime_split_manifest_path": str(dataset_view.split_manifest_path),
             "runtime_session_catalog_path": str(dataset_view.session_catalog_path),
+            "runtime_subset_active": config.runtime_subset is not None,
             "dataset_selection_active": dataset_view.selection_active,
         },
         outputs={
@@ -127,6 +128,7 @@ def _run(args: argparse.Namespace) -> int:
     print_artifact(console, label="Run manifest", path=sidecar_path)
     console.print(f"Candidates: {len(artifact.candidates)}")
     console.print(f"Clusters: {artifact.cluster_stats.get('cluster_count', 0)}")
+    console.print(f"Silhouette score: {artifact.cluster_quality_summary.get('silhouette_score')}")
     return 0
 
 

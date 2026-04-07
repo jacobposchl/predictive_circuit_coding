@@ -8,6 +8,16 @@ from typing import Any
 import torch
 
 
+def _jsonify_value(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if isinstance(value, dict):
+        return {str(key): _jsonify_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonify_value(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class TokenProvenanceBatch:
     recording_ids: tuple[str, ...]
@@ -191,9 +201,12 @@ class DecoderSummary:
     epochs: int
     learning_rate: float
     metrics: dict[str, float]
+    probe_state: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["probe_state"] = _jsonify_value(self.probe_state)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -245,7 +258,7 @@ class DiscoveryArtifact:
     decoder_summary: DecoderSummary
     candidates: tuple[CandidateTokenRecord, ...]
     cluster_stats: dict[str, Any]
-    stability_summary: dict[str, Any]
+    cluster_quality_summary: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -256,7 +269,7 @@ class DiscoveryArtifact:
             "decoder_summary": self.decoder_summary.to_dict(),
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "cluster_stats": self.cluster_stats,
-            "stability_summary": self.stability_summary,
+            "cluster_quality_summary": self.cluster_quality_summary,
         }
 
 
@@ -267,11 +280,12 @@ class ValidationSummary:
     discovery_artifact_path: str
     real_label_metrics: dict[str, float]
     shuffled_label_metrics: dict[str, float]
+    held_out_test_metrics: dict[str, float]
+    held_out_similarity_summary: dict[str, Any]
     baseline_sensitivity_summary: dict[str, Any]
     candidate_count: int
     cluster_count: int
-    stability_summary: dict[str, Any]
-    recurrence_summary: dict[str, Any]
+    cluster_quality_summary: dict[str, Any]
     provenance_issues: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -281,11 +295,12 @@ class ValidationSummary:
             "discovery_artifact_path": self.discovery_artifact_path,
             "real_label_metrics": self.real_label_metrics,
             "shuffled_label_metrics": self.shuffled_label_metrics,
+            "held_out_test_metrics": self.held_out_test_metrics,
+            "held_out_similarity_summary": self.held_out_similarity_summary,
             "baseline_sensitivity_summary": self.baseline_sensitivity_summary,
             "candidate_count": self.candidate_count,
             "cluster_count": self.cluster_count,
-            "stability_summary": self.stability_summary,
-            "recurrence_summary": self.recurrence_summary,
+            "cluster_quality_summary": self.cluster_quality_summary,
             "provenance_issues": list(self.provenance_issues),
         }
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from predictive_circuit_coding.decoding.labels import extract_binary_labels
+from predictive_circuit_coding.decoding.probes import evaluate_additive_probe, fit_additive_probe
 from predictive_circuit_coding.training.contracts import PopulationWindowBatch, TokenProvenanceBatch
 
 
@@ -58,3 +59,37 @@ def test_extract_binary_labels_supports_alias_and_nested_paths() -> None:
 
     assert torch.equal(stimulus_change, torch.tensor([1.0, 0.0, 1.0], dtype=torch.float32))
     assert torch.equal(behavioral_hit, torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32))
+
+
+def test_evaluate_additive_probe_scores_held_out_tokens() -> None:
+    tokens = torch.tensor(
+        [
+            [[2.0, 0.0], [2.0, 0.0]],
+            [[1.5, 0.0], [1.5, 0.0]],
+            [[0.0, 2.0], [0.0, 2.0]],
+            [[0.0, 1.5], [0.0, 1.5]],
+        ],
+        dtype=torch.float32,
+    )
+    token_mask = torch.ones((4, 2), dtype=torch.bool)
+    labels = torch.tensor([1.0, 1.0, 0.0, 0.0], dtype=torch.float32)
+
+    torch.manual_seed(0)
+    fit = fit_additive_probe(
+        tokens=tokens,
+        token_mask=token_mask,
+        labels=labels,
+        epochs=200,
+        learning_rate=1.0e-1,
+        label_name="stimulus_change",
+    )
+
+    held_out_metrics = evaluate_additive_probe(
+        state_dict=fit.state_dict,
+        tokens=tokens,
+        token_mask=token_mask,
+        labels=labels,
+    )
+
+    assert held_out_metrics["probe_accuracy"] >= 0.99
+    assert held_out_metrics["probe_bce"] < 0.2

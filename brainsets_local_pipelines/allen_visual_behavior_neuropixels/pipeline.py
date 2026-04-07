@@ -25,16 +25,66 @@ import numpy as np
 import pandas as pd
 from temporaldata import ArrayDict, Data, Interval, IrregularTimeSeries
 
-from brainsets import serialize_fn_map
-from brainsets.descriptions import (
-    BrainsetDescription,
-    DeviceDescription,
-    SessionDescription,
-    SubjectDescription,
-)
-from brainsets.pipeline import BrainsetPipeline
-from brainsets.taxonomy import RecordingTech, Sex, Species
-from brainsets.taxonomy.mice import BrainRegion
+try:
+    from brainsets import serialize_fn_map
+    from brainsets.descriptions import (
+        BrainsetDescription,
+        DeviceDescription,
+        SessionDescription,
+        SubjectDescription,
+    )
+    from brainsets.pipeline import BrainsetPipeline
+    from brainsets.taxonomy import RecordingTech, Sex, Species
+    from brainsets.taxonomy.mice import BrainRegion
+except ImportError:  # pragma: no cover - exercised in main-dev-env tests without brainsets installed
+    serialize_fn_map = {}
+
+    class _FallbackDescription(Data):
+        def __init__(self, **kwargs) -> None:
+            serializable: dict[str, Any] = {}
+            for key, value in kwargs.items():
+                if isinstance(value, dt.datetime):
+                    serializable[key] = value.isoformat()
+                else:
+                    serializable[key] = value
+            super().__init__(**serializable)
+
+    class BrainsetDescription(_FallbackDescription):
+        pass
+
+    class DeviceDescription(_FallbackDescription):
+        pass
+
+    class SessionDescription(_FallbackDescription):
+        pass
+
+    class SubjectDescription(_FallbackDescription):
+        pass
+
+    class BrainsetPipeline:
+        def __init__(self, *, raw_dir: Path, processed_dir: Path, args) -> None:
+            self.raw_dir = Path(raw_dir)
+            self.processed_dir = Path(processed_dir)
+            self.args = args
+
+        def update_status(self, _status: str) -> None:
+            return None
+
+    class RecordingTech:
+        NEUROPIXELS_SPIKES = "NEUROPIXELS_SPIKES"
+
+    class Sex:
+        @staticmethod
+        def from_string(value: str) -> str:
+            return value
+
+    class Species:
+        MUS_MUSCULUS = "MUS_MUSCULUS"
+
+    class BrainRegion:
+        @staticmethod
+        def from_string(value: str) -> str:
+            return value
 
 
 parser = ArgumentParser()

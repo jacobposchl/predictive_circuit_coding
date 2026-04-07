@@ -160,6 +160,31 @@ def _selection_root_dirs(workspace: PreparationWorkspace, output_name: str) -> t
     )
 
 
+def _resolved_runtime_subset_view(
+    *,
+    experiment_config: ExperimentConfig,
+    prep_config: DataPreparationConfig,
+    workspace: PreparationWorkspace,
+    runtime_catalog: SessionCatalog,
+) -> ResolvedDatasetView:
+    if experiment_config.runtime_subset is None:
+        raise ValueError("runtime_subset is not configured for this experiment.")
+    split_manifest = load_split_manifest(experiment_config.runtime_subset.split_manifest_path)
+    return ResolvedDatasetView(
+        prep_config=prep_config,
+        workspace=workspace,
+        session_catalog=runtime_catalog,
+        split_manifest=split_manifest,
+        split_manifest_path=experiment_config.runtime_subset.split_manifest_path,
+        config_dir=experiment_config.runtime_subset.config_dir,
+        config_name_prefix=experiment_config.runtime_subset.config_name_prefix,
+        dataset_split=None,
+        selection_active=False,
+        selection_summary=None,
+        session_catalog_path=experiment_config.runtime_subset.session_catalog_path,
+    )
+
+
 def materialize_runtime_selection(
     *,
     experiment_config: ExperimentConfig,
@@ -237,6 +262,14 @@ def resolve_runtime_dataset_view(
 ) -> ResolvedDatasetView:
     prep_config = load_preparation_config(data_config_path)
     workspace = build_workspace(prep_config)
+    if experiment_config.runtime_subset is not None:
+        runtime_catalog = load_session_catalog(experiment_config.runtime_subset.session_catalog_path)
+        return _resolved_runtime_subset_view(
+            experiment_config=experiment_config,
+            prep_config=prep_config,
+            workspace=workspace,
+            runtime_catalog=runtime_catalog,
+        )
     if workspace.session_catalog_path.is_file():
         catalog = load_session_catalog(workspace.session_catalog_path)
     elif workspace.session_manifest_path.is_file():
