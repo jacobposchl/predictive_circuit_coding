@@ -530,8 +530,19 @@ def extract_frozen_tokens(
         )
     labels = torch.cat(label_chunks, dim=0)
     if include_token_tensors:
-        tokens = torch.cat(token_chunks, dim=0)
-        token_mask = torch.cat(mask_chunks, dim=0)
+        max_seq_len = max(chunk.shape[1] for chunk in token_chunks)
+        padded_token_chunks = [
+            torch.nn.functional.pad(chunk, (0, 0, 0, max_seq_len - chunk.shape[1]))
+            if chunk.shape[1] < max_seq_len else chunk
+            for chunk in token_chunks
+        ]
+        padded_mask_chunks = [
+            torch.nn.functional.pad(chunk, (0, max_seq_len - chunk.shape[1]), value=False)
+            if chunk.shape[1] < max_seq_len else chunk
+            for chunk in mask_chunks
+        ]
+        tokens = torch.cat(padded_token_chunks, dim=0)
+        token_mask = torch.cat(padded_mask_chunks, dim=0)
     else:
         tokens = torch.empty((0, 0, 0), dtype=torch.float32)
         token_mask = torch.empty((0, 0), dtype=torch.bool)
