@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import gc
 import json
+import os
 from pathlib import Path
 import random
 from typing import Any, Callable
 
 import torch
 from sklearn.metrics import average_precision_score, roc_auc_score
+
+
+def _ram_mb() -> str:
+    """Return current process RSS in MB, or empty string if psutil unavailable."""
+    try:
+        import psutil
+        rss = psutil.Process(os.getpid()).memory_info().rss / 1_048_576
+        return f"[RAM {rss:.0f} MB]"
+    except Exception:
+        return ""
 
 from predictive_circuit_coding.decoding import evaluate_additive_probe, extract_frozen_tokens, fit_additive_probe
 from predictive_circuit_coding.training.artifacts import load_training_checkpoint
@@ -128,6 +139,7 @@ def validate_discovery_artifact(
     dataset_view=None,
     progress_callback: Callable[[int, int | None], None] | None = None,
 ) -> ValidationSummary:
+    print(f"validate: start {_ram_mb()}")
     artifact = _load_discovery_artifact(discovery_artifact_path)
     if not artifact.get("candidates"):
         raise ValueError(
@@ -144,6 +156,7 @@ def validate_discovery_artifact(
     shared_model.load_state_dict(checkpoint["model_state"])
     del checkpoint
     shared_model.eval()
+    print(f"validate: model loaded {_ram_mb()}")
 
     # Cap the discovery re-extraction to evaluation.max_batches — the shuffle control is a
     # relative statistical check and does not require the full discovery pass.
@@ -160,6 +173,12 @@ def validate_discovery_artifact(
         sampling_strategy_override="sequential",
         model=shared_model,
     )
+    print(
+        f"validate: discovery extracted  windows={discovery_collection.tokens.shape[0]}"
+        f"  seq_len={discovery_collection.tokens.shape[1]}"
+        f"  tokens_MB={discovery_collection.tokens.nbytes / 1_048_576:.0f}"
+        f"  {_ram_mb()}"
+    )
     if artifact_probe_state is None:
         real_probe_fit = fit_additive_probe(
             tokens=discovery_collection.tokens,
@@ -171,6 +190,7 @@ def validate_discovery_artifact(
             label_name=experiment_config.discovery.target_label,
         )
         artifact_probe_state = real_probe_fit.state_dict
+        print(f"validate: real probe trained {_ram_mb()}")
     rng = random.Random(experiment_config.discovery.shuffle_seed)
     shuffled_labels = discovery_collection.labels.clone()
     permutation = list(range(len(shuffled_labels)))
@@ -185,11 +205,13 @@ def validate_discovery_artifact(
         mini_batch_size=256,
         label_name=experiment_config.discovery.target_label,
     )
+    print(f"validate: shuffled probe trained {_ram_mb()}")
     del discovery_collection
     del shuffled_labels
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    print(f"validate: discovery freed {_ram_mb()}")
 
     test_collection = extract_frozen_tokens(
         experiment_config=experiment_config,
@@ -205,12 +227,19 @@ def validate_discovery_artifact(
         progress_callback=progress_callback,
         model=shared_model,
     )
+    print(
+        f"validate: test extracted  windows={test_collection.tokens.shape[0]}"
+        f"  seq_len={test_collection.tokens.shape[1]}"
+        f"  tokens_MB={test_collection.tokens.nbytes / 1_048_576:.0f}"
+        f"  {_ram_mb()}"
+    )
 
     # Model no longer needed — free GPU memory before CPU-only metrics work.
     del shared_model
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    print(f"validate: model freed {_ram_mb()}")
 
     held_out_test_metrics = evaluate_additive_probe(
         state_dict=artifact_probe_state,
