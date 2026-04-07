@@ -42,7 +42,7 @@ The canonical local dataset can contain the full processed Allen session store. 
 
 - the training notebook defines the subset with simple scalars like `EXPERIENCE_LEVEL`, `MAX_SESSIONS`, and split fractions
 - the notebook writes an artifact-local runtime subset bundle under `artifacts/runtime_subset/`
-- the discovery notebook reuses that exact saved subset and only asks for `DECODE_TYPE`
+- the discovery notebook restores a selected training `run_id`, reuses that exact saved subset, and exposes `DECODE_TYPE` plus focused discovery/validation overrides in one config cell
 
 You can:
 
@@ -61,7 +61,8 @@ The repo ends with two Colab notebooks:
 They are intentionally thin and call the same CLI surface listed above.
 
 - the training notebook owns subset choice and split fractions
-- the discovery notebook reuses the saved training runtime config and only overrides the decode target
+- the training notebook creates a fresh `run_id` and exports to `pcc_colab_outputs/<run_id>/run_1/train/`
+- the discovery notebook restores `TRAINING_RUN_ID` or the latest exported training run, then writes task-specific attempts under `pcc_colab_outputs/<run_id>/run_1/discovery/<decode_type>__<timestamp>/`
 - discovery runs label-balanced decoding windows on the subset's `discovery` split and writes a decode-coverage summary before probe fitting
 - validation reports discovery probe accuracy, shuffled discovery accuracy, held-out test probe accuracy, and held-out motif-similarity ROC-AUC / PR-AUC
 
@@ -108,6 +109,7 @@ Discovery problems:
 - if discovery fails because the split does not provide both classes for the chosen decode target, inspect the emitted `*_decode_coverage.json` summary and rerun training with a larger or more suitable notebook subset
 - if no candidate tokens are selected, lower `discovery.min_candidate_score` or increase `discovery.max_batches`
 - if clustering produces no motif clusters, reduce `discovery.min_cluster_size` or expand the discovery subset
+- if `TRAINING_RUN_ID` points at a missing export, clear it to use the latest exported training run or rerun the training notebook so it writes a fresh `run_id`
 
 Validation problems:
 

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import TextIO
 
@@ -65,6 +66,7 @@ class NotebookRuntimeContext:
     checkpoint_dir: Path
     summary_path: Path
     checkpoint_path: Path
+    run_id: str
     selected_session_count: int
     profile_path: Path
     runtime_split_manifest_path: Path
@@ -200,6 +202,7 @@ def prepare_notebook_runtime_context(
     dataset_config: NotebookDatasetConfig,
     training_config: NotebookTrainingConfig | None = None,
     step_log_every: int,
+    run_id: str | None = None,
 ) -> NotebookRuntimeContext:
     base_path = Path(base_experiment_config)
     runtime_path = Path(runtime_experiment_config)
@@ -210,6 +213,10 @@ def prepare_notebook_runtime_context(
     summary_path = artifact_path / "training_summary.json"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     artifact_path.mkdir(parents=True, exist_ok=True)
+
+    resolved_run_id = str(run_id).strip() if run_id is not None else datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    if not resolved_run_id:
+        raise ValueError("run_id must not be empty")
 
     payload = yaml.safe_load(base_path.read_text(encoding="utf-8"))
     training_payload = payload.setdefault("training", {})
@@ -267,6 +274,7 @@ def prepare_notebook_runtime_context(
     checkpoint_path = checkpoint_dir / f"{checkpoint_prefix}_best.pt"
     profile_path = artifact_path / "colab_notebook_profile.json"
     profile_payload = {
+        "run_id": resolved_run_id,
         "runtime_experiment_config": str(runtime_path.resolve()),
         "checkpoint_dir": str(checkpoint_dir.resolve()),
         "summary_path": str(summary_path.resolve()),
@@ -310,6 +318,7 @@ def prepare_notebook_runtime_context(
         checkpoint_dir=checkpoint_dir,
         summary_path=summary_path,
         checkpoint_path=checkpoint_path,
+        run_id=resolved_run_id,
         selected_session_count=selected_session_count,
         profile_path=profile_path,
         runtime_split_manifest_path=runtime_split_manifest_path,
@@ -328,6 +337,14 @@ def build_notebook_discovery_runtime_config(
     decode_type: str,
     device_mode: str = "auto",
     step_log_every: int,
+    discovery_max_batches: int | None = None,
+    discovery_top_k_candidates: int | None = None,
+    discovery_min_candidate_score: float | None = None,
+    discovery_min_cluster_size: int | None = None,
+    discovery_probe_epochs: int | None = None,
+    discovery_probe_learning_rate: float | None = None,
+    validation_max_batches: int | None = None,
+    validation_shuffle_seed: int | None = None,
 ) -> Path:
     source_path = Path(source_experiment_config)
     runtime_path = Path(runtime_experiment_config)
@@ -341,7 +358,24 @@ def build_notebook_discovery_runtime_config(
     discovery = payload.setdefault("discovery", {})
     discovery["target_label"] = str(decode_type)
     discovery["sampling_strategy"] = "label_balanced"
+    if discovery_max_batches is not None:
+        discovery["max_batches"] = int(discovery_max_batches)
+    if discovery_top_k_candidates is not None:
+        discovery["top_k_candidates"] = int(discovery_top_k_candidates)
+    if discovery_min_candidate_score is not None:
+        discovery["min_candidate_score"] = float(discovery_min_candidate_score)
+    if discovery_min_cluster_size is not None:
+        discovery["min_cluster_size"] = int(discovery_min_cluster_size)
+    if discovery_probe_epochs is not None:
+        discovery["probe_epochs"] = int(discovery_probe_epochs)
+    if discovery_probe_learning_rate is not None:
+        discovery["probe_learning_rate"] = float(discovery_probe_learning_rate)
+    if validation_shuffle_seed is not None:
+        discovery["shuffle_seed"] = int(validation_shuffle_seed)
     discovery.pop("search_max_batches", None)
+    evaluation = payload.setdefault("evaluation", {})
+    if validation_max_batches is not None:
+        evaluation["max_batches"] = int(validation_max_batches)
     payload["dataset_selection"] = {}
     artifacts = payload.setdefault("artifacts", {})
     artifacts["checkpoint_dir"] = str(checkpoint_dir.resolve())
@@ -493,61 +527,234 @@ def resolve_notebook_checkpoint(
     raise FileNotFoundError(f"No checkpoint found under {resolved_checkpoint_dir}")
 
 
+def _sanitize_notebook_export_segment(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value).strip())
+    sanitized = sanitized.strip(".-_")
+    return sanitized or "default"
+
+
+def _resolve_training_export_path(
+    *,
+    drive_export_root: str | Path,
+    training_run_id: str | None = None,
+    run_name: str = "run_1",
+) -> Path | None:
+    export_root = Path(drive_export_root)
+    if training_run_id is not None:
+        selected_run_id = str(training_run_id).strip()
+        if not selected_run_id:
+            raise ValueError("training_run_id must not be empty when provided")
+        if not export_root.exists():
+            raise FileNotFoundError(
+                f"Requested training run_id '{selected_run_id}' was not found under {export_root}."
+            )
+        train_dir = export_root / selected_run_id / run_name / "train"
+        if not train_dir.is_dir():
+            raise FileNotFoundError(
+                f"Requested training run_id '{selected_run_id}' was not found under {export_root}."
+            )
+        return train_dir
+    if not export_root.exists():
+        return None
+    run_candidates = sorted(
+        [
+            path / run_name / "train"
+            for path in export_root.iterdir()
+            if path.is_dir() and path.name.startswith("run_") and (path / run_name / "train").is_dir()
+        ],
+        key=lambda path: path.parent.parent.name,
+    )
+    if not run_candidates:
+        return None
+    return run_candidates[-1]
+
+
+def build_notebook_training_export_path(
+    *,
+    drive_export_root: str | Path,
+    run_id: str,
+    run_name: str = "run_1",
+) -> Path:
+    return Path(drive_export_root) / str(run_id) / run_name / "train"
+
+
+def export_notebook_training_artifacts(
+    *,
+    drive_export_root: str | Path,
+    local_artifact_root: str | Path,
+    run_id: str,
+    run_name: str = "run_1",
+) -> Path:
+    artifact_root = Path(local_artifact_root)
+    target = build_notebook_training_export_path(
+        drive_export_root=drive_export_root,
+        run_id=run_id,
+        run_name=run_name,
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(artifact_root, target)
+    return target
+
+
 def restore_latest_exported_artifacts(
     *,
     drive_export_root: str | Path,
     local_artifact_root: str | Path,
     runtime_experiment_config: str | Path | None = None,
-    run_prefix: str = "train_run_",
+    training_run_id: str | None = None,
+    run_name: str = "run_1",
 ) -> Path | None:
-    export_root = Path(drive_export_root)
-    if not export_root.exists():
-        return None
-    run_candidates = sorted(
-        [path for path in export_root.iterdir() if path.is_dir() and path.name.startswith(run_prefix)],
-        key=lambda path: path.name,
+    train_export_path = _resolve_training_export_path(
+        drive_export_root=drive_export_root,
+        training_run_id=training_run_id,
+        run_name=run_name,
     )
-    if not run_candidates:
+    if train_export_path is None:
         return None
-    latest_run = run_candidates[-1]
     artifact_root = Path(local_artifact_root)
     if artifact_root.exists():
         shutil.rmtree(artifact_root)
-    shutil.copytree(latest_run, artifact_root)
+    shutil.copytree(train_export_path, artifact_root)
     if runtime_experiment_config is not None:
         runtime_target = Path(runtime_experiment_config)
         exported_runtime_config = artifact_root / "colab_runtime_experiment.yaml"
         if exported_runtime_config.exists():
             runtime_target.write_text(exported_runtime_config.read_text(encoding="utf-8"), encoding="utf-8")
-    return latest_run
+    return train_export_path
+
+
+def build_notebook_discovery_export_path(
+    *,
+    drive_export_root: str | Path,
+    run_id: str,
+    decode_type: str,
+    attempt_timestamp: str,
+    run_name: str = "run_1",
+) -> Path:
+    attempt_name = f"{_sanitize_notebook_export_segment(decode_type)}__{attempt_timestamp}"
+    return Path(drive_export_root) / str(run_id) / run_name / "discovery" / attempt_name
+
+
+def export_notebook_discovery_artifacts(
+    *,
+    drive_export_root: str | Path,
+    local_artifact_root: str | Path,
+    run_id: str,
+    decode_type: str,
+    attempt_timestamp: str,
+    runtime_experiment_config: str | Path,
+    checkpoint_path: str | Path,
+    discovery_run: "NotebookDiscoveryRunResult",
+    validation_run: "NotebookValidationRunResult | None" = None,
+    run_name: str = "run_1",
+) -> Path:
+    artifact_root = Path(local_artifact_root).resolve()
+    target = build_notebook_discovery_export_path(
+        drive_export_root=drive_export_root,
+        run_id=run_id,
+        decode_type=decode_type,
+        attempt_timestamp=attempt_timestamp,
+        run_name=run_name,
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True, exist_ok=True)
+
+    export_candidates = [
+        discovery_run.discovery_artifact_path,
+        discovery_run.decode_coverage_summary_path,
+        discovery_run.cluster_summary_json_path,
+        discovery_run.cluster_summary_csv_path,
+    ]
+    if validation_run is not None:
+        export_candidates.extend(
+            [
+                validation_run.validation_summary_json_path,
+                validation_run.validation_summary_csv_path,
+            ]
+        )
+
+    for src_candidate in export_candidates:
+        src = Path(src_candidate)
+        if not src.exists():
+            continue
+        try:
+            relative_path = src.resolve().relative_to(artifact_root)
+        except ValueError:
+            relative_path = Path(src.name)
+        destination = target / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, destination)
+
+    runtime_copy = target / Path(runtime_experiment_config).name
+    runtime_copy.write_text(Path(runtime_experiment_config).read_text(encoding="utf-8"), encoding="utf-8")
+    metadata_path = target / "discovery_export_metadata.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "training_run_id": str(run_id),
+                "run_name": str(run_name),
+                "decode_type": str(decode_type),
+                "checkpoint_name": Path(checkpoint_path).name,
+                "local_discovery_runtime_config_path": str(Path(runtime_experiment_config).resolve()),
+                "exported_discovery_runtime_config_path": str(runtime_copy),
+                "attempt_timestamp": str(attempt_timestamp),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return target
 
 
 def restore_latest_discovery_artifacts(
     *,
     drive_export_root: str | Path,
     local_artifact_root: str | Path,
-    run_prefix: str = "discover_run_",
+    training_run_id: str | None = None,
+    decode_type: str | None = None,
+    run_name: str = "run_1",
 ) -> Path | None:
-    """Copy discovery artifact files from the most recent Drive discover_run_* export
-    into the local artifact root without overwriting any files that already exist."""
-    export_root = Path(drive_export_root)
-    if not export_root.exists():
+    train_export_path = _resolve_training_export_path(
+        drive_export_root=drive_export_root,
+        training_run_id=training_run_id,
+        run_name=run_name,
+    )
+    if train_export_path is None:
         return None
+    discovery_root = train_export_path.parent / "discovery"
+    if not discovery_root.is_dir():
+        return None
+
+    decode_prefix = None
+    if decode_type is not None:
+        decode_prefix = f"{_sanitize_notebook_export_segment(decode_type)}__"
+
     run_candidates = sorted(
-        [path for path in export_root.iterdir() if path.is_dir() and path.name.startswith(run_prefix)],
+        [
+            path
+            for path in discovery_root.iterdir()
+            if path.is_dir() and (decode_prefix is None or path.name.startswith(decode_prefix))
+        ],
         key=lambda path: path.name,
     )
     if not run_candidates:
         return None
+
     latest_run = run_candidates[-1]
     artifact_root = Path(local_artifact_root)
     for src_file in latest_run.rglob("*"):
         if not src_file.is_file():
             continue
-        dst = artifact_root / src_file.relative_to(latest_run)
-        if not dst.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_file, dst)
+        relative_path = src_file.relative_to(latest_run)
+        if not relative_path.parts or relative_path.parts[0] != "checkpoints":
+            continue
+        dst = artifact_root / relative_path
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_file, dst)
     return latest_run
 
 
@@ -597,10 +804,28 @@ def _coverage_summary_path(discovery_output_path: str | Path) -> Path:
     return output.with_name(f"{output.stem}_decode_coverage.json")
 
 
+def _load_discovery_target_label(discovery_artifact_path: str | Path) -> str | None:
+    artifact_path = Path(discovery_artifact_path)
+    if not artifact_path.exists():
+        return None
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    decoder_summary = payload.get("decoder_summary") or {}
+    target_label = decoder_summary.get("target_label")
+    if isinstance(target_label, str) and target_label.strip():
+        return target_label
+    config_snapshot = payload.get("config_snapshot") or {}
+    discovery_config = config_snapshot.get("discovery") or {}
+    target_label = discovery_config.get("target_label")
+    if isinstance(target_label, str) and target_label.strip():
+        return target_label
+    return None
+
+
 def find_existing_discovery_run(
     *,
     checkpoint_path: str | Path,
     split_name: str = "discovery",
+    target_label: str | None = None,
 ) -> "NotebookDiscoveryRunResult | None":
     """Return a NotebookDiscoveryRunResult if all expected discovery artifact files exist locally,
     otherwise return None so the caller can decide whether to re-run discovery."""
@@ -611,6 +836,10 @@ def find_existing_discovery_run(
     cluster_json, cluster_csv = _cluster_report_paths(discovery_path)
     if not all(p.exists() for p in (coverage_path, cluster_json, cluster_csv)):
         return None
+    if target_label is not None:
+        existing_target_label = _load_discovery_target_label(discovery_path)
+        if existing_target_label != str(target_label):
+            return None
     return NotebookDiscoveryRunResult(
         discovery_artifact_path=discovery_path,
         decode_coverage_summary_path=coverage_path,

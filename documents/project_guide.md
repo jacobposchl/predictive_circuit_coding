@@ -358,7 +358,7 @@ The repo now treats the full processed session store as canonical. The normal Co
 
 - the training notebook defines the subset with simple scalars such as `EXPERIENCE_LEVEL`, `MAX_SESSIONS`, and split fractions
 - the notebook writes an artifact-local runtime subset bundle under `artifacts/runtime_subset/`
-- the discovery notebook reuses that saved runtime config and exact subset, then only overrides the decode target
+- the discovery notebook restores a selected training `run_id`, reuses that saved runtime config and exact subset, then applies a decode-task-first config cell with focused discovery/validation overrides
 
 The runtime subset bundle includes:
 
@@ -484,6 +484,7 @@ Responsibilities:
 - run preflight checks
 - define the subset with simple notebook scalars such as `EXPERIENCE_LEVEL`, `MAX_SESSIONS`, and split fractions
 - write the artifact-local runtime subset bundle automatically
+- generate a fresh `run_id` and export the completed training bundle to `pcc_colab_outputs/<run_id>/run_1/train/`
 - launch training
 - launch evaluation
 - surface stage boundaries, elapsed time, checkpoint reminders, and realized split counts
@@ -495,9 +496,11 @@ Responsibilities:
 Responsibilities:
 
 - reuse the saved training runtime config and subset
-- select a decode target
+- select `TRAINING_RUN_ID` or default to the latest exported training run
+- select a decode target first, then optional focused discovery/validation overrides in the same config cell
 - run discovery
 - run validation
+- export each notebook attempt to `pcc_colab_outputs/<run_id>/run_1/discovery/<decode_type>__<timestamp>/`
 - inspect decode coverage, cluster summaries, held-out probe transfer, and held-out motif-similarity outputs directly in notebook tables
 
 ### Notebook rules
