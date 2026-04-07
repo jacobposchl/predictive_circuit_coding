@@ -9,6 +9,7 @@ from predictive_circuit_coding.utils import (
     NotebookCommandStreamFormatter,
     NotebookDatasetConfig,
     NotebookDiscoveryRunResult,
+    NotebookLocalDatasetStageResult,
     NotebookTrainingConfig,
     NotebookValidationRunResult,
     build_notebook_discovery_runtime_config,
@@ -18,6 +19,7 @@ from predictive_circuit_coding.utils import (
     export_notebook_training_artifacts,
     find_existing_discovery_run,
     load_notebook_split_counts,
+    materialize_notebook_prepared_sessions,
     output_indicates_missing_positive_labels,
     prepare_notebook_runtime_context,
     resolve_notebook_checkpoint,
@@ -276,6 +278,86 @@ def test_restore_latest_exported_artifacts_rejects_unknown_run_id(tmp_path: Path
             local_artifact_root=tmp_path / "artifacts",
             training_run_id="run_20990101_010101",
         )
+
+
+def test_materialize_notebook_prepared_sessions_copies_selected_h5s_and_support_files(tmp_path: Path) -> None:
+    source_dataset_root = tmp_path / "drive_dataset"
+    source_prepared_root = source_dataset_root / "prepared" / "allen_visual_behavior_neuropixels"
+    source_prepared_root.mkdir(parents=True, exist_ok=True)
+    for session_id in ("101", "202"):
+        (source_prepared_root / f"{session_id}.h5").write_text(session_id, encoding="utf-8")
+    manifests_dir = source_dataset_root / "manifests"
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    (manifests_dir / "session_catalog.json").write_text("{}", encoding="utf-8")
+    (manifests_dir / "session_catalog.csv").write_text("session_id\n101\n", encoding="utf-8")
+    splits_dir = source_dataset_root / "splits"
+    splits_dir.mkdir(parents=True, exist_ok=True)
+    (splits_dir / "split_manifest.json").write_text("{}", encoding="utf-8")
+
+    target_dataset_root = tmp_path / "repo_dataset"
+    result = materialize_notebook_prepared_sessions(
+        source_dataset_root=source_dataset_root,
+        target_dataset_root=target_dataset_root,
+        session_ids=["202", "101"],
+        dataset_id="allen_visual_behavior_neuropixels",
+    )
+
+    assert result.target_dataset_root == target_dataset_root.resolve()
+    assert result.staged_session_ids == ("101", "202")
+    assert (result.target_prepared_root / "101.h5").read_text(encoding="utf-8") == "101"
+    assert (result.target_prepared_root / "202.h5").read_text(encoding="utf-8") == "202"
+    assert (target_dataset_root / "manifests" / "session_catalog.json").is_file()
+    assert (target_dataset_root / "splits" / "split_manifest.json").is_file()
+
+
+def test_materialize_notebook_prepared_sessions_replaces_existing_directory(tmp_path: Path) -> None:
+    source_dataset_root = tmp_path / "drive_dataset"
+    source_prepared_root = source_dataset_root / "prepared" / "allen_visual_behavior_neuropixels"
+    source_prepared_root.mkdir(parents=True, exist_ok=True)
+    (source_prepared_root / "101.h5").write_text("101", encoding="utf-8")
+
+    target_dataset_root = tmp_path / "repo_dataset"
+    target_dataset_root.mkdir(parents=True, exist_ok=True)
+    (target_dataset_root / "stale.txt").write_text("stale", encoding="utf-8")
+
+    result = materialize_notebook_prepared_sessions(
+        source_dataset_root=source_dataset_root,
+        target_dataset_root=target_dataset_root,
+        session_ids=["101"],
+        dataset_id="allen_visual_behavior_neuropixels",
+    )
+
+    assert target_dataset_root.exists()
+    assert not target_dataset_root.is_symlink()
+    assert (result.target_prepared_root / "101.h5").is_file()
+    assert not (target_dataset_root / "stale.txt").exists()
+
+
+def test_materialize_notebook_prepared_sessions_replaces_existing_symlink_without_touching_source(
+    tmp_path: Path,
+) -> None:
+    source_dataset_root = tmp_path / "drive_dataset"
+    source_prepared_root = source_dataset_root / "prepared" / "allen_visual_behavior_neuropixels"
+    source_prepared_root.mkdir(parents=True, exist_ok=True)
+    (source_prepared_root / "101.h5").write_text("101", encoding="utf-8")
+
+    target_dataset_root = tmp_path / "repo_dataset"
+    try:
+        target_dataset_root.symlink_to(source_dataset_root, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks are unavailable in this environment")
+
+    result = materialize_notebook_prepared_sessions(
+        source_dataset_root=source_dataset_root,
+        target_dataset_root=target_dataset_root,
+        session_ids=["101"],
+        dataset_id="allen_visual_behavior_neuropixels",
+    )
+
+    assert target_dataset_root.exists()
+    assert not target_dataset_root.is_symlink()
+    assert (result.target_prepared_root / "101.h5").read_text(encoding="utf-8") == "101"
+    assert (source_prepared_root / "101.h5").read_text(encoding="utf-8") == "101"
 
 
 def test_build_notebook_discovery_runtime_config_only_overrides_decode_settings(tmp_path: Path) -> None:

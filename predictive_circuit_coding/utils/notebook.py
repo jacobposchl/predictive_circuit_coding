@@ -76,6 +76,14 @@ class NotebookRuntimeContext:
     exported_runtime_config_path: Path
 
 
+@dataclass(frozen=True)
+class NotebookLocalDatasetStageResult:
+    target_dataset_root: Path
+    target_prepared_root: Path
+    staged_session_ids: tuple[str, ...]
+    copied_support_files: tuple[Path, ...]
+
+
 def _load_selected_catalog_records(
     session_catalog_json: Path,
     *,
@@ -531,6 +539,65 @@ def _sanitize_notebook_export_segment(value: str) -> str:
     sanitized = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value).strip())
     sanitized = sanitized.strip(".-_")
     return sanitized or "default"
+
+
+def materialize_notebook_prepared_sessions(
+    *,
+    source_dataset_root: str | Path,
+    target_dataset_root: str | Path,
+    session_ids: list[str] | tuple[str, ...],
+    dataset_id: str,
+    reset_target: bool = True,
+) -> NotebookLocalDatasetStageResult:
+    source_root = Path(source_dataset_root).resolve()
+    target_root = Path(target_dataset_root).expanduser()
+    staged_session_ids = tuple(sorted(dict.fromkeys(str(session_id) for session_id in session_ids if str(session_id).strip())))
+    if not staged_session_ids:
+        raise ValueError("session_ids must contain at least one session to stage locally")
+    if not source_root.is_dir():
+        raise FileNotFoundError(f"Source dataset root not found: {source_root}")
+
+    if target_root.exists() or target_root.is_symlink():
+        if not reset_target:
+            raise FileExistsError(f"Target dataset root already exists: {target_root}")
+        if target_root.is_symlink() or target_root.is_file():
+            target_root.unlink()
+        else:
+            shutil.rmtree(target_root)
+
+    target_root.mkdir(parents=True, exist_ok=True)
+    source_prepared_root = source_root / "prepared" / str(dataset_id)
+    if not source_prepared_root.is_dir():
+        raise FileNotFoundError(f"Prepared dataset root not found: {source_prepared_root}")
+    target_prepared_root = target_root / "prepared" / str(dataset_id)
+    target_prepared_root.mkdir(parents=True, exist_ok=True)
+
+    for session_id in staged_session_ids:
+        source_path = source_prepared_root / f"{session_id}.h5"
+        if not source_path.is_file():
+            raise FileNotFoundError(f"Prepared session not found: {source_path}")
+        shutil.copy2(source_path, target_prepared_root / source_path.name)
+
+    copied_support_files: list[Path] = []
+    for relative_path in (
+        Path("manifests") / "session_catalog.json",
+        Path("manifests") / "session_catalog.csv",
+        Path("splits") / "split_manifest.json",
+    ):
+        source_path = source_root / relative_path
+        if not source_path.is_file():
+            continue
+        destination = target_root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination)
+        copied_support_files.append(destination.resolve())
+
+    return NotebookLocalDatasetStageResult(
+        target_dataset_root=target_root.resolve(),
+        target_prepared_root=target_prepared_root.resolve(),
+        staged_session_ids=staged_session_ids,
+        copied_support_files=tuple(copied_support_files),
+    )
 
 
 def _resolve_training_export_path(
