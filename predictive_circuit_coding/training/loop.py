@@ -229,11 +229,11 @@ def train_model(
                 optimizer_state=optimizer.state_dict(),
                 scheduler_state=scheduler.state_dict() if scheduler is not None else None,
             )
-            epoch_path = experiment_config.artifacts.checkpoint_dir / f"{experiment_config.artifacts.checkpoint_prefix}_epoch_{epoch:03d}.pt"
+            epoch_path = experiment_config.artifacts.checkpoint_dir / f"{experiment_config.artifacts.checkpoint_prefix}_latest.pt"
             save_training_checkpoint(checkpoint, epoch_path)
             latest_epoch_checkpoint_path = epoch_path
             latest_epoch_checkpoint = checkpoint
-            logger.log_artifact(label="epoch checkpoint", path=epoch_path)
+            logger.log_artifact(label="latest checkpoint", path=epoch_path)
 
     if not best_checkpoint_path.exists() and latest_epoch_checkpoint is not None:
         save_training_checkpoint(latest_epoch_checkpoint, best_checkpoint_path)
