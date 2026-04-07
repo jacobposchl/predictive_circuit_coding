@@ -10,6 +10,7 @@ from predictive_circuit_coding.utils import (
     NotebookDatasetConfig,
     NotebookTrainingConfig,
     build_notebook_discovery_runtime_config,
+    describe_notebook_compute_targets,
     load_notebook_split_counts,
     output_indicates_missing_positive_labels,
     prepare_notebook_runtime_context,
@@ -259,6 +260,99 @@ def test_build_notebook_discovery_runtime_config_only_overrides_decode_settings(
     assert payload["runtime_subset"]["config_name_prefix"] == "torch_brain_runtime"
     assert payload["artifacts"]["checkpoint_dir"] == str((tmp_path / "artifacts" / "checkpoints").resolve())
     assert payload["artifacts"]["summary_path"] == str((tmp_path / "artifacts" / "training_summary.json").resolve())
+
+
+def test_build_notebook_discovery_runtime_config_respects_cpu_device_override(tmp_path: Path) -> None:
+    source_config = tmp_path / "colab_runtime_experiment.yaml"
+    source_config.write_text(
+        "\n".join(
+            [
+                "dataset_id: allen_visual_behavior_neuropixels",
+                "execution:",
+                "  device: auto",
+                "training:",
+                "  log_every_steps: 8",
+                "dataset_selection: {}",
+                "runtime_subset: {}",
+                "discovery:",
+                "  target_label: stimulus_change",
+                "artifacts:",
+                "  checkpoint_dir: artifacts/checkpoints",
+                "  summary_path: artifacts/training_summary.json",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime_config = build_notebook_discovery_runtime_config(
+        source_experiment_config=source_config,
+        runtime_experiment_config=tmp_path / "colab_discovery_runtime_experiment.yaml",
+        artifact_root=tmp_path / "artifacts",
+        decode_type="stimulus_change",
+        device_mode="cpu",
+        step_log_every=16,
+    )
+
+    payload = yaml.safe_load(runtime_config.read_text(encoding="utf-8"))
+    assert payload["execution"]["device"] == "cpu"
+
+
+def test_describe_notebook_compute_targets_reports_cpu_probe_and_metrics(tmp_path: Path) -> None:
+    config_path = tmp_path / "runtime.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "dataset_id: allen_visual_behavior_neuropixels",
+                "execution:",
+                "  device: cpu",
+                "training:",
+                "  log_every_steps: 8",
+                "data_runtime:",
+                "  context_bins: 500",
+                "  bin_width_ms: 20.0",
+                "  context_duration_s: 10.0",
+                "splits:",
+                "  train: train",
+                "  valid: valid",
+                "  discovery: discovery",
+                "  test: test",
+                "model:",
+                "  input_dim: 1",
+                "  hidden_dim: 8",
+                "  num_layers: 1",
+                "  num_heads: 1",
+                "  dropout: 0.0",
+                "objective:",
+                "  continuation_baseline_type: previous_patch",
+                "optimization:",
+                "  batch_size: 4",
+                "  learning_rate: 0.001",
+                "discovery:",
+                "  target_label: stimulus_change",
+                "  sampling_strategy: label_balanced",
+                "  probe_epochs: 1",
+                "  probe_learning_rate: 0.01",
+                "  min_cluster_size: 2",
+                "  top_k_candidates: 4",
+                "  min_candidate_score: 0.0",
+                "  max_batches: 4",
+                "  shuffle_seed: 7",
+                "evaluation:",
+                "  max_batches: 4",
+                "  sequential_step_s: 1.0",
+                "artifacts:",
+                "  checkpoint_dir: artifacts/checkpoints",
+                "  summary_path: artifacts/training_summary.json",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    targets = describe_notebook_compute_targets(experiment_config_path=config_path)
+    assert targets["encoder_device"] == "cpu"
+    assert targets["probe_device"] == "cpu"
+    assert targets["clustering_device"] == "cpu"
+    assert targets["metrics_device"] == "cpu"
 
 
 def test_load_notebook_split_counts_reads_runtime_split_manifest(tmp_path: Path) -> None:

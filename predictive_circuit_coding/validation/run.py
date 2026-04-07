@@ -4,7 +4,7 @@ import gc
 import json
 from pathlib import Path
 import random
-from typing import Any
+from typing import Any, Callable
 
 import torch
 from sklearn.metrics import average_precision_score, roc_auc_score
@@ -116,6 +116,7 @@ def validate_discovery_artifact(
     checkpoint_path: str | Path,
     discovery_artifact_path: str | Path,
     dataset_view=None,
+    progress_callback: Callable[[int, int | None], None] | None = None,
 ) -> ValidationSummary:
     artifact = _load_discovery_artifact(discovery_artifact_path)
     if not artifact.get("candidates"):
@@ -168,9 +169,10 @@ def validate_discovery_artifact(
         max_batches=experiment_config.evaluation.max_batches,
         dataset_view=dataset_view,
         include_token_tensors=True,
-        include_records=True,
+        include_records=False,
         positive_records_only=False,
         sampling_strategy_override="sequential",
+        progress_callback=progress_callback,
     )
     held_out_test_metrics = evaluate_additive_probe(
         state_dict=artifact_probe_state,

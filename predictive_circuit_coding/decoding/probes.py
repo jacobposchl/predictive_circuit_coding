@@ -46,6 +46,12 @@ def _compute_probe_metrics(
     }
 
 
+def _pooled_feature_tokens(features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    if features.ndim != 2:
+        raise ValueError(f"Expected pooled features with shape [windows, d_model], received {tuple(features.shape)}")
+    return features.unsqueeze(1), torch.ones((features.shape[0], 1), dtype=torch.bool, device=features.device)
+
+
 def fit_additive_probe(
     *,
     tokens: torch.Tensor,
@@ -80,6 +86,25 @@ def fit_additive_probe(
     )
 
 
+def fit_additive_probe_features(
+    *,
+    features: torch.Tensor,
+    labels: torch.Tensor,
+    epochs: int,
+    learning_rate: float,
+    label_name: str = "label",
+) -> ProbeFitResult:
+    tokens, token_mask = _pooled_feature_tokens(features)
+    return fit_additive_probe(
+        tokens=tokens,
+        token_mask=token_mask,
+        labels=labels,
+        epochs=epochs,
+        learning_rate=learning_rate,
+        label_name=label_name,
+    )
+
+
 def evaluate_additive_probe(
     *,
     state_dict: dict,
@@ -94,6 +119,21 @@ def evaluate_additive_probe(
     model.eval()
     return _compute_probe_metrics(
         model=model,
+        tokens=tokens,
+        token_mask=token_mask,
+        labels=labels,
+    )
+
+
+def evaluate_additive_probe_features(
+    *,
+    state_dict: dict,
+    features: torch.Tensor,
+    labels: torch.Tensor,
+) -> dict[str, float]:
+    tokens, token_mask = _pooled_feature_tokens(features)
+    return evaluate_additive_probe(
+        state_dict=state_dict,
         tokens=tokens,
         token_mask=token_mask,
         labels=labels,

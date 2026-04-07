@@ -326,6 +326,7 @@ def build_notebook_discovery_runtime_config(
     runtime_experiment_config: str | Path,
     artifact_root: str | Path,
     decode_type: str,
+    device_mode: str = "auto",
     step_log_every: int,
 ) -> Path:
     source_path = Path(source_experiment_config)
@@ -335,6 +336,8 @@ def build_notebook_discovery_runtime_config(
     summary_path = artifact_path / "training_summary.json"
     payload = yaml.safe_load(source_path.read_text(encoding="utf-8"))
     payload.setdefault("training", {})["log_every_steps"] = int(step_log_every)
+    execution = payload.setdefault("execution", {})
+    execution["device"] = "cpu" if str(device_mode).lower() == "cpu" else "auto"
     discovery = payload.setdefault("discovery", {})
     discovery["target_label"] = str(decode_type)
     discovery["sampling_strategy"] = "label_balanced"
@@ -517,6 +520,216 @@ def restore_latest_exported_artifacts(
         if exported_runtime_config.exists():
             runtime_target.write_text(exported_runtime_config.read_text(encoding="utf-8"), encoding="utf-8")
     return latest_run
+
+
+@dataclass(frozen=True)
+class NotebookDiscoveryRunResult:
+    discovery_artifact_path: Path
+    decode_coverage_summary_path: Path
+    cluster_summary_json_path: Path
+    cluster_summary_csv_path: Path
+
+
+@dataclass(frozen=True)
+class NotebookValidationRunResult:
+    validation_summary_json_path: Path
+    validation_summary_csv_path: Path
+
+
+def describe_notebook_compute_targets(*, experiment_config_path: str | Path) -> dict[str, str]:
+    from predictive_circuit_coding.training import load_experiment_config
+    from predictive_circuit_coding.training.runtime import resolve_device
+
+    config = load_experiment_config(experiment_config_path)
+    encoder_device = str(resolve_device(config.execution.device))
+    return {
+        "encoder_device": encoder_device,
+        "probe_device": "cpu",
+        "clustering_device": "cpu",
+        "metrics_device": "cpu",
+    }
+
+
+def _default_discovery_output_path(checkpoint_path: str | Path, split_name: str) -> Path:
+    checkpoint = Path(checkpoint_path)
+    return checkpoint.with_name(f"{checkpoint.stem}_{split_name}_discovery.json")
+
+
+def _cluster_report_paths(discovery_output_path: str | Path) -> tuple[Path, Path]:
+    output = Path(discovery_output_path)
+    return (
+        output.with_name(f"{output.stem}_cluster_summary.json"),
+        output.with_name(f"{output.stem}_cluster_summary.csv"),
+    )
+
+
+def _coverage_summary_path(discovery_output_path: str | Path) -> Path:
+    output = Path(discovery_output_path)
+    return output.with_name(f"{output.stem}_decode_coverage.json")
+
+
+def _default_validation_output_paths(discovery_artifact_path: str | Path) -> tuple[Path, Path]:
+    artifact = Path(discovery_artifact_path)
+    return (
+        artifact.with_name(f"{artifact.stem}_validation.json"),
+        artifact.with_name(f"{artifact.stem}_validation.csv"),
+    )
+
+
+def run_notebook_discovery(
+    *,
+    experiment_config_path: str | Path,
+    data_config_path: str | Path,
+    checkpoint_path: str | Path,
+    split_name: str = "discovery",
+    output_path: str | Path | None = None,
+    progress_ui: bool = True,
+) -> NotebookDiscoveryRunResult:
+    from tqdm.auto import tqdm
+
+    from predictive_circuit_coding.cli.common import (
+        require_checkpoint_matches_dataset,
+        require_non_empty_split,
+        require_runtime_view,
+    )
+    from predictive_circuit_coding.discovery import (
+        build_discovery_cluster_report,
+        discover_motifs_from_plan,
+        prepare_discovery_collection,
+        write_discovery_artifact,
+        write_discovery_cluster_report_csv,
+        write_discovery_cluster_report_json,
+        write_discovery_coverage_summary,
+    )
+    from predictive_circuit_coding.training import load_experiment_config
+
+    config = load_experiment_config(experiment_config_path)
+    dataset_view = require_runtime_view(experiment_config=config, data_config_path=data_config_path)
+    require_non_empty_split(dataset_view=dataset_view, split_name=split_name)
+    checkpoint = require_checkpoint_matches_dataset(checkpoint_path=checkpoint_path, dataset_id=config.dataset_id)
+    discovery_output_path = Path(output_path) if output_path is not None else _default_discovery_output_path(checkpoint, split_name)
+    coverage_path = _coverage_summary_path(discovery_output_path)
+    cluster_json_path, cluster_csv_path = _cluster_report_paths(discovery_output_path)
+
+    plan_bar = tqdm(total=0, desc="Discovery coverage scan", unit="window", leave=False, disable=not progress_ui)
+
+    def _plan_progress(current: int, total: int | None) -> None:
+        if total is not None and plan_bar.total != total:
+            plan_bar.total = total
+        plan_bar.n = current
+        plan_bar.refresh()
+
+    window_plan = prepare_discovery_collection(
+        experiment_config=config,
+        data_config_path=data_config_path,
+        split_name=split_name,
+        dataset_view=dataset_view,
+        progress_callback=_plan_progress if progress_ui else None,
+    )
+    plan_bar.close()
+    write_discovery_coverage_summary(window_plan.coverage_summary, coverage_path)
+
+    encode_bar = tqdm(
+        total=int(window_plan.coverage_summary.selected_positive_count + window_plan.coverage_summary.selected_negative_count),
+        desc="Selected-window discovery",
+        unit="window",
+        leave=False,
+        disable=not progress_ui,
+    )
+
+    def _encode_progress(current: int, total: int | None) -> None:
+        if total is not None and encode_bar.total != total:
+            encode_bar.total = total
+        encode_bar.n = current
+        encode_bar.refresh()
+
+    result = discover_motifs_from_plan(
+        experiment_config=config,
+        data_config_path=data_config_path,
+        checkpoint_path=checkpoint,
+        split_name=split_name,
+        window_plan=window_plan,
+        dataset_view=dataset_view,
+        progress_callback=_encode_progress if progress_ui else None,
+    )
+    encode_bar.close()
+    artifact = result.artifact
+    write_discovery_artifact(artifact, discovery_output_path)
+    cluster_report = build_discovery_cluster_report(artifact)
+    write_discovery_cluster_report_json(cluster_report, cluster_json_path)
+    write_discovery_cluster_report_csv(cluster_report, cluster_csv_path)
+
+    return NotebookDiscoveryRunResult(
+        discovery_artifact_path=discovery_output_path,
+        decode_coverage_summary_path=coverage_path,
+        cluster_summary_json_path=cluster_json_path,
+        cluster_summary_csv_path=cluster_csv_path,
+    )
+
+
+def run_notebook_validation(
+    *,
+    experiment_config_path: str | Path,
+    data_config_path: str | Path,
+    checkpoint_path: str | Path,
+    discovery_artifact_path: str | Path,
+    output_json_path: str | Path | None = None,
+    output_csv_path: str | Path | None = None,
+    progress_ui: bool = True,
+) -> NotebookValidationRunResult:
+    from tqdm.auto import tqdm
+
+    from predictive_circuit_coding.cli.common import (
+        require_checkpoint_matches_dataset,
+        require_discovery_artifact_matches_dataset,
+        require_non_empty_split,
+        require_runtime_view,
+    )
+    from predictive_circuit_coding.training import (
+        load_experiment_config,
+        write_validation_summary,
+        write_validation_summary_csv,
+    )
+    from predictive_circuit_coding.validation import validate_discovery_artifact
+
+    config = load_experiment_config(experiment_config_path)
+    dataset_view = require_runtime_view(experiment_config=config, data_config_path=data_config_path)
+    require_non_empty_split(dataset_view=dataset_view, split_name=config.splits.discovery)
+    require_non_empty_split(dataset_view=dataset_view, split_name=config.splits.test)
+    checkpoint = require_checkpoint_matches_dataset(checkpoint_path=checkpoint_path, dataset_id=config.dataset_id)
+    artifact_path = require_discovery_artifact_matches_dataset(artifact_path=discovery_artifact_path, dataset_id=config.dataset_id)
+    default_json, default_csv = _default_validation_output_paths(artifact_path)
+    target_json = Path(output_json_path) if output_json_path is not None else default_json
+    target_csv = Path(output_csv_path) if output_csv_path is not None else default_csv
+    validation_bar = tqdm(
+        total=int(config.evaluation.max_batches),
+        desc="Held-out extraction / validation",
+        unit="batch",
+        leave=False,
+        disable=not progress_ui,
+    )
+
+    def _validation_progress(current: int, total: int | None) -> None:
+        if total is not None and validation_bar.total != total:
+            validation_bar.total = total
+        validation_bar.n = current
+        validation_bar.refresh()
+
+    summary = validate_discovery_artifact(
+        experiment_config=config,
+        data_config_path=data_config_path,
+        checkpoint_path=checkpoint,
+        discovery_artifact_path=artifact_path,
+        dataset_view=dataset_view,
+        progress_callback=_validation_progress if progress_ui else None,
+    )
+    validation_bar.close()
+    write_validation_summary(summary, target_json)
+    write_validation_summary_csv(summary, target_csv)
+    return NotebookValidationRunResult(
+        validation_summary_json_path=target_json,
+        validation_summary_csv_path=target_csv,
+    )
 
 
 @dataclass

@@ -39,8 +39,10 @@ def _safe_attr(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default) if obj is not None else default
 
 
-def _extract_interval_annotations(sample, config: DataRuntimeConfig, *, window_start_s: float, window_end_s: float) -> dict[str, Any]:
+def extract_sample_event_annotations(sample, config: DataRuntimeConfig, *, window_start_s: float, window_end_s: float) -> dict[str, Any]:
     annotations: dict[str, Any] = {}
+    sample_window_start_s = float(np.asarray(sample.domain.start, dtype=np.float64)[0])
+    sample_window_end_s = float(np.asarray(sample.domain.end, dtype=np.float64)[0])
     field_specs = (
         ("trials", config.include_trials),
         ("stimulus_presentations", config.include_stimulus_presentations),
@@ -56,12 +58,12 @@ def _extract_interval_annotations(sample, config: DataRuntimeConfig, *, window_s
             continue
         starts_np = np.asarray(starts, dtype=np.float64)
         ends_np = np.asarray(ends, dtype=np.float64)
-        mask = (ends_np > window_start_s) & (starts_np < window_end_s)
+        mask = (ends_np > sample_window_start_s) & (starts_np < sample_window_end_s)
         if not np.any(mask):
             continue
         payload: dict[str, Any] = {
-            "start_s": tuple((starts_np[mask] - window_start_s).tolist()),
-            "end_s": tuple((ends_np[mask] - window_start_s).tolist()),
+            "start_s": tuple((starts_np[mask] - sample_window_start_s).tolist()),
+            "end_s": tuple((ends_np[mask] - sample_window_start_s).tolist()),
         }
         interval_keys = list(interval.keys()) if hasattr(interval, "keys") else []
         for extra in interval_keys:
@@ -72,18 +74,23 @@ def _extract_interval_annotations(sample, config: DataRuntimeConfig, *, window_s
                 continue
             selected = np.asarray(values, dtype=object)[mask].tolist()
             if extra == "timestamps":
-                payload["timestamps_s"] = tuple(float(value) - window_start_s for value in selected)
+                payload["timestamps_s"] = tuple(float(value) - sample_window_start_s for value in selected)
                 continue
             payload[extra] = tuple(_normalize_annotation_scalar(value) for value in selected)
         annotations[field_name] = payload
     return annotations
 
 
-def _extract_recording_metadata(sample) -> tuple[str, str, str]:
+def extract_sample_recording_metadata(sample) -> tuple[str, str, str]:
     brainset_id = _normalize_string(_safe_attr(_safe_attr(sample, "brainset"), "id"))
     session_id = _normalize_string(_safe_attr(_safe_attr(sample, "session"), "id"))
     subject_id = _normalize_string(_safe_attr(_safe_attr(sample, "subject"), "id"))
-    recording_id = f"{brainset_id}/{session_id}" if brainset_id else session_id
+    if brainset_id and session_id.startswith(f"{brainset_id}/"):
+        recording_id = session_id
+    elif brainset_id:
+        recording_id = f"{brainset_id}/{session_id}"
+    else:
+        recording_id = session_id
     return recording_id, session_id, subject_id
 
 
@@ -218,7 +225,7 @@ class PopulationWindowBatchCollator:
             max_units = max(max_units, counts.shape[0])
             per_sample_counts.append(counts)
 
-            recording_id, session_id, subject_id = _extract_recording_metadata(sample)
+            recording_id, session_id, subject_id = extract_sample_recording_metadata(sample)
             recording_ids.append(recording_id)
             session_ids.append(session_id)
             subject_ids.append(subject_id)
@@ -231,7 +238,7 @@ class PopulationWindowBatchCollator:
             window_start_values.append(window_start_s)
             window_end_values.append(window_end_s)
             event_annotations.append(
-                _extract_interval_annotations(
+                extract_sample_event_annotations(
                     sample,
                     self.config,
                     window_start_s=window_start_s,

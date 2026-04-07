@@ -44,21 +44,22 @@ def _lookup_nested_value(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
     return current
 
 
-def extract_binary_labels(batch: PopulationWindowBatch, *, target_label: str) -> torch.Tensor:
+def extract_binary_label_from_annotations(annotation: dict[str, Any], *, target_label: str) -> float:
     paths = _resolve_target_label_paths(target_label)
+    for path in paths:
+        values = _lookup_nested_value(annotation, path)
+        if isinstance(values, (tuple, list)):
+            if any(_coerce_bool(value) for value in values):
+                return 1.0
+        elif _coerce_bool(values):
+            return 1.0
+    return 0.0
+
+
+def extract_binary_labels(batch: PopulationWindowBatch, *, target_label: str) -> torch.Tensor:
     labels = []
     for annotation in batch.provenance.event_annotations:
-        label = 0.0
-        for path in paths:
-            values = _lookup_nested_value(annotation, path)
-            if isinstance(values, (tuple, list)):
-                if any(_coerce_bool(value) for value in values):
-                    label = 1.0
-                    break
-            elif _coerce_bool(values):
-                label = 1.0
-                break
-        labels.append(label)
+        labels.append(extract_binary_label_from_annotations(annotation, target_label=target_label))
     return torch.tensor(labels, dtype=torch.float32)
 
 

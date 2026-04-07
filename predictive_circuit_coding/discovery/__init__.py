@@ -8,7 +8,7 @@ from predictive_circuit_coding.discovery.reporting import (
 from predictive_circuit_coding.discovery.run import (
     DiscoveryRunResult,
     discover_motifs,
-    discover_motifs_from_collection,
+    discover_motifs_from_plan,
     prepare_discovery_collection,
     write_discovery_artifact,
     write_discovery_coverage_summary,
@@ -20,7 +20,7 @@ __all__ = [
     "build_discovery_cluster_report",
     "cluster_candidate_tokens",
     "discover_motifs",
-    "discover_motifs_from_collection",
+    "discover_motifs_from_plan",
     "estimate_clustering_stability",
     "prepare_discovery_collection",
     "select_candidate_tokens",

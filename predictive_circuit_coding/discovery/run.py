@@ -2,9 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
+from typing import Callable
 
-from predictive_circuit_coding.decoding import extract_frozen_tokens, fit_additive_probe, score_token_records
-from predictive_circuit_coding.discovery.candidates import select_candidate_tokens
+from predictive_circuit_coding.decoding import fit_additive_probe_features
+from predictive_circuit_coding.decoding.extract import (
+    DiscoveryWindowPlan,
+    build_discovery_window_plan,
+    extract_selected_discovery_windows,
+)
+from predictive_circuit_coding.decoding.scoring import select_candidate_tokens_from_shards
 from predictive_circuit_coding.discovery.clustering import cluster_candidate_tokens
 from predictive_circuit_coding.discovery.stability import estimate_clustering_stability
 from predictive_circuit_coding.training.config import ExperimentConfig
@@ -22,6 +29,9 @@ class DiscoveryRunResult:
     coverage_summary: DiscoveryCoverageSummary
 
 
+ProgressCallback = Callable[[int, int | None], None]
+
+
 def _ensure_binary_label_coverage(summary: DiscoveryCoverageSummary) -> None:
     if summary.positive_window_count > 0 and summary.negative_window_count > 0:
         return
@@ -37,46 +47,57 @@ def prepare_discovery_collection(
     *,
     experiment_config: ExperimentConfig,
     data_config_path: str | Path,
-    checkpoint_path: str | Path,
     split_name: str,
     dataset_view=None,
-):
-    collection = extract_frozen_tokens(
+    progress_callback: ProgressCallback | None = None,
+) -> DiscoveryWindowPlan:
+    return build_discovery_window_plan(
         experiment_config=experiment_config,
         data_config_path=data_config_path,
-        checkpoint_path=checkpoint_path,
         split_name=split_name,
-        max_batches=experiment_config.discovery.max_batches,
         dataset_view=dataset_view,
+        progress_callback=progress_callback,
     )
-    return collection
 
 
-def discover_motifs_from_collection(
+def discover_motifs_from_plan(
     *,
     experiment_config: ExperimentConfig,
+    data_config_path: str | Path,
     checkpoint_path: str | Path,
     split_name: str,
-    collection,
+    window_plan: DiscoveryWindowPlan,
+    dataset_view=None,
+    progress_callback: ProgressCallback | None = None,
 ) -> DiscoveryRunResult:
-    _ensure_binary_label_coverage(collection.coverage_summary)
-    probe_fit = fit_additive_probe(
-        tokens=collection.tokens,
-        token_mask=collection.token_mask,
-        labels=collection.labels,
-        epochs=experiment_config.discovery.probe_epochs,
-        learning_rate=experiment_config.discovery.probe_learning_rate,
-        label_name=experiment_config.discovery.target_label,
-    )
-    scored_records = score_token_records(
-        records=collection.records,
-        probe_state_dict=probe_fit.state_dict,
-    )
-    candidates = select_candidate_tokens(
-        scored_records=scored_records,
-        top_k=experiment_config.discovery.top_k_candidates,
-        min_score=experiment_config.discovery.min_candidate_score,
-    )
+    _ensure_binary_label_coverage(window_plan.coverage_summary)
+    shard_root = Path(checkpoint_path).with_name(f"{Path(checkpoint_path).stem}_{split_name}_discovery_tmp")
+    try:
+        encoded = extract_selected_discovery_windows(
+            experiment_config=experiment_config,
+            data_config_path=data_config_path,
+            checkpoint_path=checkpoint_path,
+            window_plan=window_plan,
+            dataset_view=dataset_view,
+            shard_dir=shard_root,
+            progress_callback=progress_callback,
+        )
+        probe_fit = fit_additive_probe_features(
+            features=encoded.pooled_features,
+            labels=encoded.labels,
+            epochs=experiment_config.discovery.probe_epochs,
+            learning_rate=experiment_config.discovery.probe_learning_rate,
+            label_name=experiment_config.discovery.target_label,
+        )
+        candidates = select_candidate_tokens_from_shards(
+            shard_paths=encoded.shard_paths,
+            probe_state_dict=probe_fit.state_dict,
+            top_k=experiment_config.discovery.top_k_candidates,
+            min_score=experiment_config.discovery.min_candidate_score,
+        )
+    finally:
+        if shard_root.exists():
+            shutil.rmtree(shard_root)
     if not candidates:
         raise ValueError(
             f"No candidate tokens were selected from the discovery split for target label "
@@ -111,7 +132,7 @@ def discover_motifs_from_collection(
     )
     return DiscoveryRunResult(
         artifact=artifact,
-        coverage_summary=collection.coverage_summary,
+        coverage_summary=window_plan.coverage_summary,
     )
 
 
@@ -123,18 +144,19 @@ def discover_motifs(
     split_name: str,
     dataset_view=None,
 ) -> DiscoveryRunResult:
-    collection = prepare_discovery_collection(
+    window_plan = prepare_discovery_collection(
+        experiment_config=experiment_config,
+        data_config_path=data_config_path,
+        split_name=split_name,
+        dataset_view=dataset_view,
+    )
+    return discover_motifs_from_plan(
         experiment_config=experiment_config,
         data_config_path=data_config_path,
         checkpoint_path=checkpoint_path,
         split_name=split_name,
+        window_plan=window_plan,
         dataset_view=dataset_view,
-    )
-    return discover_motifs_from_collection(
-        experiment_config=experiment_config,
-        checkpoint_path=checkpoint_path,
-        split_name=split_name,
-        collection=collection,
     )
 
 

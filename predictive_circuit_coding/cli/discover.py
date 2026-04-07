@@ -14,7 +14,7 @@ from predictive_circuit_coding.cli.common import (
 )
 from predictive_circuit_coding.discovery import (
     build_discovery_cluster_report,
-    discover_motifs_from_collection,
+    discover_motifs_from_plan,
     prepare_discovery_collection,
     write_discovery_artifact,
     write_discovery_cluster_report_csv,
@@ -69,7 +69,6 @@ def _run(args: argparse.Namespace) -> int:
     collection = prepare_discovery_collection(
         experiment_config=config,
         data_config_path=args.data_config,
-        checkpoint_path=checkpoint_path,
         split_name=args.split,
         dataset_view=dataset_view,
     )
@@ -88,11 +87,13 @@ def _run(args: argparse.Namespace) -> int:
         f"Positive-window sessions: {list(collection.coverage_summary.sessions_with_positive_windows)}"
     )
     logger.log_stage("discovery", expected_next="discovery artifact json")
-    result = discover_motifs_from_collection(
+    result = discover_motifs_from_plan(
         experiment_config=config,
+        data_config_path=args.data_config,
         checkpoint_path=checkpoint_path,
         split_name=args.split,
-        collection=collection,
+        window_plan=collection,
+        dataset_view=dataset_view,
     )
     artifact = result.artifact
     write_discovery_artifact(artifact, output_path)

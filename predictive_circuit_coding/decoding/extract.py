@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 import random
+import shutil
+from typing import Callable
 
 import torch
 
 from predictive_circuit_coding.data import resolve_runtime_dataset_view
-from predictive_circuit_coding.decoding.labels import extract_binary_labels
+from predictive_circuit_coding.decoding.labels import extract_binary_label_from_annotations, extract_binary_labels
 from predictive_circuit_coding.training.artifacts import load_training_checkpoint
 from predictive_circuit_coding.training.config import ExperimentConfig
 from predictive_circuit_coding.training.contracts import DiscoveryCoverageSummary, FrozenTokenRecord
 from predictive_circuit_coding.training.factories import build_model_from_config, build_tokenizer_from_config
 from predictive_circuit_coding.training.runtime import iter_sampler_batches, resolve_device
+from predictive_circuit_coding.tokenization import extract_sample_event_annotations, extract_sample_recording_metadata
 from predictive_circuit_coding.windowing import (
     FixedWindowConfig,
     build_dataset_bundle,
@@ -28,6 +32,37 @@ class FrozenTokenCollection:
     records: tuple[FrozenTokenRecord, ...]
     coverage_summary: DiscoveryCoverageSummary
     window_session_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DiscoveryWindowPlanRecord:
+    recording_id: str
+    session_id: str
+    window_start_s: float
+    window_end_s: float
+    label: float
+
+
+@dataclass(frozen=True)
+class DiscoveryWindowPlan:
+    split_name: str
+    target_label: str
+    windows: tuple[DiscoveryWindowPlanRecord, ...]
+    selected_indices: torch.Tensor
+    coverage_summary: DiscoveryCoverageSummary
+
+
+@dataclass(frozen=True)
+class EncodedDiscoverySelection:
+    pooled_features: torch.Tensor
+    labels: torch.Tensor
+    window_session_ids: tuple[str, ...]
+    shard_paths: tuple[Path, ...]
+    coverage_summary: DiscoveryCoverageSummary
+    encoder_device: str
+
+
+ProgressCallback = Callable[[int, int | None], None]
 
 
 def _session_stratified_subsample(
@@ -114,6 +149,263 @@ def _build_coverage_summary(
     )
 
 
+def _maybe_update_progress(progress_callback: ProgressCallback | None, current: int, total: int | None) -> None:
+    if progress_callback is not None:
+        progress_callback(current, total)
+
+
+def _pooled_features_from_tokens(tokens: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
+    mask = token_mask.to(dtype=tokens.dtype).unsqueeze(-1)
+    token_counts = mask.sum(dim=1).clamp_min(1.0)
+    return (tokens * mask).sum(dim=1) / token_counts
+
+
+def build_discovery_window_plan(
+    *,
+    experiment_config: ExperimentConfig,
+    data_config_path: str | Path,
+    split_name: str,
+    dataset_view=None,
+    progress_callback: ProgressCallback | None = None,
+) -> DiscoveryWindowPlan:
+    dataset_view = dataset_view or resolve_runtime_dataset_view(
+        experiment_config=experiment_config,
+        data_config_path=data_config_path,
+    )
+    workspace = dataset_view.workspace
+    split_manifest = dataset_view.split_manifest
+    bundle = build_dataset_bundle(
+        workspace=workspace,
+        split_manifest=split_manifest,
+        split=split_name,
+        config_dir=dataset_view.config_dir,
+        config_name_prefix=dataset_view.config_name_prefix,
+        dataset_split=dataset_view.dataset_split,
+    )
+    sampler = build_sequential_fixed_window_sampler(
+        bundle.dataset,
+        window=FixedWindowConfig(
+            window_length_s=experiment_config.data_runtime.context_duration_s,
+            step_s=experiment_config.evaluation.sequential_step_s,
+        ),
+    )
+    sampler_items = list(sampler)
+    total_windows = len(sampler_items)
+    planned_windows: list[DiscoveryWindowPlanRecord] = []
+    for index, item in enumerate(sampler_items, start=1):
+        sample = bundle.dataset.get(item.recording_id, item.start, item.end)
+        recording_id, session_id, _ = extract_sample_recording_metadata(sample)
+        annotations = extract_sample_event_annotations(
+            sample,
+            experiment_config.data_runtime,
+            window_start_s=float(item.start),
+            window_end_s=float(item.end),
+        )
+        label = extract_binary_label_from_annotations(
+            annotations,
+            target_label=experiment_config.discovery.target_label,
+        )
+        planned_windows.append(
+            DiscoveryWindowPlanRecord(
+                recording_id=recording_id or str(item.recording_id),
+                session_id=session_id,
+                window_start_s=float(item.start),
+                window_end_s=float(item.end),
+                label=float(label),
+            )
+        )
+        _maybe_update_progress(progress_callback, index, total_windows)
+    if hasattr(bundle.dataset, "_close_open_files"):
+        bundle.dataset._close_open_files()
+    labels = torch.tensor([window.label for window in planned_windows], dtype=torch.float32)
+    session_ids = tuple(window.session_id for window in planned_windows)
+    selected_indices, _, _ = _select_label_balanced_indices(
+        labels=labels,
+        session_ids=session_ids,
+        seed=experiment_config.seed,
+    )
+    coverage_summary = _build_coverage_summary(
+        split_name=split_name,
+        target_label=experiment_config.discovery.target_label,
+        labels=labels,
+        session_ids=session_ids,
+        selected_indices=selected_indices,
+    )
+    return DiscoveryWindowPlan(
+        split_name=split_name,
+        target_label=experiment_config.discovery.target_label,
+        windows=tuple(planned_windows),
+        selected_indices=selected_indices,
+        coverage_summary=coverage_summary,
+    )
+
+
+def _write_positive_token_shard(
+    *,
+    shard_dir: Path,
+    shard_index: int,
+    batch,
+    tokens: torch.Tensor,
+    labels: torch.Tensor,
+) -> Path | None:
+    flat_tokens = tokens.reshape(tokens.shape[0], -1, tokens.shape[-1])
+    flat_mask = batch.patch_mask.reshape(batch.patch_mask.shape[0], -1).detach().cpu()
+
+    embeddings: list[torch.Tensor] = []
+    recording_ids: list[str] = []
+    session_ids: list[str] = []
+    subject_ids: list[str] = []
+    unit_ids: list[str] = []
+    unit_regions: list[str] = []
+    unit_depth_um: list[float] = []
+    patch_index: list[int] = []
+    patch_start_s: list[float] = []
+    patch_end_s: list[float] = []
+    window_start_s: list[float] = []
+    window_end_s: list[float] = []
+
+    for batch_index in range(tokens.shape[0]):
+        if float(labels[batch_index].item()) <= 0.0:
+            continue
+        sample_tokens = flat_tokens[batch_index]
+        sample_mask = flat_mask[batch_index]
+        flat_position = 0
+        for unit_index, unit_id in enumerate(batch.provenance.unit_ids[batch_index]):
+            for patch_idx in range(tokens.shape[2]):
+                if not bool(batch.patch_mask[batch_index, unit_index, patch_idx].item()):
+                    flat_position += 1
+                    continue
+                if bool(sample_mask[flat_position].item()):
+                    embeddings.append(sample_tokens[flat_position].detach().cpu())
+                    recording_ids.append(batch.provenance.recording_ids[batch_index])
+                    session_ids.append(batch.provenance.session_ids[batch_index])
+                    subject_ids.append(batch.provenance.subject_ids[batch_index])
+                    unit_ids.append(unit_id)
+                    unit_regions.append(batch.provenance.unit_regions[batch_index][unit_index])
+                    unit_depth_um.append(float(batch.provenance.unit_depth_um[batch_index, unit_index].item()))
+                    patch_index.append(int(patch_idx))
+                    patch_start_s.append(float(batch.provenance.patch_start_s[batch_index, patch_idx].item()))
+                    patch_end_s.append(float(batch.provenance.patch_end_s[batch_index, patch_idx].item()))
+                    window_start_s.append(float(batch.provenance.window_start_s[batch_index].item()))
+                    window_end_s.append(float(batch.provenance.window_end_s[batch_index].item()))
+                flat_position += 1
+
+    if not embeddings:
+        return None
+
+    shard_path = shard_dir / f"positive_token_shard_{shard_index:05d}.pt"
+    torch.save(
+        {
+            "embeddings": torch.stack(embeddings, dim=0),
+            "recording_ids": recording_ids,
+            "session_ids": session_ids,
+            "subject_ids": subject_ids,
+            "unit_ids": unit_ids,
+            "unit_regions": unit_regions,
+            "unit_depth_um": torch.tensor(unit_depth_um, dtype=torch.float32),
+            "patch_index": torch.tensor(patch_index, dtype=torch.long),
+            "patch_start_s": torch.tensor(patch_start_s, dtype=torch.float32),
+            "patch_end_s": torch.tensor(patch_end_s, dtype=torch.float32),
+            "window_start_s": torch.tensor(window_start_s, dtype=torch.float32),
+            "window_end_s": torch.tensor(window_end_s, dtype=torch.float32),
+        },
+        shard_path,
+    )
+    return shard_path
+
+
+def extract_selected_discovery_windows(
+    *,
+    experiment_config: ExperimentConfig,
+    data_config_path: str | Path,
+    checkpoint_path: str | Path,
+    window_plan: DiscoveryWindowPlan,
+    dataset_view=None,
+    shard_dir: str | Path,
+    progress_callback: ProgressCallback | None = None,
+) -> EncodedDiscoverySelection:
+    dataset_view = dataset_view or resolve_runtime_dataset_view(
+        experiment_config=experiment_config,
+        data_config_path=data_config_path,
+    )
+    workspace = dataset_view.workspace
+    split_manifest = dataset_view.split_manifest
+    tokenizer = build_tokenizer_from_config(experiment_config)
+    device = resolve_device(experiment_config.execution.device)
+    model = build_model_from_config(experiment_config).to(device)
+    checkpoint = load_training_checkpoint(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state"])
+    model.eval()
+
+    bundle = build_dataset_bundle(
+        workspace=workspace,
+        split_manifest=split_manifest,
+        split=window_plan.split_name,
+        config_dir=dataset_view.config_dir,
+        config_name_prefix=dataset_view.config_name_prefix,
+        dataset_split=dataset_view.dataset_split,
+    )
+    selected_windows = [window_plan.windows[index] for index in window_plan.selected_indices.tolist()]
+    total_selected = len(selected_windows)
+    shard_root = Path(shard_dir)
+    if shard_root.exists():
+        shutil.rmtree(shard_root)
+    shard_root.mkdir(parents=True, exist_ok=True)
+
+    pooled_feature_chunks: list[torch.Tensor] = []
+    label_chunks: list[torch.Tensor] = []
+    window_session_ids: list[str] = []
+    shard_paths: list[Path] = []
+    shard_index = 0
+    processed_windows = 0
+    scaler_enabled = bool(experiment_config.execution.mixed_precision and device.type == "cuda")
+
+    with torch.no_grad():
+        for start in range(0, total_selected, experiment_config.optimization.batch_size):
+            window_batch = selected_windows[start : start + experiment_config.optimization.batch_size]
+            samples = [
+                bundle.dataset.get(window.recording_id, window.window_start_s, window.window_end_s)
+                for window in window_batch
+            ]
+            batch = tokenizer(samples)
+            labels = torch.tensor([window.label for window in window_batch], dtype=torch.float32)
+            device_batch = batch.to(device)
+            autocast_context = (
+                torch.autocast(device_type=device.type, dtype=torch.float16) if scaler_enabled else nullcontext()
+            )
+            with autocast_context:
+                output = model(device_batch)
+            flat_tokens = output.tokens.detach().cpu().reshape(output.tokens.shape[0], -1, output.tokens.shape[-1])
+            flat_mask = output.patch_mask.detach().cpu().reshape(output.patch_mask.shape[0], -1)
+            pooled_feature_chunks.append(_pooled_features_from_tokens(flat_tokens, flat_mask))
+            label_chunks.append(labels)
+            window_session_ids.extend(window.session_id for window in window_batch)
+            shard_path = _write_positive_token_shard(
+                shard_dir=shard_root,
+                shard_index=shard_index,
+                batch=batch,
+                tokens=output.tokens.detach().cpu(),
+                labels=labels,
+            )
+            if shard_path is not None:
+                shard_paths.append(shard_path)
+                shard_index += 1
+            processed_windows += len(window_batch)
+            _maybe_update_progress(progress_callback, processed_windows, total_selected)
+
+    if hasattr(bundle.dataset, "_close_open_files"):
+        bundle.dataset._close_open_files()
+
+    return EncodedDiscoverySelection(
+        pooled_features=torch.cat(pooled_feature_chunks, dim=0) if pooled_feature_chunks else torch.empty((0, 0), dtype=torch.float32),
+        labels=torch.cat(label_chunks, dim=0) if label_chunks else torch.empty((0,), dtype=torch.float32),
+        window_session_ids=tuple(window_session_ids),
+        shard_paths=tuple(shard_paths),
+        coverage_summary=window_plan.coverage_summary,
+        encoder_device=str(device),
+    )
+
+
 def extract_frozen_tokens(
     *,
     experiment_config: ExperimentConfig,
@@ -126,6 +418,7 @@ def extract_frozen_tokens(
     include_records: bool = True,
     positive_records_only: bool = False,
     sampling_strategy_override: str | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> FrozenTokenCollection:
     dataset_view = dataset_view or resolve_runtime_dataset_view(
         experiment_config=experiment_config,
@@ -169,6 +462,8 @@ def extract_frozen_tokens(
     )
 
     with torch.no_grad():
+        processed_batches = 0
+        total_batches = sampler_max_batches or max_batches or experiment_config.discovery.max_batches
         for batch in iter_sampler_batches(
             dataset=bundle.dataset,
             sampler=sampler,
@@ -224,6 +519,8 @@ def extract_frozen_tokens(
                                 )
                             )
                     sample_record_groups.append(tuple(sample_records))
+            processed_batches += 1
+            _maybe_update_progress(progress_callback, processed_batches, total_batches)
     if hasattr(bundle.dataset, "_close_open_files"):
         bundle.dataset._close_open_files()
     if not label_chunks:
