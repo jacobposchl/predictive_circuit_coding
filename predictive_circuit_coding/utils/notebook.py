@@ -522,6 +522,35 @@ def restore_latest_exported_artifacts(
     return latest_run
 
 
+def restore_latest_discovery_artifacts(
+    *,
+    drive_export_root: str | Path,
+    local_artifact_root: str | Path,
+    run_prefix: str = "discover_run_",
+) -> Path | None:
+    """Copy discovery artifact files from the most recent Drive discover_run_* export
+    into the local artifact root without overwriting any files that already exist."""
+    export_root = Path(drive_export_root)
+    if not export_root.exists():
+        return None
+    run_candidates = sorted(
+        [path for path in export_root.iterdir() if path.is_dir() and path.name.startswith(run_prefix)],
+        key=lambda path: path.name,
+    )
+    if not run_candidates:
+        return None
+    latest_run = run_candidates[-1]
+    artifact_root = Path(local_artifact_root)
+    for src_file in latest_run.rglob("*"):
+        if not src_file.is_file():
+            continue
+        dst = artifact_root / src_file.relative_to(latest_run)
+        if not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dst)
+    return latest_run
+
+
 @dataclass(frozen=True)
 class NotebookDiscoveryRunResult:
     discovery_artifact_path: Path
@@ -566,6 +595,28 @@ def _cluster_report_paths(discovery_output_path: str | Path) -> tuple[Path, Path
 def _coverage_summary_path(discovery_output_path: str | Path) -> Path:
     output = Path(discovery_output_path)
     return output.with_name(f"{output.stem}_decode_coverage.json")
+
+
+def find_existing_discovery_run(
+    *,
+    checkpoint_path: str | Path,
+    split_name: str = "discovery",
+) -> "NotebookDiscoveryRunResult | None":
+    """Return a NotebookDiscoveryRunResult if all expected discovery artifact files exist locally,
+    otherwise return None so the caller can decide whether to re-run discovery."""
+    discovery_path = _default_discovery_output_path(checkpoint_path, split_name)
+    if not discovery_path.exists():
+        return None
+    coverage_path = _coverage_summary_path(discovery_path)
+    cluster_json, cluster_csv = _cluster_report_paths(discovery_path)
+    if not all(p.exists() for p in (coverage_path, cluster_json, cluster_csv)):
+        return None
+    return NotebookDiscoveryRunResult(
+        discovery_artifact_path=discovery_path,
+        decode_coverage_summary_path=coverage_path,
+        cluster_summary_json_path=cluster_json,
+        cluster_summary_csv_path=cluster_csv,
+    )
 
 
 def _default_validation_output_paths(discovery_artifact_path: str | Path) -> tuple[Path, Path]:

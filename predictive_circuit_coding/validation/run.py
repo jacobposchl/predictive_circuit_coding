@@ -133,12 +133,15 @@ def validate_discovery_artifact(
         )
     artifact_decoder_metrics = dict(artifact.get("decoder_summary", {}).get("metrics", {}))
     artifact_probe_state = _deserialize_probe_state(artifact.get("decoder_summary", {}).get("probe_state"))
+    # Cap the discovery re-extraction to evaluation.max_batches — the shuffle control is a
+    # relative statistical check and does not require the full discovery pass.
+    shuffle_max_batches = experiment_config.evaluation.max_batches
     discovery_collection = extract_frozen_tokens(
         experiment_config=experiment_config,
         data_config_path=data_config_path,
         checkpoint_path=checkpoint_path,
         split_name=experiment_config.splits.discovery,
-        max_batches=experiment_config.discovery.max_batches,
+        max_batches=shuffle_max_batches,
         dataset_view=dataset_view,
         include_records=False,
     )
@@ -149,6 +152,7 @@ def validate_discovery_artifact(
             labels=discovery_collection.labels,
             epochs=experiment_config.discovery.probe_epochs,
             learning_rate=experiment_config.discovery.probe_learning_rate,
+            mini_batch_size=256,
             label_name=experiment_config.discovery.target_label,
         )
         artifact_probe_state = real_probe_fit.state_dict
@@ -163,11 +167,14 @@ def validate_discovery_artifact(
         labels=shuffled_labels,
         epochs=experiment_config.discovery.probe_epochs,
         learning_rate=experiment_config.discovery.probe_learning_rate,
+        mini_batch_size=256,
         label_name=experiment_config.discovery.target_label,
     )
     del discovery_collection
     del shuffled_labels
     gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     test_collection = extract_frozen_tokens(
         experiment_config=experiment_config,
@@ -202,6 +209,7 @@ def validate_discovery_artifact(
 
     checkpoint_state = load_training_checkpoint(checkpoint_path, map_location="cpu")
     metadata = checkpoint_state.get("metadata", {})
+    del checkpoint_state
     cluster_count = len({int(candidate["cluster_id"]) for candidate in artifact["candidates"] if int(candidate["cluster_id"]) != -1})
     return ValidationSummary(
         dataset_id=experiment_config.dataset_id,

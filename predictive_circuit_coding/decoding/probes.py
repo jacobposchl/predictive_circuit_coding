@@ -59,6 +59,7 @@ def fit_additive_probe(
     labels: torch.Tensor,
     epochs: int,
     learning_rate: float,
+    mini_batch_size: int | None = None,
     label_name: str = "label",
 ) -> ProbeFitResult:
     if tokens.numel() == 0 or token_mask.numel() == 0 or labels.numel() == 0:
@@ -67,14 +68,26 @@ def fit_additive_probe(
         raise ValueError(
             f"Cannot fit additive probe because no positive '{label_name}' labels were found in the sampled windows."
         )
+    n = tokens.shape[0]
     model = AdditiveTokenProbe(tokens.shape[-1])
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    use_mini_batch = mini_batch_size is not None and mini_batch_size < n
     for _ in range(epochs):
-        optimizer.zero_grad(set_to_none=True)
-        sample_logits, _ = model(tokens, token_mask)
-        loss = F.binary_cross_entropy_with_logits(sample_logits, labels)
-        loss.backward()
-        optimizer.step()
+        if use_mini_batch:
+            indices = torch.randperm(n)
+            for start in range(0, n, mini_batch_size):  # type: ignore[arg-type]
+                batch_idx = indices[start : start + mini_batch_size]
+                optimizer.zero_grad(set_to_none=True)
+                sample_logits, _ = model(tokens[batch_idx], token_mask[batch_idx])
+                loss = F.binary_cross_entropy_with_logits(sample_logits, labels[batch_idx])
+                loss.backward()
+                optimizer.step()
+        else:
+            optimizer.zero_grad(set_to_none=True)
+            sample_logits, _ = model(tokens, token_mask)
+            loss = F.binary_cross_entropy_with_logits(sample_logits, labels)
+            loss.backward()
+            optimizer.step()
     return ProbeFitResult(
         state_dict=model.state_dict(),
         metrics=_compute_probe_metrics(
