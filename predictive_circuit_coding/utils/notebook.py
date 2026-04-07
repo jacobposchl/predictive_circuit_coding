@@ -53,6 +53,13 @@ class NotebookDatasetConfig:
 
 
 @dataclass(frozen=True)
+class NotebookTrainingConfig:
+    num_epochs: int = 8
+    train_steps_per_epoch: int = 128
+    validation_steps: int = 16
+
+
+@dataclass(frozen=True)
 class NotebookRuntimeContext:
     experiment_config_path: Path
     checkpoint_dir: Path
@@ -191,6 +198,7 @@ def prepare_notebook_runtime_context(
     session_catalog_csv: str | Path,
     artifact_root: str | Path,
     dataset_config: NotebookDatasetConfig,
+    training_config: NotebookTrainingConfig | None = None,
     step_log_every: int,
 ) -> NotebookRuntimeContext:
     base_path = Path(base_experiment_config)
@@ -204,7 +212,12 @@ def prepare_notebook_runtime_context(
     artifact_path.mkdir(parents=True, exist_ok=True)
 
     payload = yaml.safe_load(base_path.read_text(encoding="utf-8"))
-    payload.setdefault("training", {})["log_every_steps"] = int(step_log_every)
+    training_payload = payload.setdefault("training", {})
+    training_payload["log_every_steps"] = int(step_log_every)
+    if training_config is not None:
+        training_payload["num_epochs"] = int(training_config.num_epochs)
+        training_payload["train_steps_per_epoch"] = int(training_config.train_steps_per_epoch)
+        training_payload["validation_steps"] = int(training_config.validation_steps)
     discovery = payload.setdefault("discovery", {})
     discovery["sampling_strategy"] = "label_balanced"
     discovery.pop("search_max_batches", None)
@@ -273,6 +286,11 @@ def prepare_notebook_runtime_context(
             "valid_fraction": dataset_config.valid_fraction,
             "discovery_fraction": dataset_config.discovery_fraction,
             "test_fraction": dataset_config.test_fraction,
+        },
+        "training_config": {
+            "num_epochs": int(training_payload.get("num_epochs", 0)),
+            "train_steps_per_epoch": int(training_payload.get("train_steps_per_epoch", 0)),
+            "validation_steps": int(training_payload.get("validation_steps", 0)),
         },
         "selected_session_count": selected_session_count,
         "selected_sessions_preview": [

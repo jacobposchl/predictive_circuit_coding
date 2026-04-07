@@ -6,6 +6,7 @@ from predictive_circuit_coding.utils.dependencies import (
 )
 from predictive_circuit_coding.utils.notebook import (
     NotebookDatasetConfig,
+    NotebookTrainingConfig,
     NotebookRuntimeContext,
     NotebookCommandStreamFormatter,
     NotebookStageReporter,
@@ -27,6 +28,7 @@ __all__ = [
     "build_dependency_table",
     "get_console",
     "NotebookDatasetConfig",
+    "NotebookTrainingConfig",
     "NotebookRuntimeContext",
     "NotebookCommandStreamFormatter",
     "NotebookStageReporter",

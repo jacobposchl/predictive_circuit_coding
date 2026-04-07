@@ -8,6 +8,7 @@ import yaml
 from predictive_circuit_coding.utils import (
     NotebookCommandStreamFormatter,
     NotebookDatasetConfig,
+    NotebookTrainingConfig,
     build_notebook_discovery_runtime_config,
     load_notebook_split_counts,
     output_indicates_missing_positive_labels,
@@ -129,11 +130,19 @@ def test_prepare_notebook_runtime_context_writes_notebook_only_subset_config(tmp
             experience_level="Familiar",
             max_sessions=2,
         ),
+        training_config=NotebookTrainingConfig(
+            num_epochs=20,
+            train_steps_per_epoch=256,
+            validation_steps=64,
+        ),
         step_log_every=16,
     )
 
     runtime_payload = yaml.safe_load(context.experiment_config_path.read_text(encoding="utf-8"))
     assert runtime_payload["training"]["log_every_steps"] == 16
+    assert runtime_payload["training"]["num_epochs"] == 20
+    assert runtime_payload["training"]["train_steps_per_epoch"] == 256
+    assert runtime_payload["training"]["validation_steps"] == 64
     assert runtime_payload["artifacts"]["checkpoint_dir"] == str((tmp_path / "artifacts" / "checkpoints").resolve())
     assert runtime_payload["artifacts"]["summary_path"] == str((tmp_path / "artifacts" / "training_summary.json").resolve())
     assert runtime_payload["dataset_selection"] == {}
@@ -152,6 +161,9 @@ def test_prepare_notebook_runtime_context_writes_notebook_only_subset_config(tmp
     profile_payload = json.loads(context.profile_path.read_text(encoding="utf-8"))
     assert profile_payload["selected_session_count"] == 2
     assert profile_payload["selected_sessions_preview"][0]["session_id"] == "101"
+    assert profile_payload["training_config"]["num_epochs"] == 20
+    assert profile_payload["training_config"]["train_steps_per_epoch"] == 256
+    assert profile_payload["training_config"]["validation_steps"] == 64
 
 
 def test_resolve_notebook_checkpoint_prefers_training_summary_checkpoint_path(tmp_path: Path) -> None:
