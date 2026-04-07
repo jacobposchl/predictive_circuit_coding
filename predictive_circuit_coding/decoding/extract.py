@@ -335,6 +335,7 @@ def extract_selected_discovery_windows(
     model = build_model_from_config(experiment_config).to(device)
     checkpoint = load_training_checkpoint(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model_state"])
+    del checkpoint
     model.eval()
 
     bundle = build_dataset_bundle(
@@ -431,6 +432,7 @@ def extract_frozen_tokens(
     model = build_model_from_config(experiment_config).to(device)
     checkpoint = load_training_checkpoint(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model_state"])
+    del checkpoint
     model.eval()
 
     bundle = build_dataset_bundle(
@@ -531,18 +533,17 @@ def extract_frozen_tokens(
     labels = torch.cat(label_chunks, dim=0)
     if include_token_tensors:
         max_seq_len = max(chunk.shape[1] for chunk in token_chunks)
-        padded_token_chunks = [
-            torch.nn.functional.pad(chunk, (0, 0, 0, max_seq_len - chunk.shape[1]))
-            if chunk.shape[1] < max_seq_len else chunk
-            for chunk in token_chunks
-        ]
-        padded_mask_chunks = [
-            torch.nn.functional.pad(chunk, (0, max_seq_len - chunk.shape[1]), value=False)
-            if chunk.shape[1] < max_seq_len else chunk
-            for chunk in mask_chunks
-        ]
-        tokens = torch.cat(padded_token_chunks, dim=0)
-        token_mask = torch.cat(padded_mask_chunks, dim=0)
+        total_windows = sum(chunk.shape[0] for chunk in token_chunks)
+        token_dim = token_chunks[0].shape[2]
+        tokens = torch.zeros((total_windows, max_seq_len, token_dim), dtype=torch.float32)
+        token_mask = torch.zeros((total_windows, max_seq_len), dtype=torch.bool)
+        offset = 0
+        for tok_chunk, mask_chunk in zip(token_chunks, mask_chunks):
+            n, seq = tok_chunk.shape[0], tok_chunk.shape[1]
+            tokens[offset:offset + n, :seq] = tok_chunk
+            token_mask[offset:offset + n, :seq] = mask_chunk
+            offset += n
+        del token_chunks, mask_chunks
     else:
         tokens = torch.empty((0, 0, 0), dtype=torch.float32)
         token_mask = torch.empty((0, 0), dtype=torch.bool)

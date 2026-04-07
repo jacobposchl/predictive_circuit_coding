@@ -45,6 +45,9 @@ def _cosine_similarity(lhs: torch.Tensor, rhs: torch.Tensor) -> float:
     return float(torch.dot(lhs, rhs).item())
 
 
+_SIMILARITY_CHUNK_SIZE = 512
+
+
 def _window_similarity_scores(
     *,
     tokens: torch.Tensor,
@@ -55,14 +58,19 @@ def _window_similarity_scores(
         return torch.empty((0,), dtype=torch.float32)
     if not centroids:
         return torch.zeros((tokens.shape[0],), dtype=torch.float32)
-    normalized_tokens = tokens / tokens.norm(dim=-1, keepdim=True).clamp_min(1.0e-8)
     centroid_tensor = torch.stack(
         [centroid / centroid.norm().clamp_min(1.0e-8) for centroid in centroids],
         dim=0,
     )
-    similarities = torch.einsum("wtd,cd->wtc", normalized_tokens, centroid_tensor)
-    similarities = similarities.masked_fill(~token_mask.unsqueeze(-1), float("-inf"))
-    return similarities.amax(dim=(1, 2)).to(dtype=torch.float32)
+    scores = torch.empty((tokens.shape[0],), dtype=torch.float32)
+    for start in range(0, tokens.shape[0], _SIMILARITY_CHUNK_SIZE):
+        end = min(start + _SIMILARITY_CHUNK_SIZE, tokens.shape[0])
+        chunk = tokens[start:end]
+        normalized_chunk = chunk / chunk.norm(dim=-1, keepdim=True).clamp_min(1.0e-8)
+        chunk_sims = torch.einsum("wtd,cd->wtc", normalized_chunk, centroid_tensor)
+        chunk_sims = chunk_sims.masked_fill(~token_mask[start:end].unsqueeze(-1), float("-inf"))
+        scores[start:end] = chunk_sims.amax(dim=(1, 2)).to(dtype=torch.float32)
+    return scores
 
 
 def _held_out_similarity_summary(
