@@ -13,6 +13,8 @@ from predictive_circuit_coding.decoding import evaluate_additive_probe, extract_
 from predictive_circuit_coding.training.artifacts import load_training_checkpoint
 from predictive_circuit_coding.training.config import ExperimentConfig
 from predictive_circuit_coding.training.contracts import ValidationSummary
+from predictive_circuit_coding.training.factories import build_model_from_config
+from predictive_circuit_coding.training.runtime import resolve_device
 
 
 def _load_discovery_artifact(path: str | Path) -> dict:
@@ -133,17 +135,27 @@ def validate_discovery_artifact(
         )
     artifact_decoder_metrics = dict(artifact.get("decoder_summary", {}).get("metrics", {}))
     artifact_probe_state = _deserialize_probe_state(artifact.get("decoder_summary", {}).get("probe_state"))
+
+    # Load the model once and reuse it for both extractions, avoiding a second
+    # checkpoint load (model + optimizer state) while the first is still live.
+    device = resolve_device(experiment_config.execution.device)
+    shared_model = build_model_from_config(experiment_config).to(device)
+    checkpoint = load_training_checkpoint(checkpoint_path, map_location=device)
+    shared_model.load_state_dict(checkpoint["model_state"])
+    del checkpoint
+    shared_model.eval()
+
     # Cap the discovery re-extraction to evaluation.max_batches — the shuffle control is a
     # relative statistical check and does not require the full discovery pass.
-    shuffle_max_batches = experiment_config.evaluation.max_batches
     discovery_collection = extract_frozen_tokens(
         experiment_config=experiment_config,
         data_config_path=data_config_path,
         checkpoint_path=checkpoint_path,
         split_name=experiment_config.splits.discovery,
-        max_batches=shuffle_max_batches,
+        max_batches=experiment_config.evaluation.max_batches,
         dataset_view=dataset_view,
         include_records=False,
+        model=shared_model,
     )
     if artifact_probe_state is None:
         real_probe_fit = fit_additive_probe(
@@ -188,7 +200,15 @@ def validate_discovery_artifact(
         positive_records_only=False,
         sampling_strategy_override="sequential",
         progress_callback=progress_callback,
+        model=shared_model,
     )
+
+    # Model no longer needed — free GPU memory before CPU-only metrics work.
+    del shared_model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     held_out_test_metrics = evaluate_additive_probe(
         state_dict=artifact_probe_state,
         tokens=test_collection.tokens,
@@ -207,6 +227,7 @@ def validate_discovery_artifact(
         window_scores=window_scores,
     )
 
+    # Load only metadata from checkpoint — map to CPU so no GPU memory is used.
     checkpoint_state = load_training_checkpoint(checkpoint_path, map_location="cpu")
     metadata = checkpoint_state.get("metadata", {})
     del checkpoint_state

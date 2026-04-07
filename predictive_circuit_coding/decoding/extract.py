@@ -420,6 +420,7 @@ def extract_frozen_tokens(
     positive_records_only: bool = False,
     sampling_strategy_override: str | None = None,
     progress_callback: ProgressCallback | None = None,
+    model: torch.nn.Module | None = None,
 ) -> FrozenTokenCollection:
     dataset_view = dataset_view or resolve_runtime_dataset_view(
         experiment_config=experiment_config,
@@ -429,11 +430,12 @@ def extract_frozen_tokens(
     split_manifest = dataset_view.split_manifest
     tokenizer = build_tokenizer_from_config(experiment_config)
     device = resolve_device(experiment_config.execution.device)
-    model = build_model_from_config(experiment_config).to(device)
-    checkpoint = load_training_checkpoint(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint["model_state"])
-    del checkpoint
-    model.eval()
+    if model is None:
+        model = build_model_from_config(experiment_config).to(device)
+        checkpoint = load_training_checkpoint(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state"])
+        del checkpoint
+        model.eval()
 
     bundle = build_dataset_bundle(
         workspace=workspace,
