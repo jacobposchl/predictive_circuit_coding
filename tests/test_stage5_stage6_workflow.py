@@ -26,6 +26,7 @@ from predictive_circuit_coding.data import (
 from predictive_circuit_coding.decoding import fit_additive_probe
 from predictive_circuit_coding.training import load_experiment_config, train_model
 from predictive_circuit_coding.training.contracts import EvaluationSummary
+from predictive_circuit_coding.utils import collect_notebook_target_value_counts
 
 
 def _write_preparation_config(tmp_path: Path) -> Path:
@@ -546,6 +547,28 @@ def test_image_identity_one_vs_rest_workflow_runs_end_to_end(tmp_path: Path):
     assert discovery_payload["config_snapshot"]["discovery"]["target_label_match_value"] == "im2"
     assert len(discovery_payload["candidates"]) >= 1
     assert "held_out_test_metrics" in validation_payload
+
+
+def test_collect_notebook_target_value_counts_reads_image_names_from_discovery_sessions(tmp_path: Path):
+    prep_config_path, _, _ = _create_prepared_workspace(tmp_path)
+    experiment_config_path = _write_experiment_config(
+        tmp_path,
+        discovery_target_label="stimulus_presentations.image_name",
+        discovery_target_label_mode="onset_within_window",
+        discovery_target_label_match_value="im2",
+    )
+
+    counts = collect_notebook_target_value_counts(
+        experiment_config_path=experiment_config_path,
+        data_config_path=prep_config_path,
+        split_name="discovery",
+        target_label="stimulus_presentations.image_name",
+        target_label_mode="onset_within_window",
+    )
+
+    assert counts
+    assert {row["value"] for row in counts} == {"im0", "im1", "im2", "im3"}
+    assert all(int(row["count"]) == 1 for row in counts)
 
 
 def test_train_model_writes_fallback_best_checkpoint_when_validation_metric_is_nan(tmp_path: Path, monkeypatch):

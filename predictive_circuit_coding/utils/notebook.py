@@ -1241,15 +1241,58 @@ def collect_notebook_target_value_counts(
     target_label: str,
     target_label_mode: str = "auto",
 ) -> tuple[dict[str, object], ...]:
+    import numpy as np
+
     from predictive_circuit_coding.cli.common import require_non_empty_split, require_runtime_view
+    from predictive_circuit_coding.data import load_temporaldata_session
     from predictive_circuit_coding.decoding.labels import extract_matching_values_from_annotations
     from predictive_circuit_coding.tokenization import extract_sample_event_annotations
     from predictive_circuit_coding.training import load_experiment_config
-    from predictive_circuit_coding.windowing import FixedWindowConfig, build_dataset_bundle, build_sequential_fixed_window_sampler
+    from predictive_circuit_coding.windowing import (
+        FixedWindowConfig,
+        build_dataset_bundle,
+        build_sequential_fixed_window_sampler,
+    )
+    from predictive_circuit_coding.windowing.dataset import split_session_ids
+
+    def _normalize_value(value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            normalized = value.decode("utf-8", errors="replace").strip()
+        else:
+            normalized = str(value).strip()
+        if not normalized or normalized.lower() == "nan":
+            return None
+        return normalized
 
     config = load_experiment_config(experiment_config_path)
     dataset_view = require_runtime_view(experiment_config=config, data_config_path=data_config_path)
     require_non_empty_split(dataset_view=dataset_view, split_name=split_name)
+
+    direct_counts: dict[str, int] = {}
+    namespace, dot, field = str(target_label).partition(".")
+    if dot and namespace and field and "." not in field:
+        for session_id in split_session_ids(dataset_view.split_manifest, split_name):
+            session_path = dataset_view.workspace.brainset_prepared_root / f"{session_id}.h5"
+            if not session_path.is_file():
+                continue
+            session = load_temporaldata_session(session_path, lazy=False)
+            interval = getattr(session, namespace, None)
+            raw_values = getattr(interval, field, None) if interval is not None else None
+            if raw_values is None:
+                continue
+            for raw_value in np.asarray(raw_values, dtype=object).reshape(-1):
+                normalized = _normalize_value(raw_value)
+                if normalized is None:
+                    continue
+                direct_counts[normalized] = direct_counts.get(normalized, 0) + 1
+    if direct_counts:
+        return tuple(
+            {"value": value, "count": count}
+            for value, count in sorted(direct_counts.items(), key=lambda item: (-item[1], item[0]))
+        )
+
     bundle = build_dataset_bundle(
         workspace=dataset_view.workspace,
         split_manifest=dataset_view.split_manifest,
