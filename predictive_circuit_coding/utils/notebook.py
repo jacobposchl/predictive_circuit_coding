@@ -891,11 +891,48 @@ def _load_discovery_target_label(discovery_artifact_path: str | Path) -> str | N
     return None
 
 
+def _load_discovery_config_snapshot(discovery_artifact_path: str | Path) -> dict | None:
+    artifact_path = Path(discovery_artifact_path)
+    if not artifact_path.exists():
+        return None
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    config_snapshot = payload.get("config_snapshot")
+    return config_snapshot if isinstance(config_snapshot, dict) else None
+
+
+def _normalize_discovery_reuse_config(payload: dict) -> dict:
+    return {
+        "dataset_id": payload.get("dataset_id"),
+        "split_name": payload.get("split_name"),
+        "data_runtime": payload.get("data_runtime") or {},
+        "execution": payload.get("execution") or {},
+        "evaluation": payload.get("evaluation") or {},
+        "discovery": payload.get("discovery") or {},
+        "runtime_subset": payload.get("runtime_subset") or {},
+        "splits": payload.get("splits") or {},
+    }
+
+
+def _discovery_artifact_matches_runtime_config(
+    *,
+    discovery_artifact_path: str | Path,
+    experiment_config_path: str | Path,
+) -> bool:
+    artifact_config_snapshot = _load_discovery_config_snapshot(discovery_artifact_path)
+    if artifact_config_snapshot is None:
+        return False
+    runtime_payload = yaml.safe_load(Path(experiment_config_path).read_text(encoding="utf-8")) or {}
+    return _normalize_discovery_reuse_config(artifact_config_snapshot) == _normalize_discovery_reuse_config(
+        runtime_payload
+    )
+
+
 def find_existing_discovery_run(
     *,
     checkpoint_path: str | Path,
     split_name: str = "discovery",
     target_label: str | None = None,
+    experiment_config_path: str | Path | None = None,
 ) -> "NotebookDiscoveryRunResult | None":
     """Return a NotebookDiscoveryRunResult if all expected discovery artifact files exist locally,
     otherwise return None so the caller can decide whether to re-run discovery."""
@@ -910,6 +947,11 @@ def find_existing_discovery_run(
         existing_target_label = _load_discovery_target_label(discovery_path)
         if existing_target_label != str(target_label):
             return None
+    if experiment_config_path is not None and not _discovery_artifact_matches_runtime_config(
+        discovery_artifact_path=discovery_path,
+        experiment_config_path=experiment_config_path,
+    ):
+        return None
     return NotebookDiscoveryRunResult(
         discovery_artifact_path=discovery_path,
         decode_coverage_summary_path=coverage_path,

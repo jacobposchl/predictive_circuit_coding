@@ -622,9 +622,33 @@ def test_find_existing_discovery_run_filters_target_label(tmp_path: Path) -> Non
     checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_best.pt"
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_path.write_text("checkpoint", encoding="utf-8")
+    runtime_config = tmp_path / "colab_discovery_runtime_experiment.yaml"
+    runtime_config.write_text(
+        "\n".join(
+            [
+                "dataset_id: allen_visual_behavior_neuropixels",
+                "split_name: train",
+                "data_runtime: {}",
+                "execution: {}",
+                "evaluation:",
+                "  max_batches: 16",
+                "discovery:",
+                "  target_label: stimulus_change",
+                "  candidate_session_balance_fraction: 0.2",
+                "runtime_subset: {}",
+                "splits: {}",
+            ]
+        ),
+        encoding="utf-8",
+    )
     discovery_artifact = checkpoint_path.with_name("pcc_best_discovery_discovery.json")
     discovery_artifact.write_text(
-        json.dumps({"decoder_summary": {"target_label": "stimulus_change"}}),
+        json.dumps(
+            {
+                "decoder_summary": {"target_label": "stimulus_change"},
+                "config_snapshot": yaml.safe_load(runtime_config.read_text(encoding="utf-8")),
+            }
+        ),
         encoding="utf-8",
     )
     discovery_artifact.with_name("pcc_best_discovery_discovery_decode_coverage.json").write_text("{}", encoding="utf-8")
@@ -634,11 +658,75 @@ def test_find_existing_discovery_run_filters_target_label(tmp_path: Path) -> Non
     assert find_existing_discovery_run(
         checkpoint_path=checkpoint_path,
         target_label="stimulus_change",
+        experiment_config_path=runtime_config,
     ) is not None
     assert find_existing_discovery_run(
         checkpoint_path=checkpoint_path,
         target_label="trials.is_change",
+        experiment_config_path=runtime_config,
     ) is None
+
+
+def test_find_existing_discovery_run_rejects_mismatched_runtime_config(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_best.pt"
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_text("checkpoint", encoding="utf-8")
+    discovery_artifact = checkpoint_path.with_name("pcc_best_discovery_discovery.json")
+    runtime_config = tmp_path / "colab_discovery_runtime_experiment.yaml"
+    runtime_config.write_text(
+        "\n".join(
+            [
+                "dataset_id: allen_visual_behavior_neuropixels",
+                "split_name: train",
+                "data_runtime: {}",
+                "execution: {}",
+                "evaluation:",
+                "  max_batches: 16",
+                "discovery:",
+                "  target_label: trials.go",
+                "  candidate_session_balance_fraction: 0.2",
+                "runtime_subset: {}",
+                "splits: {}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    discovery_artifact.write_text(
+        json.dumps(
+            {
+                "decoder_summary": {"target_label": "trials.go"},
+                "config_snapshot": {
+                    "dataset_id": "allen_visual_behavior_neuropixels",
+                    "split_name": "train",
+                    "data_runtime": {},
+                    "execution": {},
+                    "evaluation": {"max_batches": 16},
+                    "discovery": {
+                        "target_label": "trials.go",
+                        "candidate_session_balance_fraction": 1.0,
+                    },
+                    "runtime_subset": {},
+                    "splits": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    discovery_artifact.with_name("pcc_best_discovery_discovery_decode_coverage.json").write_text("{}", encoding="utf-8")
+    discovery_artifact.with_name("pcc_best_discovery_discovery_cluster_summary.json").write_text("{}", encoding="utf-8")
+    discovery_artifact.with_name("pcc_best_discovery_discovery_cluster_summary.csv").write_text(
+        "cluster_id\n0\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        find_existing_discovery_run(
+            checkpoint_path=checkpoint_path,
+            target_label="trials.go",
+            experiment_config_path=runtime_config,
+        )
+        is None
+    )
 
 
 def test_describe_notebook_compute_targets_reports_cpu_probe_and_metrics(tmp_path: Path) -> None:
