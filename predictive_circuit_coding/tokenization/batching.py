@@ -21,6 +21,15 @@ def _normalize_string(value: Any) -> str:
     return str(value)
 
 
+def _strip_brainset_prefix(value: str, *, brainset_id: str) -> str:
+    if not value or not brainset_id:
+        return value
+    prefix = f"{brainset_id}/"
+    if value.startswith(prefix):
+        return value[len(prefix) :]
+    return value
+
+
 def _normalize_annotation_scalar(value: Any) -> Any:
     if isinstance(value, np.generic):
         value = value.item()
@@ -83,10 +92,12 @@ def extract_sample_event_annotations(sample, config: DataRuntimeConfig, *, windo
 
 def extract_sample_recording_metadata(sample) -> tuple[str, str, str]:
     brainset_id = _normalize_string(_safe_attr(_safe_attr(sample, "brainset"), "id"))
-    session_id = _normalize_string(_safe_attr(_safe_attr(sample, "session"), "id"))
-    subject_id = _normalize_string(_safe_attr(_safe_attr(sample, "subject"), "id"))
-    if brainset_id and session_id.startswith(f"{brainset_id}/"):
-        recording_id = session_id
+    raw_session_id = _normalize_string(_safe_attr(_safe_attr(sample, "session"), "id"))
+    raw_subject_id = _normalize_string(_safe_attr(_safe_attr(sample, "subject"), "id"))
+    session_id = _strip_brainset_prefix(raw_session_id, brainset_id=brainset_id)
+    subject_id = _strip_brainset_prefix(raw_subject_id, brainset_id=brainset_id)
+    if brainset_id and raw_session_id.startswith(f"{brainset_id}/"):
+        recording_id = raw_session_id
     elif brainset_id:
         recording_id = f"{brainset_id}/{session_id}"
     else:

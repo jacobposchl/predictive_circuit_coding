@@ -831,3 +831,62 @@ def test_validate_cli_rejects_artifact_target_label_mismatch(tmp_path: Path):
                 str(discovery_path),
             ]
         )
+
+
+def test_validate_cli_accepts_prefixed_candidate_session_and_subject_ids(tmp_path: Path):
+    prep_config_path, experiment_config_path = _build_workspace(tmp_path)
+
+    try:
+        train_main(["--config", str(experiment_config_path), "--data-config", str(prep_config_path)])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best.pt"
+    discovery_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best_discovery_discovery.json"
+    validation_path = tmp_path / "artifacts" / "checkpoints" / "prefixed_ids_validation.json"
+
+    try:
+        discover_main(
+            [
+                "--config",
+                str(experiment_config_path),
+                "--data-config",
+                str(prep_config_path),
+                "--checkpoint",
+                str(checkpoint_path),
+                "--split",
+                "discovery",
+                "--output",
+                str(discovery_path),
+            ]
+        )
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    payload = json.loads(discovery_path.read_text(encoding="utf-8"))
+    prefix = "allen_visual_behavior_neuropixels/"
+    for candidate in payload["candidates"]:
+        candidate["session_id"] = f"{prefix}{candidate['session_id']}"
+        candidate["subject_id"] = f"{prefix}{candidate['subject_id']}"
+    discovery_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    try:
+        validate_main(
+            [
+                "--config",
+                str(experiment_config_path),
+                "--data-config",
+                str(prep_config_path),
+                "--checkpoint",
+                str(checkpoint_path),
+                "--discovery-artifact",
+                str(discovery_path),
+                "--output-json",
+                str(validation_path),
+            ]
+        )
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    validation_payload = json.loads(validation_path.read_text(encoding="utf-8"))
+    assert validation_payload["provenance_issues"] == []

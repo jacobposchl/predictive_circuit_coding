@@ -176,6 +176,12 @@ def _provenance_issues(
     split_name: str,
 ) -> tuple[str, ...]:
     issues: list[str] = []
+    dataset_id = str(experiment_config.dataset_id)
+
+    def _normalize_identity(value: str) -> str:
+        prefix = f"{dataset_id}/"
+        return value[len(prefix) :] if value.startswith(prefix) else value
+
     catalog_by_recording = {
         str(record.recording_id): record
         for record in dataset_view.session_catalog.records
@@ -193,8 +199,8 @@ def _provenance_issues(
     for candidate in candidates:
         candidate_id = str(candidate.get("candidate_id", "unknown"))
         recording_id = str(candidate.get("recording_id", "") or "")
-        session_id = str(candidate.get("session_id", "") or "")
-        subject_id = str(candidate.get("subject_id", "") or "")
+        session_id = _normalize_identity(str(candidate.get("session_id", "") or ""))
+        subject_id = _normalize_identity(str(candidate.get("subject_id", "") or ""))
         unit_id = str(candidate.get("unit_id", "") or "")
 
         for key, value in (
@@ -210,9 +216,9 @@ def _provenance_issues(
         if not record:
             issues.append(f"unknown_recording_id:{candidate_id}")
         else:
-            if session_id and str(record.session_id) != session_id:
+            if session_id and _normalize_identity(str(record.session_id)) != session_id:
                 issues.append(f"session_recording_mismatch:{candidate_id}")
-            if subject_id and str(record.subject_id) != subject_id:
+            if subject_id and _normalize_identity(str(record.subject_id)) != subject_id:
                 issues.append(f"subject_recording_mismatch:{candidate_id}")
 
         if recording_id and split_by_recording.get(recording_id) not in {None, split_name}:

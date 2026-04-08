@@ -192,3 +192,31 @@ def test_population_window_collator_supports_real_allen_unit_field_names():
     assert batch.provenance.unit_ids[0] == ("u0", "u1")
     assert batch.provenance.unit_regions[0] == ("VISp", "LP")
     assert torch.equal(batch.provenance.unit_depth_um[0], torch.tensor([100.0, 200.0], dtype=torch.float32))
+
+
+def test_population_window_collator_normalizes_prefixed_session_and_subject_ids():
+    config = DataRuntimeConfig(
+        bin_width_ms=20.0,
+        context_bins=500,
+        patch_bins=50,
+        min_unit_spikes=0,
+        max_units=None,
+        padding_strategy="mask",
+        include_trials=True,
+        include_stimulus_presentations=True,
+        include_optotagging=True,
+    )
+    collator = build_population_window_collator(config)
+    batch = collator(
+        [
+            _build_real_allen_named_window_sample(
+                session_id="allen_visual_behavior_neuropixels/1047977240",
+                subject_id="allen_visual_behavior_neuropixels/532246",
+                window_start_s=0.0,
+            )
+        ]
+    )
+
+    assert batch.provenance.recording_ids[0] == "allen_visual_behavior_neuropixels/1047977240"
+    assert batch.provenance.session_ids[0] == "1047977240"
+    assert batch.provenance.subject_ids[0] == "532246"
