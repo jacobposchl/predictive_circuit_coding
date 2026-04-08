@@ -112,6 +112,7 @@ def discover_motifs_from_plan(
             probe_state_dict=probe_fit.state_dict,
             top_k=experiment_config.discovery.top_k_candidates,
             min_score=experiment_config.discovery.min_candidate_score,
+            candidate_session_balance_fraction=experiment_config.discovery.candidate_session_balance_fraction,
         )
     finally:
         if shard_root.exists():

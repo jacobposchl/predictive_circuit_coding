@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import heapq
+import math
 from pathlib import Path
+from typing import Any
 
 import torch
 
 from predictive_circuit_coding.training.contracts import CandidateTokenRecord, FrozenTokenRecord
+
+
+_ScoredHeapEntry = tuple[float, int, dict[str, Any]]
 
 
 def score_token_records(
@@ -46,15 +51,82 @@ def select_candidate_tokens_from_shards(
     probe_state_dict: dict,
     top_k: int,
     min_score: float,
+    candidate_session_balance_fraction: float = 0.2,
 ) -> tuple[CandidateTokenRecord, ...]:
+    if top_k <= 0:
+        return ()
+
     weight = probe_state_dict["linear.weight"].detach().cpu().reshape(-1)
     bias = float(probe_state_dict["linear.bias"].detach().cpu().item())
-    heap: list[tuple[float, int, dict]] = []
     counter = 0
     negative_score_sum: dict[tuple[str, int], float] = {}
     negative_score_count: dict[tuple[str, int], int] = {}
     global_negative_score_sum = 0.0
     global_negative_score_count = 0
+    session_heaps: dict[str, list[_ScoredHeapEntry]] = {}
+
+    def _push_bounded_heap(heap: list[_ScoredHeapEntry], entry: _ScoredHeapEntry, *, limit: int) -> None:
+        if len(heap) < limit:
+            heapq.heappush(heap, entry)
+            return
+        if entry[0] > heap[0][0]:
+            heapq.heapreplace(heap, entry)
+
+    def _rank_entries(entries: list[_ScoredHeapEntry]) -> list[_ScoredHeapEntry]:
+        return sorted(entries, key=lambda item: (-item[0], item[1]))
+
+    def _select_ranked_rows() -> list[dict[str, Any]]:
+        per_session_ranked = {
+            session_id: _rank_entries(entries)
+            for session_id, entries in session_heaps.items()
+            if entries
+        }
+        if not per_session_ranked:
+            return []
+        if candidate_session_balance_fraction >= 1.0 or len(per_session_ranked) <= 1:
+            ranked_entries = _rank_entries([entry for entries in per_session_ranked.values() for entry in entries])
+            return [entry[2] for entry in ranked_entries[:top_k]]
+
+        max_per_session = max(1, int(math.ceil(float(top_k) * float(candidate_session_balance_fraction))))
+        selected_entries: list[_ScoredHeapEntry] = []
+        next_index_by_session = {session_id: 0 for session_id in per_session_ranked}
+        selected_count_by_session = {session_id: 0 for session_id in per_session_ranked}
+
+        while len(selected_entries) < top_k:
+            round_entries: list[tuple[float, int, str]] = []
+            for session_id, entries in per_session_ranked.items():
+                next_index = next_index_by_session[session_id]
+                if next_index >= len(entries):
+                    continue
+                if selected_count_by_session[session_id] >= max_per_session:
+                    continue
+                score, sort_index, _ = entries[next_index]
+                round_entries.append((score, sort_index, session_id))
+            if not round_entries:
+                break
+            round_entries.sort(key=lambda item: (-item[0], item[1], item[2]))
+            for _, _, session_id in round_entries:
+                if len(selected_entries) >= top_k:
+                    break
+                next_index = next_index_by_session[session_id]
+                entries = per_session_ranked[session_id]
+                if next_index >= len(entries):
+                    continue
+                if selected_count_by_session[session_id] >= max_per_session:
+                    continue
+                selected_entries.append(entries[next_index])
+                next_index_by_session[session_id] += 1
+                selected_count_by_session[session_id] += 1
+
+        if len(selected_entries) < top_k:
+            leftover_entries: list[_ScoredHeapEntry] = []
+            for session_id, entries in per_session_ranked.items():
+                next_index = next_index_by_session[session_id]
+                leftover_entries.extend(entries[next_index:])
+            selected_entries.extend(_rank_entries(leftover_entries)[: max(0, top_k - len(selected_entries))])
+
+        ranked_entries = _rank_entries(selected_entries)[:top_k]
+        return [entry[2] for entry in ranked_entries]
 
     for shard_path in shard_paths:
         payload = torch.load(Path(shard_path), map_location="cpu", weights_only=False)
@@ -115,17 +187,12 @@ def select_candidate_tokens_from_shards(
                 "embedding": tuple(float(value) for value in embeddings[index].tolist()),
                 "score": score,
             }
-            if top_k <= 0:
-                continue
-            if len(heap) < top_k:
-                heapq.heappush(heap, (score, counter, row))
-                counter += 1
-                continue
-            if score > heap[0][0]:
-                heapq.heapreplace(heap, (score, counter, row))
-                counter += 1
+            session_id = str(row["session_id"])
+            session_heap = session_heaps.setdefault(session_id, [])
+            _push_bounded_heap(session_heap, (score, counter, row), limit=top_k)
+            counter += 1
 
-    ranked_rows = [item[2] for item in sorted(heap, key=lambda item: item[0], reverse=True)]
+    ranked_rows = _select_ranked_rows()
     return tuple(
         CandidateTokenRecord(
             candidate_id=f"candidate_{index:04d}",

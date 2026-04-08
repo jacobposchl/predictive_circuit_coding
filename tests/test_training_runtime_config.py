@@ -158,6 +158,7 @@ def test_load_experiment_config_accepts_generic_discovery_targets_and_sampling_f
                 "  min_positive_windows: 4",
                 "  negative_to_positive_ratio: 2.0",
                 "  search_max_batches: 32",
+                "  candidate_session_balance_fraction: 0.3",
             ]
         ),
         encoding="utf-8",
@@ -170,6 +171,7 @@ def test_load_experiment_config_accepts_generic_discovery_targets_and_sampling_f
     assert config.discovery.min_positive_windows == 4
     assert config.discovery.negative_to_positive_ratio == 2.0
     assert config.discovery.search_max_batches == 32
+    assert config.discovery.candidate_session_balance_fraction == 0.3
 
 
 def test_load_experiment_config_rejects_nonzero_dataloader_workers(tmp_path: Path):
@@ -281,6 +283,62 @@ def test_load_experiment_config_rejects_singleton_clusters(tmp_path: Path):
     )
 
     with pytest.raises(ValueError, match="min_cluster_size"):
+        load_experiment_config(config_path)
+
+
+def test_load_experiment_config_rejects_invalid_candidate_session_balance_fraction(tmp_path: Path):
+    config_path = tmp_path / "configs" / "pcc" / "experiment.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "\n".join(
+            [
+                "dataset_id: allen_visual_behavior_neuropixels",
+                "split_name: train",
+                "seed: 11",
+                "data_runtime:",
+                "  bin_width_ms: 20.0",
+                "  context_bins: 500",
+                "  patch_bins: 50",
+                "  min_unit_spikes: 1",
+                "  max_units: 32",
+                "  padding_strategy: mask",
+                "  include_trials: true",
+                "  include_stimulus_presentations: true",
+                "  include_optotagging: false",
+                "model:",
+                "  d_model: 128",
+                "  num_heads: 8",
+                "  temporal_layers: 2",
+                "  spatial_layers: 2",
+                "  dropout: 0.1",
+                "  mlp_ratio: 4.0",
+                "  l2_normalize_tokens: true",
+                "  norm_eps: 1.0e-5",
+                "objective:",
+                "  predictive_target_type: delta",
+                "  continuation_baseline_type: previous_patch",
+                "  predictive_loss: mse",
+                "  reconstruction_loss: mse",
+                "  reconstruction_weight: 0.25",
+                "  exclude_final_prediction_patch: true",
+                "optimization:",
+                "  learning_rate: 1.0e-4",
+                "  weight_decay: 1.0e-4",
+                "  grad_clip_norm: 1.0",
+                "  batch_size: 4",
+                "artifacts:",
+                "  checkpoint_dir: ../../artifacts/checkpoints",
+                "  summary_path: ../../artifacts/summary.json",
+                "  checkpoint_prefix: pcc",
+                "  save_config_snapshot: true",
+                "discovery:",
+                "  candidate_session_balance_fraction: 0.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="candidate_session_balance_fraction"):
         load_experiment_config(config_path)
 
 

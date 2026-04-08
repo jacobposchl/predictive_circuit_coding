@@ -65,6 +65,7 @@ They are intentionally thin and call the same CLI surface listed above.
 - the discovery notebook restores `TRAINING_RUN_ID` or the latest exported training run, then writes task-specific attempts under `pcc_colab_outputs/<run_id>/run_1/discovery/<decode_type>__<timestamp>/`
 - discovery supports both capped `sequential` planning and `label_balanced` planning with explicit `max_batches`, `search_max_batches`, `min_positive_windows`, and `negative_to_positive_ratio` controls
 - major Allen decode targets default to event-local onset labeling rather than broad overlap labeling
+- discovery candidate selection is session-balanced by default via `discovery.candidate_session_balance_fraction` so one session does not dominate the top-k motif pool; set it to `1.0` to restore pure global top-k scoring for comparisons
 - discovery artifacts mark probe metrics as `fit_selected_windows` provenance rather than held-out evidence
 - validation recomputes real-label discovery metrics on the validation run itself, checks artifact checkpoint/target-label provenance, reports a real baseline-sensitivity comparison, and records whether the reported metrics are sampled or full-split
 
@@ -111,6 +112,7 @@ Discovery problems:
 
 - if discovery fails because the split does not provide both classes for the chosen decode target, inspect the emitted `*_decode_coverage.json` summary and rerun training with a larger or more suitable notebook subset
 - if no candidate tokens are selected, lower `discovery.min_candidate_score` or increase `discovery.max_batches`
+- if one session still dominates the discovered candidates, lower `discovery.candidate_session_balance_fraction`; set it to `1.0` only when you intentionally want the old global top-k behavior
 - if clustering produces no motif clusters, reduce `discovery.min_cluster_size` or expand the discovery subset; singleton clusters are now rejected up front, so `min_cluster_size` must be at least `2`
 - if `TRAINING_RUN_ID` points at a missing export, clear it to use the latest exported training run or rerun the training notebook so it writes a fresh `run_id`
 

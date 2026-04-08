@@ -183,6 +183,7 @@ class DiscoveryConfig:
     probe_epochs: int = 25
     probe_learning_rate: float = 1.0e-2
     top_k_candidates: int = 32
+    candidate_session_balance_fraction: float = 0.2
     min_candidate_score: float = 0.0
     min_cluster_size: int = 2
     stability_rounds: int = 4
@@ -418,6 +419,9 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
             probe_epochs=int(discovery_raw.get("probe_epochs", 25)),
             probe_learning_rate=float(discovery_raw.get("probe_learning_rate", 1.0e-2)),
             top_k_candidates=int(discovery_raw.get("top_k_candidates", 32)),
+            candidate_session_balance_fraction=float(
+                discovery_raw.get("candidate_session_balance_fraction", 0.2)
+            ),
             min_candidate_score=float(discovery_raw.get("min_candidate_score", 0.0)),
             min_cluster_size=int(discovery_raw.get("min_cluster_size", 2)),
             stability_rounds=int(discovery_raw.get("stability_rounds", 4)),
@@ -552,6 +556,8 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("discovery.probe_epochs must be >= 1")
     if config.discovery.top_k_candidates < 1:
         raise ValueError("discovery.top_k_candidates must be >= 1")
+    if not 0.0 < config.discovery.candidate_session_balance_fraction <= 1.0:
+        raise ValueError("discovery.candidate_session_balance_fraction must be in (0, 1]")
     if config.discovery.min_cluster_size < 2:
         raise ValueError("discovery.min_cluster_size must be >= 2")
     if config.discovery.stability_rounds < 1:

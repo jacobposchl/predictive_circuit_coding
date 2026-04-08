@@ -380,6 +380,7 @@ def test_build_notebook_discovery_runtime_config_only_overrides_decode_settings(
                 "  sampling_strategy: sequential",
                 "  search_max_batches: 32",
                 "  top_k_candidates: 48",
+                "  candidate_session_balance_fraction: 0.2",
                 "  min_candidate_score: 0.25",
                 "  min_cluster_size: 3",
                 "  probe_epochs: 33",
@@ -409,6 +410,7 @@ def test_build_notebook_discovery_runtime_config_only_overrides_decode_settings(
     assert "search_max_batches" not in payload["discovery"]
     assert payload["discovery"]["max_batches"] == 12
     assert payload["discovery"]["top_k_candidates"] == 48
+    assert payload["discovery"]["candidate_session_balance_fraction"] == 0.2
     assert payload["discovery"]["min_candidate_score"] == 0.25
     assert payload["discovery"]["min_cluster_size"] == 3
     assert payload["discovery"]["probe_epochs"] == 33
@@ -437,6 +439,7 @@ def test_build_notebook_discovery_runtime_config_applies_requested_overrides(tmp
                 "  max_batches: 12",
                 "  sampling_strategy: sequential",
                 "  top_k_candidates: 48",
+                "  candidate_session_balance_fraction: 0.2",
                 "  min_candidate_score: 0.25",
                 "  min_cluster_size: 3",
                 "  probe_epochs: 33",
@@ -460,6 +463,7 @@ def test_build_notebook_discovery_runtime_config_applies_requested_overrides(tmp
         step_log_every=32,
         discovery_max_batches=20,
         discovery_top_k_candidates=80,
+        discovery_candidate_session_balance_fraction=0.35,
         discovery_min_candidate_score=-0.1,
         discovery_min_cluster_size=5,
         discovery_probe_epochs=60,
@@ -472,6 +476,7 @@ def test_build_notebook_discovery_runtime_config_applies_requested_overrides(tmp
     assert payload["discovery"]["target_label"] == "trials.is_change"
     assert payload["discovery"]["max_batches"] == 20
     assert payload["discovery"]["top_k_candidates"] == 80
+    assert payload["discovery"]["candidate_session_balance_fraction"] == 0.35
     assert payload["discovery"]["min_candidate_score"] == -0.1
     assert payload["discovery"]["min_cluster_size"] == 5
     assert payload["discovery"]["probe_epochs"] == 60

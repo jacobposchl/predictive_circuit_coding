@@ -347,6 +347,7 @@ def build_notebook_discovery_runtime_config(
     step_log_every: int,
     discovery_max_batches: int | None = None,
     discovery_top_k_candidates: int | None = None,
+    discovery_candidate_session_balance_fraction: float | None = None,
     discovery_min_candidate_score: float | None = None,
     discovery_min_cluster_size: int | None = None,
     discovery_probe_epochs: int | None = None,
@@ -370,6 +371,8 @@ def build_notebook_discovery_runtime_config(
         discovery["max_batches"] = int(discovery_max_batches)
     if discovery_top_k_candidates is not None:
         discovery["top_k_candidates"] = int(discovery_top_k_candidates)
+    if discovery_candidate_session_balance_fraction is not None:
+        discovery["candidate_session_balance_fraction"] = float(discovery_candidate_session_balance_fraction)
     if discovery_min_candidate_score is not None:
         discovery["min_candidate_score"] = float(discovery_min_candidate_score)
     if discovery_min_cluster_size is not None:

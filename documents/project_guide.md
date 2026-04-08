@@ -35,6 +35,8 @@ After training, the encoder is frozen. Task-specific analysis happens downstream
 - selecting high-relevance candidates
 - clustering those candidates in frozen latent space
 
+Candidate selection is intentionally session-aware. The scorer ranks tokens by decoder relevance, but discovery now balances the top-k pool across sessions before any backfill so a single session cannot trivially swamp motif discovery. The corresponding experiment knob is `discovery.candidate_session_balance_fraction`; `1.0` restores the old pure global top-k behavior.
+
 ### Provenance is required
 
 Every token and every discovered candidate must remain traceable back to:

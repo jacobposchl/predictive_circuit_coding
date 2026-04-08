@@ -105,6 +105,7 @@ discovery:
   probe_epochs: 50
   probe_learning_rate: 1.0e-2
   top_k_candidates: 64
+  candidate_session_balance_fraction: 0.2
   min_candidate_score: 0.0
   min_cluster_size: 2
   stability_rounds: 8
