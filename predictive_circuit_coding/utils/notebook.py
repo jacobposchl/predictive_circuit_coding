@@ -1335,6 +1335,94 @@ def collect_notebook_target_value_counts(
     )
 
 
+def inspect_notebook_target_field_availability(
+    *,
+    experiment_config_path: str | Path,
+    data_config_path: str | Path,
+    split_name: str,
+    target_label: str,
+    preview_limit: int = 5,
+) -> dict[str, object]:
+    import numpy as np
+
+    from predictive_circuit_coding.cli.common import require_non_empty_split, require_runtime_view
+    from predictive_circuit_coding.data import load_temporaldata_session
+    from predictive_circuit_coding.training import load_experiment_config
+    from predictive_circuit_coding.windowing.dataset import split_session_ids
+
+    def _normalize_value(value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            normalized = value.decode("utf-8", errors="replace").strip()
+        else:
+            normalized = str(value).strip()
+        if not normalized or normalized.lower() == "nan":
+            return None
+        return normalized
+
+    namespace, dot, field = str(target_label).partition(".")
+    if not dot or not namespace or not field or "." in field:
+        raise ValueError(
+            "inspect_notebook_target_field_availability requires a direct interval field target like "
+            "'stimulus_presentations.image_name'."
+        )
+
+    config = load_experiment_config(experiment_config_path)
+    dataset_view = require_runtime_view(experiment_config=config, data_config_path=data_config_path)
+    require_non_empty_split(dataset_view=dataset_view, split_name=split_name)
+
+    value_counts: dict[str, int] = {}
+    session_rows: list[dict[str, object]] = []
+    session_ids = split_session_ids(dataset_view.split_manifest, split_name)
+    for session_id in session_ids:
+        session_path = dataset_view.workspace.brainset_prepared_root / f"{session_id}.h5"
+        has_session_file = session_path.is_file()
+        has_namespace = False
+        has_field = False
+        non_null_value_count = 0
+        preview_values: list[str] = []
+        if has_session_file:
+            session = load_temporaldata_session(session_path, lazy=False)
+            interval = getattr(session, namespace, None)
+            has_namespace = interval is not None
+            raw_values = getattr(interval, field, None) if interval is not None else None
+            has_field = raw_values is not None
+            if raw_values is not None:
+                for raw_value in np.asarray(raw_values, dtype=object).reshape(-1):
+                    normalized = _normalize_value(raw_value)
+                    if normalized is None:
+                        continue
+                    non_null_value_count += 1
+                    if len(preview_values) < preview_limit:
+                        preview_values.append(normalized)
+                    value_counts[normalized] = value_counts.get(normalized, 0) + 1
+        session_rows.append(
+            {
+                "session_id": str(session_id),
+                "session_path": str(session_path),
+                "has_session_file": has_session_file,
+                "has_namespace": has_namespace,
+                "has_field": has_field,
+                "non_null_value_count": non_null_value_count,
+                "preview_values": tuple(preview_values),
+            }
+        )
+
+    return {
+        "split_name": str(split_name),
+        "target_label": str(target_label),
+        "sessions_scanned": len(session_rows),
+        "sessions_with_namespace": sum(1 for row in session_rows if row["has_namespace"]),
+        "sessions_with_field": sum(1 for row in session_rows if row["has_field"]),
+        "session_rows": tuple(session_rows),
+        "value_counts": tuple(
+            {"value": value, "count": count}
+            for value, count in sorted(value_counts.items(), key=lambda item: (-item[1], item[0]))
+        ),
+    }
+
+
 def run_notebook_geometry_diagnostics(
     *,
     experiment_config_path: str | Path,
