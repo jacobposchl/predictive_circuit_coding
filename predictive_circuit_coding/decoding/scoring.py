@@ -169,7 +169,8 @@ def select_candidate_tokens_from_shards(
                 if key in negative_score_count and negative_score_count[key] > 0
                 else global_negative_mean
             )
-            score = float(scores[index].item()) - float(negative_background)
+            raw_probe_score = float(scores[index].item())
+            score = raw_probe_score - float(negative_background)
             if score < float(min_score):
                 continue
             row = {
@@ -186,6 +187,8 @@ def select_candidate_tokens_from_shards(
                 "window_end_s": float(payload["window_end_s"][index].item()),
                 "embedding": tuple(float(value) for value in embeddings[index].tolist()),
                 "score": score,
+                "raw_probe_score": raw_probe_score,
+                "negative_background_score": float(negative_background),
             }
             session_id = str(row["session_id"])
             session_heap = session_heaps.setdefault(session_id, [])
@@ -211,6 +214,8 @@ def select_candidate_tokens_from_shards(
             label=1,
             score=row["score"],
             embedding=row["embedding"],
+            raw_probe_score=row["raw_probe_score"],
+            negative_background_score=row["negative_background_score"],
         )
         for index, row in enumerate(ranked_rows)
     )

@@ -66,6 +66,7 @@ They are intentionally thin and call the same CLI surface listed above.
 - discovery supports both capped `sequential` planning and `label_balanced` planning with explicit `max_batches`, `search_max_batches`, `min_positive_windows`, and `negative_to_positive_ratio` controls
 - major Allen decode targets default to event-local onset labeling rather than broad overlap labeling
 - discovery candidate selection is session-balanced by default via `discovery.candidate_session_balance_fraction` so one session does not dominate the top-k motif pool; set it to `1.0` to restore pure global top-k scoring for comparisons
+- discovery artifacts and cluster summaries now include raw probe-score diagnostics so you can inspect sign direction separately from the final contrastive ranking score
 - discovery artifacts mark probe metrics as `fit_selected_windows` provenance rather than held-out evidence
 - validation recomputes real-label discovery metrics on the validation run itself, checks artifact checkpoint/target-label provenance, reports a real baseline-sensitivity comparison, and records whether the reported metrics are sampled or full-split
 

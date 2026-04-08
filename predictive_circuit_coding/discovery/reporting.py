@@ -26,6 +26,16 @@ def build_discovery_cluster_report(artifact: DiscoveryArtifact) -> dict[str, obj
     clusters: list[dict[str, object]] = []
     for cluster_id, members in sorted(grouped.items()):
         scores = [float(member.score) for member in members]
+        raw_probe_scores = [
+            float(member.raw_probe_score)
+            for member in members
+            if member.raw_probe_score is not None
+        ]
+        negative_background_scores = [
+            float(member.negative_background_score)
+            for member in members
+            if member.negative_background_score is not None
+        ]
         regions = [member.unit_region for member in members]
         sessions = [member.session_id for member in members]
         subjects = [member.subject_id for member in members]
@@ -39,6 +49,21 @@ def build_discovery_cluster_report(artifact: DiscoveryArtifact) -> dict[str, obj
                 "subject_count": len(set(subjects)),
                 "mean_score": sum(scores) / len(scores),
                 "max_score": max(scores),
+                "mean_raw_probe_score": (
+                    sum(raw_probe_scores) / len(raw_probe_scores)
+                    if raw_probe_scores
+                    else None
+                ),
+                "mean_negative_background_score": (
+                    sum(negative_background_scores) / len(negative_background_scores)
+                    if negative_background_scores
+                    else None
+                ),
+                "positive_raw_probe_fraction": (
+                    sum(1 for score in raw_probe_scores if score > 0.0) / len(raw_probe_scores)
+                    if raw_probe_scores
+                    else None
+                ),
                 "mean_depth_um": sum(float(member.unit_depth_um) for member in members) / len(members),
                 "temporal_start_s": min(float(member.patch_start_s) for member in members),
                 "temporal_end_s": max(float(member.patch_end_s) for member in members),
@@ -49,6 +74,8 @@ def build_discovery_cluster_report(artifact: DiscoveryArtifact) -> dict[str, obj
                 "representative_recording_id": representative.recording_id,
                 "representative_unit_id": representative.unit_id,
                 "representative_patch_index": representative.patch_index,
+                "representative_raw_probe_score": representative.raw_probe_score,
+                "representative_negative_background_score": representative.negative_background_score,
             }
         )
 
@@ -81,6 +108,9 @@ def write_discovery_cluster_report_csv(report: dict[str, object], path: str | Pa
                 "subject_count",
                 "mean_score",
                 "max_score",
+                "mean_raw_probe_score",
+                "mean_negative_background_score",
+                "positive_raw_probe_fraction",
                 "mean_depth_um",
                 "temporal_start_s",
                 "temporal_end_s",
@@ -91,6 +121,8 @@ def write_discovery_cluster_report_csv(report: dict[str, object], path: str | Pa
                 "representative_recording_id",
                 "representative_unit_id",
                 "representative_patch_index",
+                "representative_raw_probe_score",
+                "representative_negative_background_score",
             ],
         )
         writer.writeheader()
@@ -104,6 +136,9 @@ def write_discovery_cluster_report_csv(report: dict[str, object], path: str | Pa
                     "subject_count": cluster["subject_count"],
                     "mean_score": cluster["mean_score"],
                     "max_score": cluster["max_score"],
+                    "mean_raw_probe_score": cluster["mean_raw_probe_score"],
+                    "mean_negative_background_score": cluster["mean_negative_background_score"],
+                    "positive_raw_probe_fraction": cluster["positive_raw_probe_fraction"],
                     "mean_depth_um": cluster["mean_depth_um"],
                     "temporal_start_s": cluster["temporal_start_s"],
                     "temporal_end_s": cluster["temporal_end_s"],
@@ -120,6 +155,8 @@ def write_discovery_cluster_report_csv(report: dict[str, object], path: str | Pa
                     "representative_recording_id": cluster["representative_recording_id"],
                     "representative_unit_id": cluster["representative_unit_id"],
                     "representative_patch_index": cluster["representative_patch_index"],
+                    "representative_raw_probe_score": cluster["representative_raw_probe_score"],
+                    "representative_negative_background_score": cluster["representative_negative_background_score"],
                 }
             )
     return target

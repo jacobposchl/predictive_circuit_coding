@@ -75,6 +75,8 @@ def cluster_candidate_tokens(
             label=candidate.label,
             score=candidate.score,
             embedding=candidate.embedding,
+            raw_probe_score=candidate.raw_probe_score,
+            negative_background_score=candidate.negative_background_score,
         )
         for candidate, cluster_id in zip(candidates, labels.tolist(), strict=True)
     )

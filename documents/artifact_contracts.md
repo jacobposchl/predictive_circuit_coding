@@ -133,7 +133,9 @@ Each candidate token record must retain:
 - patch timing
 - window timing
 - label
-- score
+- `score` as the final contrastive selection score used for ranking
+- `raw_probe_score` as the signed additive-probe score before background subtraction
+- `negative_background_score` as the matched negative-window background used in the contrastive score
 - embedding
 
 ## Discovery Cluster Summary JSON And CSV
@@ -159,6 +161,9 @@ Required CSV columns:
 - `subject_count`
 - `mean_score`
 - `max_score`
+- `mean_raw_probe_score`
+- `mean_negative_background_score`
+- `positive_raw_probe_fraction`
 - `mean_depth_um`
 - `temporal_start_s`
 - `temporal_end_s`
@@ -169,6 +174,8 @@ Required CSV columns:
 - `representative_recording_id`
 - `representative_unit_id`
 - `representative_patch_index`
+- `representative_raw_probe_score`
+- `representative_negative_background_score`
 
 ## Discovery Decode Coverage Summary JSON
 

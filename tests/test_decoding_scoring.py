@@ -108,6 +108,9 @@ def test_select_candidate_tokens_from_shards_balances_sessions_before_backfill(t
     assert candidate_session_ids.count("session_a") == 2
     assert "session_b" in candidate_session_ids
     assert "session_c" in candidate_session_ids
+    assert all(candidate.raw_probe_score is not None for candidate in candidates)
+    assert all(candidate.negative_background_score is not None for candidate in candidates)
+    assert all(candidate.raw_probe_score >= candidate.score for candidate in candidates)
 
 
 def test_select_candidate_tokens_from_shards_can_disable_session_balancing(tmp_path: Path) -> None:

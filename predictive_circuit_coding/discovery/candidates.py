@@ -32,6 +32,8 @@ def select_candidate_tokens(
             label=record.label,
             score=record.score,
             embedding=record.embedding,
+            raw_probe_score=record.score,
+            negative_background_score=0.0,
         )
         for index, record in enumerate(ranked)
     )

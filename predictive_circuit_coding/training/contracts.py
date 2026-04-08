@@ -253,6 +253,8 @@ class CandidateTokenRecord:
     label: int
     score: float
     embedding: tuple[float, ...]
+    raw_probe_score: float | None = None
+    negative_background_score: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

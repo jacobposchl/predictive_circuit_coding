@@ -384,6 +384,8 @@ def test_discovery_cluster_report_summarizes_clusters():
                 label=1,
                 score=0.8,
                 embedding=(1.0, 0.0),
+                raw_probe_score=0.9,
+                negative_background_score=0.1,
             ),
             CandidateTokenRecord(
                 candidate_id="candidate_0002",
@@ -402,6 +404,8 @@ def test_discovery_cluster_report_summarizes_clusters():
                 label=1,
                 score=0.6,
                 embedding=(0.9, 0.1),
+                raw_probe_score=-0.2,
+                negative_background_score=-0.8,
             ),
         ),
         cluster_stats={"cluster_count": 1.0},
@@ -424,6 +428,9 @@ def test_discovery_cluster_report_summarizes_clusters():
     assert report["clusters"][0]["cluster_persistence"] == 0.75
     assert report["clusters"][0]["top_regions"][0]["value"] == "VISp"
     assert report["clusters"][0]["representative_candidate_id"] == "candidate_0001"
+    assert report["clusters"][0]["mean_raw_probe_score"] == pytest.approx(0.35)
+    assert report["clusters"][0]["positive_raw_probe_fraction"] == pytest.approx(0.5)
+    assert report["clusters"][0]["representative_raw_probe_score"] == pytest.approx(0.9)
 
 
 def test_evaluate_cli_fails_for_empty_split(tmp_path: Path):

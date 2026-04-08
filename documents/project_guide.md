@@ -37,6 +37,8 @@ After training, the encoder is frozen. Task-specific analysis happens downstream
 
 Candidate selection is intentionally session-aware. The scorer ranks tokens by decoder relevance, but discovery now balances the top-k pool across sessions before any backfill so a single session cannot trivially swamp motif discovery. The corresponding experiment knob is `discovery.candidate_session_balance_fraction`; `1.0` restores the old pure global top-k behavior.
 
+Discovery artifacts also retain score diagnostics for interpretation: the final `score` is the contrastive selection score used for ranking, while `raw_probe_score` and `negative_background_score` let you inspect whether a candidate was selected because of a positive-direction probe effect or because it merely exceeded a matched negative-window background.
+
 ### Provenance is required
 
 Every token and every discovered candidate must remain traceable back to:
