@@ -531,6 +531,38 @@ def test_build_notebook_discovery_runtime_config_respects_cpu_device_override(tm
     assert payload["execution"]["device"] == "cpu"
 
 
+def test_build_notebook_discovery_runtime_config_creates_nested_parent_directories(tmp_path: Path) -> None:
+    source_config = tmp_path / "colab_runtime_experiment.yaml"
+    source_config.write_text(
+        "\n".join(
+            [
+                "dataset_id: allen_visual_behavior_neuropixels",
+                "training:",
+                "  log_every_steps: 8",
+                "dataset_selection: {}",
+                "runtime_subset: {}",
+                "discovery:",
+                "  target_label: stimulus_change",
+                "artifacts:",
+                "  checkpoint_dir: artifacts/checkpoints",
+                "  summary_path: artifacts/training_summary.json",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runtime_config = build_notebook_discovery_runtime_config(
+        source_experiment_config=source_config,
+        runtime_experiment_config=tmp_path / "artifacts" / "diagnostics" / "baseline_stimulus_change" / "colab_runtime_experiment.yaml",
+        artifact_root=tmp_path / "artifacts" / "diagnostics" / "baseline_stimulus_change",
+        decode_type="stimulus_change",
+        step_log_every=16,
+    )
+
+    assert runtime_config.is_file()
+    assert (tmp_path / "artifacts" / "diagnostics" / "baseline_stimulus_change").is_dir()
+
+
 def test_export_notebook_discovery_artifacts_writes_nested_attempt_without_checkpoint(tmp_path: Path) -> None:
     local_artifact_root = tmp_path / "artifacts"
     checkpoint_dir = local_artifact_root / "checkpoints"

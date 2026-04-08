@@ -360,6 +360,8 @@ def build_notebook_discovery_runtime_config(
     source_path = Path(source_experiment_config)
     runtime_path = Path(runtime_experiment_config)
     artifact_path = Path(artifact_root)
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = artifact_path / "checkpoints"
     summary_path = artifact_path / "training_summary.json"
     payload = yaml.safe_load(source_path.read_text(encoding="utf-8"))
