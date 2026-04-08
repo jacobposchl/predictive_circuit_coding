@@ -51,16 +51,55 @@ def select_candidate_tokens_from_shards(
     bias = float(probe_state_dict["linear.bias"].detach().cpu().item())
     heap: list[tuple[float, int, dict]] = []
     counter = 0
+    negative_score_sum: dict[tuple[str, int], float] = {}
+    negative_score_count: dict[tuple[str, int], int] = {}
+    global_negative_score_sum = 0.0
+    global_negative_score_count = 0
 
     for shard_path in shard_paths:
         payload = torch.load(Path(shard_path), map_location="cpu", weights_only=False)
         embeddings = payload["embeddings"].to(dtype=torch.float32)
         if embeddings.numel() == 0:
             continue
+        labels = payload.get("labels")
+        if labels is None:
+            continue
         scores = (embeddings @ weight) + bias
-        keep_indices = torch.nonzero(scores >= float(min_score), as_tuple=False).flatten().tolist()
-        for index in keep_indices:
+        negative_indices = torch.nonzero(labels <= 0, as_tuple=False).flatten().tolist()
+        for index in negative_indices:
+            key = (str(payload["unit_regions"][index]), int(payload["patch_index"][index].item()))
             score = float(scores[index].item())
+            negative_score_sum[key] = negative_score_sum.get(key, 0.0) + score
+            negative_score_count[key] = negative_score_count.get(key, 0) + 1
+            global_negative_score_sum += score
+            global_negative_score_count += 1
+
+    global_negative_mean = (
+        global_negative_score_sum / float(global_negative_score_count)
+        if global_negative_score_count > 0
+        else 0.0
+    )
+
+    for shard_path in shard_paths:
+        payload = torch.load(Path(shard_path), map_location="cpu", weights_only=False)
+        embeddings = payload["embeddings"].to(dtype=torch.float32)
+        if embeddings.numel() == 0:
+            continue
+        labels = payload.get("labels")
+        if labels is None:
+            continue
+        scores = (embeddings @ weight) + bias
+        keep_indices = torch.nonzero(labels > 0, as_tuple=False).flatten().tolist()
+        for index in keep_indices:
+            key = (str(payload["unit_regions"][index]), int(payload["patch_index"][index].item()))
+            negative_background = (
+                negative_score_sum[key] / float(negative_score_count[key])
+                if key in negative_score_count and negative_score_count[key] > 0
+                else global_negative_mean
+            )
+            score = float(scores[index].item()) - float(negative_background)
+            if score < float(min_score):
+                continue
             row = {
                 "recording_id": payload["recording_ids"][index],
                 "session_id": payload["session_ids"][index],

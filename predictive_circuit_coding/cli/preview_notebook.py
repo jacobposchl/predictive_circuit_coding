@@ -178,7 +178,7 @@ def _write_experiment_config(output_root: Path) -> Path:
                 "  probe_learning_rate: 0.05",
                 "  top_k_candidates: 8",
                 "  min_candidate_score: -100.0",
-                "  min_cluster_size: 1",
+                "  min_cluster_size: 2",
                 "  stability_rounds: 3",
                 "  shuffle_seed: 19",
                 "artifacts:",

@@ -52,6 +52,7 @@ Required payload:
 - `epoch`
 - `global_step`
 - `best_metric`
+- `best_epoch`
 - `metadata`
 - `model_state`
 - `optimizer_state`
@@ -77,6 +78,12 @@ Required keys:
 - `metrics`
 - `losses`
 - `checkpoint_path`
+- `selection_reason`
+
+Semantics:
+
+- `training_summary.json` must describe the checkpoint named in `checkpoint_path`
+- `epoch` and `best_epoch` therefore refer to the selected best checkpoint, not necessarily the latest completed epoch
 
 ## Evaluation Summary JSON
 
@@ -117,6 +124,7 @@ Required keys:
 - `learning_rate`
 - `metrics`
 - `probe_state`
+- `metric_scope`
 
 Each candidate token record must retain:
 
@@ -176,6 +184,9 @@ Required keys:
 - `selected_positive_count`
 - `selected_negative_count`
 - `sessions_with_positive_windows`
+- `sampling_strategy`
+- `scan_max_batches`
+- `selected_window_count`
 
 ## Validation Summary JSON
 
@@ -193,6 +204,13 @@ Required keys:
 - `cluster_count`
 - `cluster_quality_summary`
 - `provenance_issues`
+- `sampling_summary`
+
+Validation semantics:
+
+- `real_label_metrics` must be recomputed during validation from the same re-extracted discovery windows used for the shuffle control
+- `baseline_sensitivity_summary` must contain a real comparison, not just placeholder metadata
+- `sampling_summary` must distinguish sampled-window counts from full-split window counts when validation is batch-budgeted
 
 `held_out_similarity_summary` must include:
 

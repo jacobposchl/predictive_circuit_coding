@@ -66,7 +66,8 @@ def evaluate_checkpoint_on_split(
     )
     metric_rows: list[dict[str, float]] = []
     loss_rows: list[dict[str, float]] = []
-    batch_count = 0
+    batch_weights: list[float] = []
+    window_count = 0
     with torch.no_grad():
         for batch in iter_sampler_batches(
             dataset=bundle.dataset,
@@ -79,14 +80,15 @@ def evaluate_checkpoint_on_split(
             output = run_training_step(model, objective, batch)
             metric_rows.append(output.metrics)
             loss_rows.append(output.losses)
-            batch_count += 1
+            batch_weights.append(float(output.batch_size))
+            window_count += int(output.batch_size)
     if hasattr(bundle.dataset, "_close_open_files"):
         bundle.dataset._close_open_files()
     return EvaluationSummary(
         dataset_id=experiment_config.dataset_id,
         split_name=split_name,
         checkpoint_path=checkpoint_path,
-        metrics=aggregate_metric_dicts(metric_rows),
-        losses=aggregate_metric_dicts(loss_rows),
-        window_count=batch_count * experiment_config.optimization.batch_size,
+        metrics=aggregate_metric_dicts(metric_rows, weights=batch_weights),
+        losses=aggregate_metric_dicts(loss_rows, weights=batch_weights),
+        window_count=window_count,
     )

@@ -174,6 +174,7 @@ class EvaluationConfig:
 @dataclass(frozen=True)
 class DiscoveryConfig:
     target_label: str = "stimulus_change"
+    target_label_mode: str = "auto"
     max_batches: int = 6
     sampling_strategy: str = "sequential"
     min_positive_windows: int = 1
@@ -404,6 +405,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         ),
         discovery=DiscoveryConfig(
             target_label=str(discovery_raw.get("target_label", "stimulus_change")),
+            target_label_mode=str(discovery_raw.get("target_label_mode", "auto")),
             max_batches=int(discovery_raw.get("max_batches", 6)),
             sampling_strategy=str(discovery_raw.get("sampling_strategy", "sequential")),
             min_positive_windows=int(discovery_raw.get("min_positive_windows", 1)),
@@ -468,6 +470,8 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("optimization.batch_size must be >= 1")
     if config.optimization.scheduler_type not in {"none", "cosine"}:
         raise ValueError("optimization.scheduler_type must be 'none' or 'cosine'")
+    if config.optimization.scheduler_warmup_steps < 0:
+        raise ValueError("optimization.scheduler_warmup_steps must be >= 0")
     if config.training.num_epochs < 1:
         raise ValueError("training.num_epochs must be >= 1")
     if config.training.train_steps_per_epoch < 1:
@@ -480,6 +484,10 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("training.evaluate_every_epochs must be >= 1")
     if config.training.log_every_steps < 1:
         raise ValueError("training.log_every_steps must be >= 1")
+    if config.training.dataloader_workers != 0:
+        raise ValueError(
+            "training.dataloader_workers is not implemented by the current in-process sampler path; set it to 0."
+        )
     if config.dataset_selection.split_primary_axis not in {None, "subject", "session"}:
         raise ValueError("dataset_selection.split_primary_axis must be 'subject', 'session', or null")
     for name, value in (
@@ -525,6 +533,11 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
             )
     if not config.discovery.target_label.strip():
         raise ValueError("discovery.target_label must not be empty")
+    if config.discovery.target_label_mode not in {"auto", "overlap", "onset_within_window", "centered_onset"}:
+        raise ValueError(
+            "discovery.target_label_mode must be one of 'auto', 'overlap', 'onset_within_window', or "
+            "'centered_onset'"
+        )
     if config.discovery.max_batches < 1:
         raise ValueError("discovery.max_batches must be >= 1")
     if config.discovery.sampling_strategy not in {"sequential", "label_balanced"}:
@@ -539,7 +552,7 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("discovery.probe_epochs must be >= 1")
     if config.discovery.top_k_candidates < 1:
         raise ValueError("discovery.top_k_candidates must be >= 1")
-    if config.discovery.min_cluster_size < 1:
-        raise ValueError("discovery.min_cluster_size must be >= 1")
+    if config.discovery.min_cluster_size < 2:
+        raise ValueError("discovery.min_cluster_size must be >= 2")
     if config.discovery.stability_rounds < 1:
         raise ValueError("discovery.stability_rounds must be >= 1")

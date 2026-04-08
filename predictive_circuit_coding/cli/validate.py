@@ -9,7 +9,7 @@ from predictive_circuit_coding.cli.common import (
     get_cli_console,
     print_artifact,
     require_checkpoint_matches_dataset,
-    require_discovery_artifact_matches_dataset,
+    require_discovery_artifact_matches_validation_inputs,
     require_non_empty_split,
     require_runtime_view,
     warn,
@@ -54,9 +54,11 @@ def _run(args: argparse.Namespace) -> int:
         checkpoint_path=args.checkpoint,
         dataset_id=config.dataset_id,
     )
-    discovery_artifact_path = require_discovery_artifact_matches_dataset(
+    discovery_artifact_path = require_discovery_artifact_matches_validation_inputs(
         artifact_path=args.discovery_artifact,
         dataset_id=config.dataset_id,
+        checkpoint_path=checkpoint_path,
+        target_label=config.discovery.target_label,
     )
     logger.log_stage("validation", expected_next="validation summary json/csv")
     summary = validate_discovery_artifact(

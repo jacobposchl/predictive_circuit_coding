@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from predictive_circuit_coding.decoding.labels import extract_binary_labels
+from predictive_circuit_coding.decoding.labels import extract_binary_label_from_annotations, extract_binary_labels
 from predictive_circuit_coding.decoding.probes import evaluate_additive_probe, fit_additive_probe
 from predictive_circuit_coding.training.contracts import PopulationWindowBatch, TokenProvenanceBatch
 
@@ -59,6 +59,38 @@ def test_extract_binary_labels_supports_alias_and_nested_paths() -> None:
 
     assert torch.equal(stimulus_change, torch.tensor([1.0, 0.0, 1.0], dtype=torch.float32))
     assert torch.equal(behavioral_hit, torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32))
+
+
+def test_event_local_labels_default_to_onset_within_window() -> None:
+    annotation = {
+        "trials": {
+            "start_s": (-0.4, 0.2),
+            "end_s": (0.6, 0.8),
+            "go": (True, False),
+        }
+    }
+
+    overlap_label = extract_binary_label_from_annotations(
+        annotation,
+        target_label="trials.go",
+        target_label_mode="overlap",
+        window_duration_s=1.0,
+    )
+    onset_label = extract_binary_label_from_annotations(
+        annotation,
+        target_label="trials.go",
+        target_label_mode="onset_within_window",
+        window_duration_s=1.0,
+    )
+    auto_label = extract_binary_label_from_annotations(
+        annotation,
+        target_label="trials.go",
+        window_duration_s=1.0,
+    )
+
+    assert overlap_label == 1.0
+    assert onset_label == 0.0
+    assert auto_label == 0.0
 
 
 def test_evaluate_additive_probe_scores_held_out_tokens() -> None:

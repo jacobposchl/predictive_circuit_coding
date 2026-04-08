@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
 from typing import Any
@@ -132,12 +132,16 @@ class TrainingCheckpoint:
     model_state: dict[str, Any]
     optimizer_state: dict[str, Any]
     scheduler_state: dict[str, Any] | None
+    best_epoch: int = 0
+    best_validation_metrics: dict[str, float] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "epoch": self.epoch,
             "global_step": self.global_step,
             "best_metric": self.best_metric,
+            "best_epoch": self.best_epoch,
+            "best_validation_metrics": self.best_validation_metrics,
             "metadata": self.metadata.to_dict(),
             "model_state": self.model_state,
             "optimizer_state": self.optimizer_state,
@@ -154,6 +158,7 @@ class TrainingSummary:
     metrics: dict[str, float]
     losses: dict[str, float]
     checkpoint_path: str
+    selection_reason: str = "validated_best"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -202,6 +207,7 @@ class DecoderSummary:
     learning_rate: float
     metrics: dict[str, float]
     probe_state: dict[str, Any] | None = None
+    metric_scope: str = "fit_selected_windows"
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -219,6 +225,9 @@ class DiscoveryCoverageSummary:
     selected_positive_count: int
     selected_negative_count: int
     sessions_with_positive_windows: tuple[str, ...]
+    sampling_strategy: str = "sequential"
+    scan_max_batches: int | None = None
+    selected_window_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -287,6 +296,7 @@ class ValidationSummary:
     cluster_count: int
     cluster_quality_summary: dict[str, Any]
     provenance_issues: tuple[str, ...]
+    sampling_summary: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -302,6 +312,7 @@ class ValidationSummary:
             "cluster_count": self.cluster_count,
             "cluster_quality_summary": self.cluster_quality_summary,
             "provenance_issues": list(self.provenance_issues),
+            "sampling_summary": self.sampling_summary,
         }
 
 

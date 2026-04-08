@@ -423,12 +423,15 @@ Purpose:
 
 - scan the requested split with the same fixed-window geometry used for discovery
 - label every scanned window for the chosen decode target
-- build a deterministic balanced positive/negative discovery set when `sampling_strategy == label_balanced`
+- support a capped `sequential` discovery pass or a `label_balanced` pass with explicit search and selection budgets
+- default major Allen decode targets such as `stimulus_change` and `trials.go` to event-local onset labeling instead of broad overlap labeling
+- build the selected discovery set according to `max_batches`, `search_max_batches`, `min_positive_windows`, and `negative_to_positive_ratio`
 - write a decode-coverage summary before probe fitting
 - extract frozen tokens
 - fit the additive probe
-- score candidates
+- score candidates against positive-vs-negative discovery background
 - cluster candidates with HDBSCAN in normalized embedding space
+- estimate cluster stability with repeated bootstrap reclustering rounds
 - write human-readable cluster summaries
 
 Notebook:
@@ -454,8 +457,11 @@ Outputs:
 Purpose:
 
 - run conservative downstream checks on the discovery result
+- verify that the supplied checkpoint and decode target match the discovery artifact provenance
+- recompute the real-label discovery metrics on the validation run itself instead of trusting artifact-supplied values
 - evaluate fixed discovery-fit probe transfer on the untouched test split
 - evaluate threshold-free held-out motif-similarity discrimination on the untouched test split
+- report a real baseline-sensitivity comparison plus sampled-vs-full-split validation coverage metadata
 
 CLI:
 

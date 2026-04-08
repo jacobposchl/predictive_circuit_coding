@@ -96,15 +96,18 @@ evaluation:
 
 discovery:
   target_label: stimulus_change
+  target_label_mode: auto
   max_batches: 16
+  sampling_strategy: sequential
+  min_positive_windows: 1
+  negative_to_positive_ratio: 1.0
+  search_max_batches:
   probe_epochs: 50
   probe_learning_rate: 1.0e-2
   top_k_candidates: 64
   min_candidate_score: 0.0
-  cluster_similarity_threshold: 0.9
   min_cluster_size: 2
   stability_rounds: 8
-  recurrence_similarity_threshold: 0.9
   shuffle_seed: 17
 
 artifacts:

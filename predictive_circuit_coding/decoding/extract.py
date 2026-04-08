@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import random
 import shutil
@@ -103,22 +104,35 @@ def _select_label_balanced_indices(
     labels: torch.Tensor,
     session_ids: tuple[str, ...],
     seed: int,
+    max_selected_windows: int,
+    negative_to_positive_ratio: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     positive_indices = torch.nonzero(labels > 0.0, as_tuple=False).flatten()
     negative_indices = torch.nonzero(labels <= 0.0, as_tuple=False).flatten()
     if len(positive_indices) == 0 or len(negative_indices) == 0:
         return torch.empty(0, dtype=torch.long), positive_indices, negative_indices
-    target_count = min(len(positive_indices), len(negative_indices))
+    budget = max(1, int(max_selected_windows))
+    target_positive = 0
+    target_negative = 0
+    ratio = max(0.0, float(negative_to_positive_ratio))
+    for positive_target in range(min(len(positive_indices), budget), 0, -1):
+        negative_target = min(len(negative_indices), int(math.floor(float(positive_target) * ratio)))
+        if positive_target + negative_target <= budget:
+            target_positive = positive_target
+            target_negative = negative_target
+            break
+    if target_positive <= 0:
+        return torch.empty(0, dtype=torch.long), positive_indices, negative_indices
     selected_positive = _session_stratified_subsample(
         indices=positive_indices,
         session_ids=session_ids,
-        target_count=target_count,
+        target_count=target_positive,
         seed=seed,
     )
     selected_negative = _session_stratified_subsample(
         indices=negative_indices,
         session_ids=session_ids,
-        target_count=target_count,
+        target_count=target_negative,
         seed=seed + 1,
     )
     selected_indices = torch.cat((selected_positive, selected_negative), dim=0).sort().values
@@ -132,6 +146,8 @@ def _build_coverage_summary(
     labels: torch.Tensor,
     session_ids: tuple[str, ...],
     selected_indices: torch.Tensor | None = None,
+    sampling_strategy: str,
+    scan_max_batches: int | None,
 ) -> DiscoveryCoverageSummary:
     positive_indices = torch.nonzero(labels > 0.0, as_tuple=False).flatten()
     negative_indices = torch.nonzero(labels <= 0.0, as_tuple=False).flatten()
@@ -146,6 +162,9 @@ def _build_coverage_summary(
         selected_positive_count=int((selected_labels > 0.0).sum().item()),
         selected_negative_count=int((selected_labels <= 0.0).sum().item()),
         sessions_with_positive_windows=sessions_with_positive_windows,
+        sampling_strategy=sampling_strategy,
+        scan_max_batches=scan_max_batches,
+        selected_window_count=int(selected_labels.numel()),
     )
 
 
@@ -189,10 +208,24 @@ def build_discovery_window_plan(
             step_s=experiment_config.evaluation.sequential_step_s,
         ),
     )
-    sampler_items = list(sampler)
-    total_windows = len(sampler_items)
+    sampling_strategy = experiment_config.discovery.sampling_strategy
+    if sampling_strategy == "sequential":
+        scan_max_batches = (
+            experiment_config.discovery.search_max_batches
+            if experiment_config.discovery.search_max_batches is not None
+            else experiment_config.discovery.max_batches
+        )
+    else:
+        scan_max_batches = experiment_config.discovery.search_max_batches
+    scan_max_windows = (
+        None
+        if scan_max_batches is None
+        else int(scan_max_batches) * int(experiment_config.optimization.batch_size)
+    )
     planned_windows: list[DiscoveryWindowPlanRecord] = []
-    for index, item in enumerate(sampler_items, start=1):
+    for item in sampler:
+        if scan_max_windows is not None and len(planned_windows) >= scan_max_windows:
+            break
         sample = bundle.dataset.get(item.recording_id, item.start, item.end)
         recording_id, session_id, _ = extract_sample_recording_metadata(sample)
         annotations = extract_sample_event_annotations(
@@ -204,6 +237,8 @@ def build_discovery_window_plan(
         label = extract_binary_label_from_annotations(
             annotations,
             target_label=experiment_config.discovery.target_label,
+            target_label_mode=experiment_config.discovery.target_label_mode,
+            window_duration_s=float(item.end) - float(item.start),
         )
         planned_windows.append(
             DiscoveryWindowPlanRecord(
@@ -214,22 +249,29 @@ def build_discovery_window_plan(
                 label=float(label),
             )
         )
-        _maybe_update_progress(progress_callback, index, total_windows)
+        _maybe_update_progress(progress_callback, len(planned_windows), scan_max_windows)
     if hasattr(bundle.dataset, "_close_open_files"):
         bundle.dataset._close_open_files()
     labels = torch.tensor([window.label for window in planned_windows], dtype=torch.float32)
     session_ids = tuple(window.session_id for window in planned_windows)
-    selected_indices, _, _ = _select_label_balanced_indices(
-        labels=labels,
-        session_ids=session_ids,
-        seed=experiment_config.seed,
-    )
+    if sampling_strategy == "label_balanced":
+        selected_indices, _, _ = _select_label_balanced_indices(
+            labels=labels,
+            session_ids=session_ids,
+            seed=experiment_config.seed,
+            max_selected_windows=int(experiment_config.discovery.max_batches) * int(experiment_config.optimization.batch_size),
+            negative_to_positive_ratio=experiment_config.discovery.negative_to_positive_ratio,
+        )
+    else:
+        selected_indices = torch.arange(labels.numel(), dtype=torch.long)
     coverage_summary = _build_coverage_summary(
         split_name=split_name,
         target_label=experiment_config.discovery.target_label,
         labels=labels,
         session_ids=session_ids,
         selected_indices=selected_indices,
+        sampling_strategy=sampling_strategy,
+        scan_max_batches=scan_max_batches,
     )
     return DiscoveryWindowPlan(
         split_name=split_name,
@@ -240,7 +282,7 @@ def build_discovery_window_plan(
     )
 
 
-def _write_positive_token_shard(
+def _write_token_shard(
     *,
     shard_dir: Path,
     shard_index: int,
@@ -263,12 +305,12 @@ def _write_positive_token_shard(
     patch_end_s: list[float] = []
     window_start_s: list[float] = []
     window_end_s: list[float] = []
+    window_labels: list[int] = []
 
     for batch_index in range(tokens.shape[0]):
-        if float(labels[batch_index].item()) <= 0.0:
-            continue
         sample_tokens = flat_tokens[batch_index]
         sample_mask = flat_mask[batch_index]
+        sample_label = int(labels[batch_index].item() > 0.0)
         flat_position = 0
         for unit_index, unit_id in enumerate(batch.provenance.unit_ids[batch_index]):
             for patch_idx in range(tokens.shape[2]):
@@ -288,12 +330,13 @@ def _write_positive_token_shard(
                     patch_end_s.append(float(batch.provenance.patch_end_s[batch_index, patch_idx].item()))
                     window_start_s.append(float(batch.provenance.window_start_s[batch_index].item()))
                     window_end_s.append(float(batch.provenance.window_end_s[batch_index].item()))
+                    window_labels.append(sample_label)
                 flat_position += 1
 
     if not embeddings:
         return None
 
-    shard_path = shard_dir / f"positive_token_shard_{shard_index:05d}.pt"
+    shard_path = shard_dir / f"token_shard_{shard_index:05d}.pt"
     torch.save(
         {
             "embeddings": torch.stack(embeddings, dim=0),
@@ -308,6 +351,7 @@ def _write_positive_token_shard(
             "patch_end_s": torch.tensor(patch_end_s, dtype=torch.float32),
             "window_start_s": torch.tensor(window_start_s, dtype=torch.float32),
             "window_end_s": torch.tensor(window_end_s, dtype=torch.float32),
+            "labels": torch.tensor(window_labels, dtype=torch.long),
         },
         shard_path,
     )
@@ -381,7 +425,7 @@ def extract_selected_discovery_windows(
             pooled_feature_chunks.append(_pooled_features_from_tokens(flat_tokens, flat_mask))
             label_chunks.append(labels)
             window_session_ids.extend(window.session_id for window in window_batch)
-            shard_path = _write_positive_token_shard(
+            shard_path = _write_token_shard(
                 shard_dir=shard_root,
                 shard_index=shard_index,
                 batch=batch,
@@ -459,15 +503,18 @@ def extract_frozen_tokens(
     sample_record_groups: list[tuple[FrozenTokenRecord, ...]] = []
     sample_session_ids: list[str] = []
     sampling_strategy = sampling_strategy_override or experiment_config.discovery.sampling_strategy
-    sampler_max_batches = (
-        None
-        if sampling_strategy == "label_balanced"
-        else (max_batches or experiment_config.discovery.max_batches)
-    )
+    if sampling_strategy == "sequential":
+        sampler_max_batches = (
+            max_batches
+            or experiment_config.discovery.search_max_batches
+            or experiment_config.discovery.max_batches
+        )
+    else:
+        sampler_max_batches = max_batches or experiment_config.discovery.search_max_batches
 
     with torch.no_grad():
         processed_batches = 0
-        total_batches = sampler_max_batches or max_batches or experiment_config.discovery.max_batches
+        total_batches = sampler_max_batches
         for batch in iter_sampler_batches(
             dataset=bundle.dataset,
             sampler=sampler,
@@ -475,7 +522,11 @@ def extract_frozen_tokens(
             batch_size=experiment_config.optimization.batch_size,
             max_batches=sampler_max_batches,
         ):
-            labels = extract_binary_labels(batch, target_label=experiment_config.discovery.target_label)
+            labels = extract_binary_labels(
+                batch,
+                target_label=experiment_config.discovery.target_label,
+                target_label_mode=experiment_config.discovery.target_label_mode,
+            )
             device_batch = batch.to(device)
             output = model(device_batch)
             batch_labels = labels.detach().cpu()
@@ -558,10 +609,20 @@ def extract_frozen_tokens(
     if len(session_ids) != int(labels.shape[0]):
         raise ValueError("Internal error: sampled session provenance does not align with collected discovery labels.")
     if sampling_strategy == "label_balanced":
+        positive_window_count = int((labels > 0.0).sum().item())
+        if positive_window_count < int(experiment_config.discovery.min_positive_windows):
+            raise ValueError(
+                "Discovery label-balanced extraction did not find enough positive windows for the requested target "
+                f"label '{experiment_config.discovery.target_label}'. Required min_positive_windows="
+                f"{experiment_config.discovery.min_positive_windows}, found={positive_window_count}, "
+                f"scanned_windows={int(labels.numel())}."
+            )
         selected_indices, _, _ = _select_label_balanced_indices(
             labels=labels,
             session_ids=session_ids,
             seed=experiment_config.seed,
+            max_selected_windows=int(experiment_config.discovery.max_batches) * int(experiment_config.optimization.batch_size),
+            negative_to_positive_ratio=experiment_config.discovery.negative_to_positive_ratio,
         )
         coverage_summary = _build_coverage_summary(
             split_name=split_name,
@@ -569,6 +630,8 @@ def extract_frozen_tokens(
             labels=labels,
             session_ids=session_ids,
             selected_indices=selected_indices,
+            sampling_strategy=sampling_strategy,
+            scan_max_batches=sampler_max_batches,
         )
         if include_token_tensors:
             tokens = tokens[selected_indices]
@@ -580,11 +643,15 @@ def extract_frozen_tokens(
                 selected_records.extend(sample_record_groups[index])
         records = tuple(selected_records)
     else:
+        selected_indices = torch.arange(labels.numel(), dtype=torch.long)
         coverage_summary = _build_coverage_summary(
             split_name=split_name,
             target_label=experiment_config.discovery.target_label,
             labels=labels,
             session_ids=session_ids,
+            selected_indices=selected_indices,
+            sampling_strategy=sampling_strategy,
+            scan_max_batches=sampler_max_batches,
         )
         records = tuple(record for group in sample_record_groups for record in group) if include_records else tuple()
     return FrozenTokenCollection(

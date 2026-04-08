@@ -33,13 +33,26 @@ ProgressCallback = Callable[[int, int | None], None]
 
 
 def _ensure_binary_label_coverage(summary: DiscoveryCoverageSummary) -> None:
-    if summary.positive_window_count > 0 and summary.negative_window_count > 0:
+    if summary.selected_positive_count > 0 and summary.selected_negative_count > 0:
         return
     raise ValueError(
-        "Cannot build discovery probe inputs because the requested split does not provide both classes for the "
-        f"target label '{summary.target_label}'. Split='{summary.split_name}', scanned_windows="
+        "Cannot build discovery probe inputs because the selected discovery set does not provide both classes for "
+        f"the target label '{summary.target_label}'. Split='{summary.split_name}', scanned_windows="
         f"{summary.total_scanned_windows}, positive_windows={summary.positive_window_count}, "
-        f"negative_windows={summary.negative_window_count}, positive_sessions={list(summary.sessions_with_positive_windows)}."
+        f"negative_windows={summary.negative_window_count}, selected_positive_windows={summary.selected_positive_count}, "
+        f"selected_negative_windows={summary.selected_negative_count}, "
+        f"positive_sessions={list(summary.sessions_with_positive_windows)}."
+    )
+
+
+def _ensure_min_positive_windows(summary: DiscoveryCoverageSummary, *, min_positive_windows: int) -> None:
+    if int(summary.positive_window_count) >= int(min_positive_windows):
+        return
+    raise ValueError(
+        "Discovery label-balanced planning did not find enough positive windows for the requested target label. "
+        f"target_label='{summary.target_label}', split='{summary.split_name}', required_min_positive_windows="
+        f"{int(min_positive_windows)}, found_positive_windows={summary.positive_window_count}, "
+        f"scanned_windows={summary.total_scanned_windows}."
     )
 
 
@@ -71,6 +84,11 @@ def discover_motifs_from_plan(
     progress_callback: ProgressCallback | None = None,
 ) -> DiscoveryRunResult:
     _ensure_binary_label_coverage(window_plan.coverage_summary)
+    if experiment_config.discovery.sampling_strategy == "label_balanced":
+        _ensure_min_positive_windows(
+            window_plan.coverage_summary,
+            min_positive_windows=experiment_config.discovery.min_positive_windows,
+        )
     shard_root = Path(checkpoint_path).with_name(f"{Path(checkpoint_path).stem}_{split_name}_discovery_tmp")
     try:
         encoded = extract_selected_discovery_windows(
@@ -113,7 +131,13 @@ def discover_motifs_from_plan(
             "Discovery selected candidate tokens but clustering produced no non-noise motif clusters. "
             "Relax the clustering threshold or reduce the minimum cluster size."
         )
-    cluster_quality_summary = estimate_clustering_stability(cluster_stats=cluster_stats)
+    cluster_quality_summary = estimate_clustering_stability(
+        candidates=clustered_candidates,
+        cluster_stats=cluster_stats,
+        min_cluster_size=experiment_config.discovery.min_cluster_size,
+        stability_rounds=experiment_config.discovery.stability_rounds,
+        seed=experiment_config.seed,
+    )
     artifact = DiscoveryArtifact(
         dataset_id=experiment_config.dataset_id,
         split_name=split_name,
@@ -125,6 +149,7 @@ def discover_motifs_from_plan(
             learning_rate=experiment_config.discovery.probe_learning_rate,
             metrics=probe_fit.metrics,
             probe_state=probe_fit.state_dict,
+            metric_scope="fit_selected_windows",
         ),
         candidates=clustered_candidates,
         cluster_stats=cluster_stats,

@@ -33,6 +33,8 @@ def cluster_candidate_tokens(
     candidates: tuple[CandidateTokenRecord, ...],
     min_cluster_size: int,
 ) -> tuple[tuple[CandidateTokenRecord, ...], dict[str, float | dict[int, float] | None]]:
+    if int(min_cluster_size) < 2:
+        raise ValueError("Discovery clustering requires min_cluster_size >= 2.")
     if not candidates:
         return tuple(), {
             "cluster_count": 0.0,
@@ -47,7 +49,7 @@ def cluster_candidate_tokens(
 
     embeddings = _normalized_embeddings(candidates)
     clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=max(2, int(min_cluster_size)),
+        min_cluster_size=int(min_cluster_size),
         metric="euclidean",
         algorithm="best",
         allow_single_cluster=True,

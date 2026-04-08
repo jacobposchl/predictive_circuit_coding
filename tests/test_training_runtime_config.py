@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from predictive_circuit_coding.training import (
     CheckpointMetadata,
     TrainingSummary,
@@ -10,6 +12,7 @@ from predictive_circuit_coding.training import (
     write_checkpoint_metadata,
     write_training_summary,
 )
+from predictive_circuit_coding.evaluation.metrics import aggregate_metric_dicts
 
 
 def test_load_experiment_config_parses_stage_3_and_4_defaults(tmp_path: Path):
@@ -167,3 +170,127 @@ def test_load_experiment_config_accepts_generic_discovery_targets_and_sampling_f
     assert config.discovery.min_positive_windows == 4
     assert config.discovery.negative_to_positive_ratio == 2.0
     assert config.discovery.search_max_batches == 32
+
+
+def test_load_experiment_config_rejects_nonzero_dataloader_workers(tmp_path: Path):
+    config_path = tmp_path / "configs" / "pcc" / "experiment.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "\n".join(
+            [
+                "dataset_id: allen_visual_behavior_neuropixels",
+                "split_name: train",
+                "seed: 11",
+                "data_runtime:",
+                "  bin_width_ms: 20.0",
+                "  context_bins: 500",
+                "  patch_bins: 50",
+                "  min_unit_spikes: 1",
+                "  max_units: 32",
+                "  padding_strategy: mask",
+                "  include_trials: true",
+                "  include_stimulus_presentations: true",
+                "  include_optotagging: false",
+                "model:",
+                "  d_model: 128",
+                "  num_heads: 8",
+                "  temporal_layers: 2",
+                "  spatial_layers: 2",
+                "  dropout: 0.1",
+                "  mlp_ratio: 4.0",
+                "  l2_normalize_tokens: true",
+                "  norm_eps: 1.0e-5",
+                "objective:",
+                "  predictive_target_type: delta",
+                "  continuation_baseline_type: previous_patch",
+                "  predictive_loss: mse",
+                "  reconstruction_loss: mse",
+                "  reconstruction_weight: 0.25",
+                "  exclude_final_prediction_patch: true",
+                "optimization:",
+                "  learning_rate: 1.0e-4",
+                "  weight_decay: 1.0e-4",
+                "  grad_clip_norm: 1.0",
+                "  batch_size: 4",
+                "training:",
+                "  dataloader_workers: 2",
+                "artifacts:",
+                "  checkpoint_dir: ../../artifacts/checkpoints",
+                "  summary_path: ../../artifacts/summary.json",
+                "  checkpoint_prefix: pcc",
+                "  save_config_snapshot: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="dataloader_workers"):
+        load_experiment_config(config_path)
+
+
+def test_load_experiment_config_rejects_singleton_clusters(tmp_path: Path):
+    config_path = tmp_path / "configs" / "pcc" / "experiment.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "\n".join(
+            [
+                "dataset_id: allen_visual_behavior_neuropixels",
+                "split_name: train",
+                "seed: 11",
+                "data_runtime:",
+                "  bin_width_ms: 20.0",
+                "  context_bins: 500",
+                "  patch_bins: 50",
+                "  min_unit_spikes: 1",
+                "  max_units: 32",
+                "  padding_strategy: mask",
+                "  include_trials: true",
+                "  include_stimulus_presentations: true",
+                "  include_optotagging: false",
+                "model:",
+                "  d_model: 128",
+                "  num_heads: 8",
+                "  temporal_layers: 2",
+                "  spatial_layers: 2",
+                "  dropout: 0.1",
+                "  mlp_ratio: 4.0",
+                "  l2_normalize_tokens: true",
+                "  norm_eps: 1.0e-5",
+                "objective:",
+                "  predictive_target_type: delta",
+                "  continuation_baseline_type: previous_patch",
+                "  predictive_loss: mse",
+                "  reconstruction_loss: mse",
+                "  reconstruction_weight: 0.25",
+                "  exclude_final_prediction_patch: true",
+                "optimization:",
+                "  learning_rate: 1.0e-4",
+                "  weight_decay: 1.0e-4",
+                "  grad_clip_norm: 1.0",
+                "  batch_size: 4",
+                "artifacts:",
+                "  checkpoint_dir: ../../artifacts/checkpoints",
+                "  summary_path: ../../artifacts/summary.json",
+                "  checkpoint_prefix: pcc",
+                "  save_config_snapshot: true",
+                "discovery:",
+                "  min_cluster_size: 1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="min_cluster_size"):
+        load_experiment_config(config_path)
+
+
+def test_aggregate_metric_dicts_supports_window_weighting() -> None:
+    metrics = aggregate_metric_dicts(
+        [
+            {"predictive_improvement": 1.0},
+            {"predictive_improvement": 0.0},
+        ],
+        weights=[3.0, 1.0],
+    )
+
+    assert metrics["predictive_improvement"] == 0.75

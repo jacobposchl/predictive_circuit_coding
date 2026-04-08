@@ -4,7 +4,9 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 import math
+import random
 
+import numpy as np
 import torch
 
 from predictive_circuit_coding.data import resolve_runtime_dataset_view
@@ -49,7 +51,22 @@ def build_scheduler(config: ExperimentConfig, optimizer: torch.optim.Optimizer):
         return None
     if config.optimization.scheduler_type == "cosine":
         total_steps = config.training.num_epochs * config.training.train_steps_per_epoch
-        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, total_steps))
+        warmup_steps = min(config.optimization.scheduler_warmup_steps, max(0, total_steps - 1))
+        cosine_steps = max(1, total_steps - warmup_steps)
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cosine_steps)
+        if warmup_steps <= 0:
+            return cosine
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=1.0 / float(max(1, warmup_steps + 1)),
+            end_factor=1.0,
+            total_iters=warmup_steps,
+        )
+        return torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup, cosine],
+            milestones=[warmup_steps],
+        )
     raise ValueError(f"Unsupported scheduler type: {config.optimization.scheduler_type}")
 
 
@@ -76,6 +93,37 @@ class TrainingRunResult:
     best_metric: float
 
 
+def _set_training_seed(seed: int, *, device: torch.device) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+
+def _build_training_summary(
+    *,
+    experiment_config: ExperimentConfig,
+    train_split: str,
+    checkpoint_path: Path,
+    epoch: int,
+    best_epoch: int,
+    metrics: dict[str, float],
+    losses: dict[str, float],
+    selection_reason: str,
+) -> TrainingSummary:
+    return TrainingSummary(
+        dataset_id=experiment_config.dataset_id,
+        split_name=train_split,
+        epoch=epoch,
+        best_epoch=best_epoch,
+        metrics=dict(metrics),
+        losses=dict(losses),
+        checkpoint_path=str(checkpoint_path),
+        selection_reason=selection_reason,
+    )
+
+
 def train_model(
     *,
     experiment_config: ExperimentConfig,
@@ -92,13 +140,15 @@ def train_model(
     split_manifest = dataset_view.split_manifest
 
     tokenizer = build_tokenizer_from_config(experiment_config)
+    device = resolve_device(experiment_config.execution.device)
+    _set_training_seed(experiment_config.seed, device=device)
     model = build_model_from_config(experiment_config)
     objective = build_objective_from_config(experiment_config)
     optimizer = build_optimizer(experiment_config, model)
     scheduler = build_scheduler(experiment_config, optimizer)
-    device = resolve_device(experiment_config.execution.device)
     model = model.to(device)
     scaler_enabled = bool(experiment_config.execution.mixed_precision and device.type == "cuda")
+    grad_scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
     logger = StageLogger(name="train")
     if experiment_config.artifacts.save_config_snapshot:
         snapshot_path = (
@@ -112,6 +162,11 @@ def train_model(
     global_step = 0
     best_metric = float("-inf")
     best_epoch = 0
+    best_validation_metrics: dict[str, float] | None = None
+    best_training_losses: dict[str, float] | None = None
+    best_selection_reason = "validated_best"
+    latest_evaluation_metrics: dict[str, float] | None = None
+    latest_training_losses: dict[str, float] | None = None
     best_checkpoint_path = experiment_config.artifacts.checkpoint_dir / f"{experiment_config.artifacts.checkpoint_prefix}_best.pt"
     latest_epoch_checkpoint_path: Path | None = None
     latest_epoch_checkpoint: TrainingCheckpoint | None = None
@@ -125,7 +180,12 @@ def train_model(
         start_epoch = int(state["epoch"]) + 1
         global_step = int(state["global_step"])
         best_metric = float(state["best_metric"])
-        best_epoch = int(state["epoch"])
+        best_epoch = int(state.get("best_epoch", state["epoch"]))
+        best_validation_metrics = (
+            {str(key): float(value) for key, value in state.get("best_validation_metrics", {}).items()}
+            if state.get("best_validation_metrics") is not None
+            else None
+        )
         logger.log(f"Resumed from checkpoint at epoch {state['epoch']}")
 
     for epoch in range(start_epoch, experiment_config.training.num_epochs + 1):
@@ -150,6 +210,7 @@ def train_model(
             ),
         )
         train_metrics: list[dict[str, float]] = []
+        train_metric_weights: list[float] = []
         for step_index, batch in enumerate(
             iter_sampler_batches(
                 dataset=train_bundle.dataset,
@@ -167,19 +228,34 @@ def train_model(
             )
             with autocast_context:
                 step_output = run_training_step(model, objective, batch)
-            step_output.loss.backward()
-            if experiment_config.optimization.grad_clip_norm is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), experiment_config.optimization.grad_clip_norm)
-            optimizer.step()
+            if scaler_enabled:
+                grad_scaler.scale(step_output.loss).backward()
+                if experiment_config.optimization.grad_clip_norm is not None:
+                    grad_scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        experiment_config.optimization.grad_clip_norm,
+                    )
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
+            else:
+                step_output.loss.backward()
+                if experiment_config.optimization.grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), experiment_config.optimization.grad_clip_norm)
+                optimizer.step()
             if scheduler is not None:
                 scheduler.step()
             global_step += 1
             train_metrics.append({**step_output.metrics, **step_output.losses})
+            train_metric_weights.append(float(step_output.batch_size))
             if step_index % experiment_config.training.log_every_steps == 0:
                 logger.log_metrics(prefix=f"epoch={epoch} step={step_index}", metrics={**step_output.metrics, **step_output.losses})
 
         if hasattr(train_bundle.dataset, "_close_open_files"):
             train_bundle.dataset._close_open_files()
+
+        current_training_losses = aggregate_metric_dicts(train_metrics, weights=train_metric_weights)
+        latest_training_losses = current_training_losses
 
         if epoch % experiment_config.training.evaluate_every_epochs == 0:
             evaluation = evaluate_checkpoint_on_split(
@@ -192,9 +268,13 @@ def train_model(
                 dataset_view=dataset_view,
             )
             valid_metric = float(evaluation.metrics["predictive_improvement"])
-            if valid_metric >= best_metric:
+            latest_evaluation_metrics = dict(evaluation.metrics)
+            if math.isfinite(valid_metric) and valid_metric >= best_metric:
                 best_metric = valid_metric
                 best_epoch = epoch
+                best_validation_metrics = dict(evaluation.metrics)
+                best_training_losses = dict(current_training_losses)
+                best_selection_reason = "validated_best"
                 checkpoint = TrainingCheckpoint(
                     epoch=epoch,
                     global_step=global_step,
@@ -203,21 +283,25 @@ def train_model(
                     model_state=model.state_dict(),
                     optimizer_state=optimizer.state_dict(),
                     scheduler_state=scheduler.state_dict() if scheduler is not None else None,
+                    best_epoch=best_epoch,
+                    best_validation_metrics=best_validation_metrics,
                 )
                 save_training_checkpoint(checkpoint, best_checkpoint_path)
                 logger.log_artifact(label="best checkpoint", path=best_checkpoint_path)
 
-            summary = TrainingSummary(
-                dataset_id=experiment_config.dataset_id,
-                split_name=train_split,
-                epoch=epoch,
-                best_epoch=best_epoch,
-                metrics=aggregate_metric_dicts([evaluation.metrics]),
-                losses=aggregate_metric_dicts(train_metrics),
-                checkpoint_path=str(best_checkpoint_path),
-            )
-            write_training_summary(summary, experiment_config.artifacts.summary_path)
-            logger.log_artifact(label="training summary", path=experiment_config.artifacts.summary_path)
+            if best_epoch > 0 and best_validation_metrics is not None and best_training_losses is not None:
+                summary = _build_training_summary(
+                    experiment_config=experiment_config,
+                    train_split=train_split,
+                    checkpoint_path=best_checkpoint_path,
+                    epoch=best_epoch,
+                    best_epoch=best_epoch,
+                    metrics=best_validation_metrics,
+                    losses=best_training_losses,
+                    selection_reason=best_selection_reason,
+                )
+                write_training_summary(summary, experiment_config.artifacts.summary_path)
+                logger.log_artifact(label="training summary", path=experiment_config.artifacts.summary_path)
 
         if epoch % experiment_config.training.checkpoint_every_epochs == 0:
             checkpoint = TrainingCheckpoint(
@@ -228,6 +312,8 @@ def train_model(
                 model_state=model.state_dict(),
                 optimizer_state=optimizer.state_dict(),
                 scheduler_state=scheduler.state_dict() if scheduler is not None else None,
+                best_epoch=best_epoch,
+                best_validation_metrics=best_validation_metrics,
             )
             epoch_path = experiment_config.artifacts.checkpoint_dir / f"{experiment_config.artifacts.checkpoint_prefix}_latest.pt"
             save_training_checkpoint(checkpoint, epoch_path)
@@ -244,7 +330,24 @@ def train_model(
         if best_epoch == 0:
             best_epoch = latest_epoch_checkpoint.epoch
         if not math.isfinite(best_metric):
-            best_metric = 0.0
+            if latest_evaluation_metrics is not None:
+                fallback_metric = float(latest_evaluation_metrics.get("predictive_improvement", 0.0))
+                best_metric = fallback_metric if math.isfinite(fallback_metric) else 0.0
+            else:
+                best_metric = 0.0
+        best_selection_reason = "fallback_latest_due_to_invalid_metric"
+        fallback_summary = _build_training_summary(
+            experiment_config=experiment_config,
+            train_split=train_split,
+            checkpoint_path=best_checkpoint_path,
+            epoch=best_epoch,
+            best_epoch=best_epoch,
+            metrics=latest_evaluation_metrics or {},
+            losses=latest_training_losses or {},
+            selection_reason=best_selection_reason,
+        )
+        write_training_summary(fallback_summary, experiment_config.artifacts.summary_path)
+        logger.log_artifact(label="training summary", path=experiment_config.artifacts.summary_path)
 
     return TrainingRunResult(
         checkpoint_path=best_checkpoint_path,

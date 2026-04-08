@@ -59,6 +59,36 @@ def require_discovery_artifact_matches_dataset(*, artifact_path: str | Path, dat
     return artifact
 
 
+def require_discovery_artifact_matches_validation_inputs(
+    *,
+    artifact_path: str | Path,
+    dataset_id: str,
+    checkpoint_path: str | Path,
+    target_label: str,
+) -> Path:
+    import json
+
+    artifact = require_discovery_artifact_matches_dataset(
+        artifact_path=artifact_path,
+        dataset_id=dataset_id,
+    )
+    with artifact.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    artifact_checkpoint = payload.get("checkpoint_path")
+    if artifact_checkpoint and Path(artifact_checkpoint).resolve() != Path(checkpoint_path).resolve():
+        raise ValueError(
+            "Discovery artifact checkpoint_path does not match the checkpoint selected for validation. "
+            f"artifact={Path(artifact_checkpoint).resolve()}, checkpoint={Path(checkpoint_path).resolve()}."
+        )
+    artifact_target_label = payload.get("decoder_summary", {}).get("target_label")
+    if artifact_target_label and str(artifact_target_label) != str(target_label):
+        raise ValueError(
+            "Discovery artifact target label does not match the validation config target label. "
+            f"artifact='{artifact_target_label}', config='{target_label}'."
+        )
+    return artifact
+
+
 def emit_run_manifest(
     *,
     command_name: str,

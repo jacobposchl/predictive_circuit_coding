@@ -10,6 +10,7 @@ import torch
 from predictive_circuit_coding.cli.discover import main as discover_main
 from predictive_circuit_coding.cli.evaluate import main as evaluate_main
 from predictive_circuit_coding.cli.train import main as train_main
+from predictive_circuit_coding.cli.validate import main as validate_main
 from predictive_circuit_coding.data import (
     SessionManifest,
     SessionRecord,
@@ -22,6 +23,7 @@ from predictive_circuit_coding.data import (
     write_split_manifest,
     write_temporaldata_session,
 )
+from predictive_circuit_coding.decoding.extract import _select_label_balanced_indices
 from predictive_circuit_coding.discovery import build_discovery_cluster_report
 from predictive_circuit_coding.training.artifacts import save_training_checkpoint
 from predictive_circuit_coding.training.contracts import (
@@ -104,6 +106,10 @@ def _write_experiment_config(
     min_candidate_score: float = -100.0,
     discovery_sampling_strategy: str = "sequential",
     discovery_max_batches: int = 1,
+    discovery_search_max_batches: int | None = None,
+    discovery_min_positive_windows: int = 1,
+    discovery_negative_to_positive_ratio: float = 1.0,
+    optimization_batch_size: int = 2,
 ) -> Path:
     config_dir = tmp_path / "configs" / "pcc"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -149,7 +155,7 @@ def _write_experiment_config(
                 "  learning_rate: 1.0e-3",
                 "  weight_decay: 0.0",
                 "  grad_clip_norm: 1.0",
-                "  batch_size: 2",
+                f"  batch_size: {optimization_batch_size}",
                 "  scheduler_type: none",
                 "  scheduler_warmup_steps: 0",
                 "training:",
@@ -172,11 +178,14 @@ def _write_experiment_config(
                 "  target_label: stimulus_change",
                 f"  max_batches: {discovery_max_batches}",
                 f"  sampling_strategy: {discovery_sampling_strategy}",
+                f"  search_max_batches: {'' if discovery_search_max_batches is None else discovery_search_max_batches}",
+                f"  min_positive_windows: {discovery_min_positive_windows}",
+                f"  negative_to_positive_ratio: {discovery_negative_to_positive_ratio}",
                 "  probe_epochs: 10",
                 "  probe_learning_rate: 0.05",
                 "  top_k_candidates: 8",
                 f"  min_candidate_score: {min_candidate_score}",
-                "  min_cluster_size: 1",
+                "  min_cluster_size: 2",
                 "  stability_rounds: 2",
                 "  shuffle_seed: 19",
                 "artifacts:",
@@ -539,6 +548,69 @@ def test_discover_cli_label_balanced_scans_full_split_and_finds_late_positive_wi
     assert coverage_payload["selected_negative_count"] == 1
 
 
+def test_discover_cli_label_balanced_respects_search_max_batches(tmp_path: Path):
+    prep_config_path, _ = _build_workspace(
+        tmp_path,
+        discovery_has_positive=True,
+        discovery_positive_change_start_s=2.20,
+    )
+    experiment_config_path = _write_experiment_config(
+        tmp_path,
+        discovery_sampling_strategy="label_balanced",
+        discovery_max_batches=1,
+        discovery_search_max_batches=1,
+        optimization_batch_size=1,
+    )
+
+    try:
+        train_main(["--config", str(experiment_config_path), "--data-config", str(prep_config_path)])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best.pt"
+    discovery_output_path = tmp_path / "artifacts" / "checkpoints" / "budgeted_discovery.json"
+    coverage_path = tmp_path / "artifacts" / "checkpoints" / "budgeted_discovery_decode_coverage.json"
+
+    with pytest.raises(ValueError, match="does not provide both classes"):
+        discover_main(
+            [
+                "--config",
+                str(experiment_config_path),
+                "--data-config",
+                str(prep_config_path),
+                "--checkpoint",
+                str(checkpoint_path),
+                "--split",
+                "discovery",
+                "--output",
+                str(discovery_output_path),
+            ]
+        )
+
+    coverage_payload = json.loads(coverage_path.read_text(encoding="utf-8"))
+    assert coverage_payload["sampling_strategy"] == "label_balanced"
+    assert coverage_payload["scan_max_batches"] == 1
+    assert coverage_payload["total_scanned_windows"] == 1
+    assert coverage_payload["positive_window_count"] == 0
+
+
+def test_label_balanced_selection_uses_negative_to_positive_ratio():
+    labels = torch.tensor([1, 1, 1, 0, 0, 0, 0, 0], dtype=torch.float32)
+    session_ids = tuple(f"session_{index}" for index in range(len(labels)))
+
+    selected_indices, selected_positive, selected_negative = _select_label_balanced_indices(
+        labels=labels,
+        session_ids=session_ids,
+        seed=7,
+        max_selected_windows=6,
+        negative_to_positive_ratio=2.0,
+    )
+
+    assert len(selected_indices) == 6
+    assert len(selected_positive) == 2
+    assert len(selected_negative) == 4
+
+
 def test_discover_cli_fails_when_no_candidates_are_selected(tmp_path: Path):
     prep_config_path, _ = _build_workspace(tmp_path, discovery_has_positive=True)
     experiment_config_path = _write_experiment_config(tmp_path, min_candidate_score=1.0e9)
@@ -609,3 +681,153 @@ def test_train_cli_rejects_missing_resume_checkpoint(tmp_path: Path):
 
     with pytest.raises(FileNotFoundError, match="Checkpoint not found"):
         train_main(["--config", str(experiment_config_path), "--data-config", str(prep_config_path)])
+
+
+def test_validate_cli_recomputes_real_label_metrics_instead_of_trusting_artifact(tmp_path: Path):
+    prep_config_path, experiment_config_path = _build_workspace(tmp_path)
+
+    try:
+        train_main(["--config", str(experiment_config_path), "--data-config", str(prep_config_path)])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best.pt"
+    discovery_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best_discovery_discovery.json"
+    validation_path = tmp_path / "artifacts" / "checkpoints" / "tamper_validation.json"
+    try:
+        discover_main(
+            [
+                "--config",
+                str(experiment_config_path),
+                "--data-config",
+                str(prep_config_path),
+                "--checkpoint",
+                str(checkpoint_path),
+                "--split",
+                "discovery",
+                "--output",
+                str(discovery_path),
+            ]
+        )
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    payload = json.loads(discovery_path.read_text(encoding="utf-8"))
+    payload["decoder_summary"]["metrics"] = {"probe_accuracy": 0.123456, "probe_bce": 9.99}
+    discovery_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    try:
+        validate_main(
+            [
+                "--config",
+                str(experiment_config_path),
+                "--data-config",
+                str(prep_config_path),
+                "--checkpoint",
+                str(checkpoint_path),
+                "--discovery-artifact",
+                str(discovery_path),
+                "--output-json",
+                str(validation_path),
+            ]
+        )
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    validation_payload = json.loads(validation_path.read_text(encoding="utf-8"))
+    assert validation_payload["real_label_metrics"]["probe_accuracy"] != 0.123456
+    assert validation_payload["sampling_summary"]["discovery_sampled_window_count"] >= 1
+
+
+def test_validate_cli_rejects_artifact_checkpoint_mismatch(tmp_path: Path):
+    prep_config_path, experiment_config_path = _build_workspace(tmp_path)
+
+    try:
+        train_main(["--config", str(experiment_config_path), "--data-config", str(prep_config_path)])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best.pt"
+    mismatched_checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "other_best.pt"
+    mismatched_checkpoint_path.write_bytes(checkpoint_path.read_bytes())
+    discovery_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best_discovery_discovery.json"
+
+    try:
+        discover_main(
+            [
+                "--config",
+                str(experiment_config_path),
+                "--data-config",
+                str(prep_config_path),
+                "--checkpoint",
+                str(checkpoint_path),
+                "--split",
+                "discovery",
+                "--output",
+                str(discovery_path),
+            ]
+        )
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    with pytest.raises(ValueError, match="checkpoint_path does not match"):
+        validate_main(
+            [
+                "--config",
+                str(experiment_config_path),
+                "--data-config",
+                str(prep_config_path),
+                "--checkpoint",
+                str(mismatched_checkpoint_path),
+                "--discovery-artifact",
+                str(discovery_path),
+            ]
+        )
+
+
+def test_validate_cli_rejects_artifact_target_label_mismatch(tmp_path: Path):
+    prep_config_path, experiment_config_path = _build_workspace(tmp_path)
+
+    try:
+        train_main(["--config", str(experiment_config_path), "--data-config", str(prep_config_path)])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best.pt"
+    discovery_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best_discovery_discovery.json"
+
+    try:
+        discover_main(
+            [
+                "--config",
+                str(experiment_config_path),
+                "--data-config",
+                str(prep_config_path),
+                "--checkpoint",
+                str(checkpoint_path),
+                "--split",
+                "discovery",
+                "--output",
+                str(discovery_path),
+            ]
+        )
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    payload = json.loads(discovery_path.read_text(encoding="utf-8"))
+    payload["decoder_summary"]["target_label"] = "trials.go"
+    discovery_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="target label does not match"):
+        validate_main(
+            [
+                "--config",
+                str(experiment_config_path),
+                "--data-config",
+                str(prep_config_path),
+                "--checkpoint",
+                str(checkpoint_path),
+                "--discovery-artifact",
+                str(discovery_path),
+            ]
+        )

@@ -63,8 +63,10 @@ They are intentionally thin and call the same CLI surface listed above.
 - the training notebook owns subset choice and split fractions
 - the training notebook creates a fresh `run_id` and exports to `pcc_colab_outputs/<run_id>/run_1/train/`
 - the discovery notebook restores `TRAINING_RUN_ID` or the latest exported training run, then writes task-specific attempts under `pcc_colab_outputs/<run_id>/run_1/discovery/<decode_type>__<timestamp>/`
-- discovery runs label-balanced decoding windows on the subset's `discovery` split and writes a decode-coverage summary before probe fitting
-- validation reports discovery probe accuracy, shuffled discovery accuracy, held-out test probe accuracy, and held-out motif-similarity ROC-AUC / PR-AUC
+- discovery supports both capped `sequential` planning and `label_balanced` planning with explicit `max_batches`, `search_max_batches`, `min_positive_windows`, and `negative_to_positive_ratio` controls
+- major Allen decode targets default to event-local onset labeling rather than broad overlap labeling
+- discovery artifacts mark probe metrics as `fit_selected_windows` provenance rather than held-out evidence
+- validation recomputes real-label discovery metrics on the validation run itself, checks artifact checkpoint/target-label provenance, reports a real baseline-sensitivity comparison, and records whether the reported metrics are sampled or full-split
 
 ## Documentation
 
@@ -103,18 +105,19 @@ Training problems:
 - if a notebook subset should be used, change the subset scalars in the training notebook and rerun from the top
 - if a resume checkpoint is missing, clear `training.resume_checkpoint` or point it at a real checkpoint
 - if a checkpoint dataset mismatch is reported, use a checkpoint produced from the same dataset/config family
+- if `training_summary.json` looks inconsistent with the latest epoch, remember it now intentionally describes the selected best checkpoint, not the latest completed epoch
 
 Discovery problems:
 
 - if discovery fails because the split does not provide both classes for the chosen decode target, inspect the emitted `*_decode_coverage.json` summary and rerun training with a larger or more suitable notebook subset
 - if no candidate tokens are selected, lower `discovery.min_candidate_score` or increase `discovery.max_batches`
-- if clustering produces no motif clusters, reduce `discovery.min_cluster_size` or expand the discovery subset
+- if clustering produces no motif clusters, reduce `discovery.min_cluster_size` or expand the discovery subset; singleton clusters are now rejected up front, so `min_cluster_size` must be at least `2`
 - if `TRAINING_RUN_ID` points at a missing export, clear it to use the latest exported training run or rerun the training notebook so it writes a fresh `run_id`
 
 Validation problems:
 
 - if held-out motif similarity ROC-AUC / PR-AUC are weak, the discovered centroids are not separating positive vs negative test windows well on untouched data
-- if the discovery artifact dataset does not match the checkpoint/config dataset, rerun with aligned artifacts
+- if the discovery artifact dataset, checkpoint path, or decode target does not match the validation inputs, rerun with aligned artifacts
 
 ## Verification
 

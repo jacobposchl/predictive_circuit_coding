@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -161,7 +162,7 @@ def _write_experiment_config(tmp_path: Path, *, discovery_sampling_strategy: str
                 "  probe_learning_rate: 0.05",
                 "  top_k_candidates: 8",
                 "  min_candidate_score: -100.0",
-                "  min_cluster_size: 1",
+                "  min_cluster_size: 2",
                 "  stability_rounds: 3",
                 "  shuffle_seed: 19",
                 f"  sampling_strategy: {discovery_sampling_strategy}",
@@ -447,10 +448,12 @@ def test_stage_5_and_6_cli_workflow_runs_end_to_end(tmp_path: Path):
     assert discovery_payload["split_name"] == "discovery"
     assert "decoder_summary" in discovery_payload
     assert isinstance(discovery_payload["candidates"], list)
+    assert discovery_payload["decoder_summary"]["metric_scope"] == "fit_selected_windows"
     assert discovery_coverage_payload["split_name"] == "discovery"
     assert discovery_coverage_payload["target_label"] == "stimulus_change"
     assert discovery_coverage_payload["positive_window_count"] >= 1
     assert discovery_coverage_payload["negative_window_count"] >= 1
+    assert discovery_coverage_payload["sampling_strategy"] == "sequential"
     assert "clusters" in cluster_summary_payload
     assert cluster_summary_payload["cluster_count"] >= 1
     assert "cluster_quality_summary" in cluster_summary_payload
@@ -460,6 +463,8 @@ def test_stage_5_and_6_cli_workflow_runs_end_to_end(tmp_path: Path):
     assert "held_out_test_metrics" in validation_payload
     assert "held_out_similarity_summary" in validation_payload
     assert "cluster_quality_summary" in validation_payload
+    assert validation_payload["baseline_sensitivity_summary"]["comparison_available"] is True
+    assert "sampling_summary" in validation_payload
     assert 0.0 <= validation_payload["held_out_test_metrics"]["probe_accuracy"] <= 1.0
     assert 0.0 <= validation_payload["held_out_similarity_summary"]["window_roc_auc"] <= 1.0
     assert 0.0 <= validation_payload["held_out_similarity_summary"]["window_pr_auc"] <= 1.0
@@ -515,6 +520,124 @@ def test_train_model_writes_fallback_best_checkpoint_when_validation_metric_is_n
 
     assert result.checkpoint_path.is_file()
     assert result.checkpoint_path.name == "pcc_test_best.pt"
+    summary_payload = json.loads(experiment_config.artifacts.summary_path.read_text(encoding="utf-8"))
+    assert summary_payload["selection_reason"] == "fallback_latest_due_to_invalid_metric"
+    assert summary_payload["epoch"] == result.best_epoch
+    assert summary_payload["best_epoch"] == result.best_epoch
+
+
+def test_training_summary_tracks_best_checkpoint_metrics(tmp_path: Path, monkeypatch):
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    experiment_config = load_experiment_config(experiment_config_path)
+    metric_sequence = [0.8, 0.2]
+
+    def _scripted_evaluation(**kwargs):
+        value = metric_sequence.pop(0)
+        return EvaluationSummary(
+            dataset_id="allen_visual_behavior_neuropixels",
+            split_name="valid",
+            checkpoint_path=str(kwargs.get("checkpoint_path", "")),
+            metrics={
+                "predictive_loss": 1.0 - value,
+                "reconstruction_loss": 0.0,
+                "predictive_raw_mse": 1.0,
+                "predictive_baseline_mse": 1.0,
+                "predictive_improvement": value,
+                "token_coverage": 1.0,
+            },
+            losses={
+                "predictive_loss": 1.0 - value,
+                "reconstruction_loss": 0.0,
+                "total_loss": 1.0 - value,
+            },
+            window_count=2,
+        )
+
+    monkeypatch.setattr(
+        "predictive_circuit_coding.training.loop.evaluate_checkpoint_on_split",
+        _scripted_evaluation,
+    )
+
+    result = train_model(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        train_split="train",
+        valid_split="valid",
+    )
+
+    summary_payload = json.loads(experiment_config.artifacts.summary_path.read_text(encoding="utf-8"))
+    assert result.best_epoch == 1
+    assert summary_payload["epoch"] == 1
+    assert summary_payload["best_epoch"] == 1
+    assert summary_payload["metrics"]["predictive_improvement"] == 0.8
+    assert summary_payload["checkpoint_path"] == str(result.checkpoint_path)
+    checkpoint_payload = torch.load(result.checkpoint_path, map_location="cpu", weights_only=False)
+    assert checkpoint_payload["best_epoch"] == 1
+    assert checkpoint_payload["best_validation_metrics"]["predictive_improvement"] == 0.8
+
+
+def test_resume_training_preserves_best_epoch_from_latest_checkpoint(tmp_path: Path, monkeypatch):
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    experiment_config = load_experiment_config(experiment_config_path)
+    metric_sequence = [0.9, 0.3, 0.2]
+
+    def _scripted_evaluation(**kwargs):
+        value = metric_sequence.pop(0)
+        return EvaluationSummary(
+            dataset_id="allen_visual_behavior_neuropixels",
+            split_name="valid",
+            checkpoint_path=str(kwargs.get("checkpoint_path", "")),
+            metrics={
+                "predictive_loss": 1.0 - value,
+                "reconstruction_loss": 0.0,
+                "predictive_raw_mse": 1.0,
+                "predictive_baseline_mse": 1.0,
+                "predictive_improvement": value,
+                "token_coverage": 1.0,
+            },
+            losses={
+                "predictive_loss": 1.0 - value,
+                "reconstruction_loss": 0.0,
+                "total_loss": 1.0 - value,
+            },
+            window_count=2,
+        )
+
+    monkeypatch.setattr(
+        "predictive_circuit_coding.training.loop.evaluate_checkpoint_on_split",
+        _scripted_evaluation,
+    )
+
+    initial_result = train_model(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        train_split="train",
+        valid_split="valid",
+    )
+    latest_checkpoint_path = experiment_config.artifacts.checkpoint_dir / "pcc_test_latest.pt"
+    resumed_config = load_experiment_config(experiment_config_path)
+    resumed_config = replace(
+        resumed_config,
+        training=replace(
+            resumed_config.training,
+            num_epochs=3,
+            resume_checkpoint=latest_checkpoint_path,
+        ),
+    )
+
+    resumed_result = train_model(
+        experiment_config=resumed_config,
+        data_config_path=prep_config_path,
+        train_split="train",
+        valid_split="valid",
+    )
+
+    assert initial_result.best_epoch == 1
+    assert resumed_result.best_epoch == 1
+    resumed_summary = json.loads(resumed_config.artifacts.summary_path.read_text(encoding="utf-8"))
+    assert resumed_summary["best_epoch"] == 1
+    resumed_checkpoint = torch.load(resumed_result.checkpoint_path, map_location="cpu", weights_only=False)
+    assert resumed_checkpoint["best_epoch"] == 1
 
 
 def test_validation_caps_discovery_extraction_when_sampling_strategy_is_label_balanced(tmp_path: Path):
