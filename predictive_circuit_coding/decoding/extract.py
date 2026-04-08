@@ -39,6 +39,7 @@ class FrozenTokenCollection:
 class DiscoveryWindowPlanRecord:
     recording_id: str
     session_id: str
+    subject_id: str
     window_start_s: float
     window_end_s: float
     label: float
@@ -58,6 +59,7 @@ class EncodedDiscoverySelection:
     pooled_features: torch.Tensor
     labels: torch.Tensor
     window_session_ids: tuple[str, ...]
+    window_subject_ids: tuple[str, ...]
     shard_paths: tuple[Path, ...]
     coverage_summary: DiscoveryCoverageSummary
     encoder_device: str
@@ -227,7 +229,7 @@ def build_discovery_window_plan(
         if scan_max_windows is not None and len(planned_windows) >= scan_max_windows:
             break
         sample = bundle.dataset.get(item.recording_id, item.start, item.end)
-        recording_id, session_id, _ = extract_sample_recording_metadata(sample)
+        recording_id, session_id, subject_id = extract_sample_recording_metadata(sample)
         annotations = extract_sample_event_annotations(
             sample,
             experiment_config.data_runtime,
@@ -238,12 +240,14 @@ def build_discovery_window_plan(
             annotations,
             target_label=experiment_config.discovery.target_label,
             target_label_mode=experiment_config.discovery.target_label_mode,
+            target_label_match_value=experiment_config.discovery.target_label_match_value,
             window_duration_s=float(item.end) - float(item.start),
         )
         planned_windows.append(
             DiscoveryWindowPlanRecord(
                 recording_id=recording_id or str(item.recording_id),
                 session_id=session_id,
+                subject_id=subject_id,
                 window_start_s=float(item.start),
                 window_end_s=float(item.end),
                 label=float(label),
@@ -400,6 +404,7 @@ def extract_selected_discovery_windows(
     pooled_feature_chunks: list[torch.Tensor] = []
     label_chunks: list[torch.Tensor] = []
     window_session_ids: list[str] = []
+    window_subject_ids: list[str] = []
     shard_paths: list[Path] = []
     shard_index = 0
     processed_windows = 0
@@ -425,6 +430,7 @@ def extract_selected_discovery_windows(
             pooled_feature_chunks.append(_pooled_features_from_tokens(flat_tokens, flat_mask))
             label_chunks.append(labels)
             window_session_ids.extend(window.session_id for window in window_batch)
+            window_subject_ids.extend(window.subject_id for window in window_batch)
             shard_path = _write_token_shard(
                 shard_dir=shard_root,
                 shard_index=shard_index,
@@ -445,6 +451,7 @@ def extract_selected_discovery_windows(
         pooled_features=torch.cat(pooled_feature_chunks, dim=0) if pooled_feature_chunks else torch.empty((0, 0), dtype=torch.float32),
         labels=torch.cat(label_chunks, dim=0) if label_chunks else torch.empty((0,), dtype=torch.float32),
         window_session_ids=tuple(window_session_ids),
+        window_subject_ids=tuple(window_subject_ids),
         shard_paths=tuple(shard_paths),
         coverage_summary=window_plan.coverage_summary,
         encoder_device=str(device),
@@ -526,6 +533,7 @@ def extract_frozen_tokens(
                 batch,
                 target_label=experiment_config.discovery.target_label,
                 target_label_mode=experiment_config.discovery.target_label_mode,
+                target_label_match_value=experiment_config.discovery.target_label_match_value,
             )
             device_batch = batch.to(device)
             output = model(device_batch)

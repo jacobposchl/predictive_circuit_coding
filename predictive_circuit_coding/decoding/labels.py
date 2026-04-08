@@ -42,6 +42,12 @@ def _coerce_bool(value: Any) -> bool:
     return text in {"1", "true", "yes", "y"}
 
 
+def _coerce_match_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return str(value).strip()
+
+
 def _resolve_target_label_paths(target_label: str) -> tuple[tuple[str, ...], ...]:
     candidates = LABEL_ALIASES.get(target_label, (target_label,))
     paths = tuple(tuple(part for part in candidate.split(".") if part) for candidate in candidates)
@@ -95,46 +101,95 @@ def _timed_matches(annotation: dict[str, Any], path: tuple[str, ...]) -> tuple[t
     return tuple(matches)
 
 
-def extract_binary_label_from_annotations(
+def _filter_timed_matches(
+    timed_matches: tuple[tuple[Any, float | None, float | None], ...],
+    *,
+    resolved_mode: str,
+    target_label_mode: str,
+    window_duration_s: float | None,
+) -> tuple[tuple[Any, float | None, float | None], ...]:
+    if resolved_mode == "overlap":
+        return timed_matches
+    if resolved_mode == "onset_within_window":
+        filtered = tuple(
+            (value, start_s, end_s)
+            for value, start_s, end_s in timed_matches
+            if start_s is not None and start_s >= 0.0
+        )
+        has_timing = any(start_s is not None for _, start_s, _ in timed_matches)
+        if target_label_mode == "auto" and not has_timing:
+            return timed_matches
+        return filtered
+    if resolved_mode == "centered_onset":
+        if window_duration_s is None or window_duration_s <= 0.0:
+            raise ValueError("window_duration_s is required when target_label_mode='centered_onset'")
+        lower_bound = 0.25 * float(window_duration_s)
+        upper_bound = 0.75 * float(window_duration_s)
+        filtered = tuple(
+            (value, start_s, end_s)
+            for value, start_s, end_s in timed_matches
+            if start_s is not None and lower_bound <= start_s <= upper_bound
+        )
+        has_timing = any(start_s is not None for _, start_s, _ in timed_matches)
+        if target_label_mode == "auto" and not has_timing:
+            return timed_matches
+        return filtered
+    raise ValueError(f"Unsupported target_label_mode: {resolved_mode}")
+
+
+def extract_matching_values_from_annotations(
     annotation: dict[str, Any],
     *,
     target_label: str,
     target_label_mode: str = "auto",
     window_duration_s: float | None = None,
+) -> tuple[str, ...]:
+    paths = _resolve_target_label_paths(target_label)
+    resolved_mode = _window_label_mode(target_label=target_label, target_label_mode=target_label_mode)
+    resolved_values: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        timed_matches = _timed_matches(annotation, path)
+        filtered_matches = _filter_timed_matches(
+            timed_matches,
+            resolved_mode=resolved_mode,
+            target_label_mode=target_label_mode,
+            window_duration_s=window_duration_s,
+        )
+        for value, _, _ in filtered_matches:
+            text = _coerce_match_text(value)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            resolved_values.append(text)
+    return tuple(resolved_values)
+
+
+def extract_binary_label_from_annotations(
+    annotation: dict[str, Any],
+    *,
+    target_label: str,
+    target_label_mode: str = "auto",
+    target_label_match_value: str | None = None,
+    window_duration_s: float | None = None,
 ) -> float:
     paths = _resolve_target_label_paths(target_label)
     resolved_mode = _window_label_mode(target_label=target_label, target_label_mode=target_label_mode)
+    match_value = _coerce_match_text(target_label_match_value) if target_label_match_value is not None else None
     for path in paths:
         timed_matches = _timed_matches(annotation, path)
-        if resolved_mode == "overlap":
-            if any(_coerce_bool(value) for value, _, _ in timed_matches):
+        filtered_matches = _filter_timed_matches(
+            timed_matches,
+            resolved_mode=resolved_mode,
+            target_label_mode=target_label_mode,
+            window_duration_s=window_duration_s,
+        )
+        if match_value is None:
+            if any(_coerce_bool(value) for value, _, _ in filtered_matches):
                 return 1.0
             continue
-        if resolved_mode == "onset_within_window":
-            has_timing = any(start_s is not None for _, start_s, _ in timed_matches)
-            for value, start_s, _ in timed_matches:
-                if start_s is None:
-                    continue
-                if start_s >= 0.0 and _coerce_bool(value):
-                    return 1.0
-            if target_label_mode == "auto" and not has_timing and any(_coerce_bool(value) for value, _, _ in timed_matches):
-                return 1.0
-            continue
-        if resolved_mode == "centered_onset":
-            if window_duration_s is None or window_duration_s <= 0.0:
-                raise ValueError("window_duration_s is required when target_label_mode='centered_onset'")
-            lower_bound = 0.25 * float(window_duration_s)
-            upper_bound = 0.75 * float(window_duration_s)
-            has_timing = any(start_s is not None for _, start_s, _ in timed_matches)
-            for value, start_s, _ in timed_matches:
-                if start_s is None:
-                    continue
-                if lower_bound <= start_s <= upper_bound and _coerce_bool(value):
-                    return 1.0
-            if target_label_mode == "auto" and not has_timing and any(_coerce_bool(value) for value, _, _ in timed_matches):
-                return 1.0
-            continue
-        raise ValueError(f"Unsupported target_label_mode: {resolved_mode}")
+        if any(_coerce_match_text(value) == match_value for value, _, _ in filtered_matches):
+            return 1.0
     return 0.0
 
 
@@ -143,6 +198,7 @@ def extract_binary_labels(
     *,
     target_label: str,
     target_label_mode: str = "auto",
+    target_label_match_value: str | None = None,
 ) -> torch.Tensor:
     labels = []
     for index, annotation in enumerate(batch.provenance.event_annotations):
@@ -154,6 +210,7 @@ def extract_binary_labels(
                 annotation,
                 target_label=target_label,
                 target_label_mode=target_label_mode,
+                target_label_match_value=target_label_match_value,
                 window_duration_s=window_duration_s,
             )
         )

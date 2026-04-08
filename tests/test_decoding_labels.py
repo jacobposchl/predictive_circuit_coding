@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import torch
 
-from predictive_circuit_coding.decoding.labels import extract_binary_label_from_annotations, extract_binary_labels
+from predictive_circuit_coding.decoding.labels import (
+    extract_binary_label_from_annotations,
+    extract_binary_labels,
+    extract_matching_values_from_annotations,
+)
 from predictive_circuit_coding.decoding.probes import evaluate_additive_probe, fit_additive_probe
 from predictive_circuit_coding.training.contracts import PopulationWindowBatch, TokenProvenanceBatch
 
@@ -91,6 +95,53 @@ def test_event_local_labels_default_to_onset_within_window() -> None:
     assert overlap_label == 1.0
     assert onset_label == 0.0
     assert auto_label == 0.0
+
+
+def test_extract_binary_labels_supports_string_match_value_for_image_identity() -> None:
+    batch = _build_batch(
+        event_annotations=(
+            {
+                "stimulus_presentations": {
+                    "start_s": (-0.4, 0.2),
+                    "end_s": (0.0, 0.5),
+                    "image_name": ("im0", "im1"),
+                }
+            },
+            {
+                "stimulus_presentations": {
+                    "start_s": (0.1,),
+                    "end_s": (0.4,),
+                    "image_name": ("im2",),
+                }
+            },
+        )
+    )
+
+    labels = extract_binary_labels(
+        batch,
+        target_label="stimulus_presentations.image_name",
+        target_label_mode="onset_within_window",
+        target_label_match_value="im1",
+    )
+
+    assert torch.equal(labels, torch.tensor([1.0, 0.0], dtype=torch.float32))
+
+
+def test_extract_matching_values_from_annotations_filters_by_window_mode() -> None:
+    values = extract_matching_values_from_annotations(
+        {
+            "stimulus_presentations": {
+                "start_s": (-0.3, 0.15, 0.45),
+                "end_s": (0.0, 0.25, 0.6),
+                "image_name": ("im0", "im1", "im1"),
+            }
+        },
+        target_label="stimulus_presentations.image_name",
+        target_label_mode="onset_within_window",
+        window_duration_s=1.0,
+    )
+
+    assert values == ("im1",)
 
 
 def test_evaluate_additive_probe_scores_held_out_tokens() -> None:

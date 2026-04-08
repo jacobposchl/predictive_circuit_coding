@@ -9,13 +9,17 @@ from predictive_circuit_coding.utils import (
     NotebookCommandStreamFormatter,
     NotebookDatasetConfig,
     NotebookDiscoveryRunResult,
+    NotebookDiagnosticsExperimentPaths,
     NotebookLocalDatasetStageResult,
     NotebookTrainingConfig,
     NotebookValidationRunResult,
     build_notebook_discovery_runtime_config,
     build_notebook_discovery_export_path,
+    build_notebook_diagnostics_experiment_paths,
+    build_notebook_diagnostics_export_path,
     describe_notebook_compute_targets,
     export_notebook_discovery_artifacts,
+    export_notebook_diagnostics_artifacts,
     export_notebook_training_artifacts,
     find_existing_discovery_run,
     load_notebook_split_counts,
@@ -401,11 +405,13 @@ def test_build_notebook_discovery_runtime_config_only_overrides_decode_settings(
         runtime_experiment_config=tmp_path / "colab_discovery_runtime_experiment.yaml",
         artifact_root=tmp_path / "artifacts",
         decode_type="behavior.outcome.hit",
+        target_label_match_value="hit",
         step_log_every=16,
     )
 
     payload = yaml.safe_load(runtime_config.read_text(encoding="utf-8"))
     assert payload["discovery"]["target_label"] == "behavior.outcome.hit"
+    assert payload["discovery"]["target_label_match_value"] == "hit"
     assert payload["discovery"]["sampling_strategy"] == "label_balanced"
     assert "search_max_batches" not in payload["discovery"]
     assert payload["discovery"]["max_batches"] == 12
@@ -460,6 +466,8 @@ def test_build_notebook_discovery_runtime_config_applies_requested_overrides(tmp
         runtime_experiment_config=tmp_path / "colab_discovery_runtime_experiment.yaml",
         artifact_root=tmp_path / "artifacts",
         decode_type="trials.is_change",
+        target_label_mode="centered_onset",
+        target_label_match_value="trial_a",
         step_log_every=32,
         discovery_max_batches=20,
         discovery_top_k_candidates=80,
@@ -474,6 +482,8 @@ def test_build_notebook_discovery_runtime_config_applies_requested_overrides(tmp
 
     payload = yaml.safe_load(runtime_config.read_text(encoding="utf-8"))
     assert payload["discovery"]["target_label"] == "trials.is_change"
+    assert payload["discovery"]["target_label_mode"] == "centered_onset"
+    assert payload["discovery"]["target_label_match_value"] == "trial_a"
     assert payload["discovery"]["max_batches"] == 20
     assert payload["discovery"]["top_k_candidates"] == 80
     assert payload["discovery"]["candidate_session_balance_fraction"] == 0.35
@@ -618,6 +628,50 @@ def test_restore_latest_discovery_artifacts_uses_selected_run_and_decode_type(tm
     assert not (local_artifact_root / "discovery_export_metadata.json").exists()
 
 
+def test_build_notebook_diagnostics_experiment_paths_avoids_name_collisions(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_best.pt"
+    first_paths = build_notebook_diagnostics_experiment_paths(
+        local_artifact_root=tmp_path / "artifacts",
+        checkpoint_path=checkpoint_path,
+        experiment_name="baseline_stimulus_change",
+    )
+    second_paths = build_notebook_diagnostics_experiment_paths(
+        local_artifact_root=tmp_path / "artifacts",
+        checkpoint_path=checkpoint_path,
+        experiment_name="image_identity_im111",
+    )
+
+    assert isinstance(first_paths, NotebookDiagnosticsExperimentPaths)
+    assert first_paths.discovery_artifact_path != second_paths.discovery_artifact_path
+    assert first_paths.runtime_experiment_config_path != second_paths.runtime_experiment_config_path
+    assert first_paths.experiment_root.name == "baseline_stimulus_change"
+    assert second_paths.experiment_root.name == "image_identity_im111"
+
+
+def test_export_notebook_diagnostics_artifacts_uses_run_timestamp_layout(tmp_path: Path) -> None:
+    local_root = tmp_path / "artifacts" / "diagnostics"
+    experiment_root = local_root / "baseline_stimulus_change"
+    experiment_root.mkdir(parents=True, exist_ok=True)
+    (experiment_root / "summary.json").write_text("{}", encoding="utf-8")
+    (local_root / "combined_experiment_summary.json").write_text("{}", encoding="utf-8")
+
+    export_path = export_notebook_diagnostics_artifacts(
+        drive_export_root=tmp_path / "exports",
+        local_artifact_root=tmp_path / "artifacts",
+        run_id="run_20240102_010101",
+        diagnostics_timestamp="20240102_040506",
+    )
+
+    expected_path = build_notebook_diagnostics_export_path(
+        drive_export_root=tmp_path / "exports",
+        run_id="run_20240102_010101",
+        diagnostics_timestamp="20240102_040506",
+    )
+    assert export_path == expected_path
+    assert (export_path / "baseline_stimulus_change" / "summary.json").is_file()
+    assert (export_path / "combined_experiment_summary.json").is_file()
+
+
 def test_find_existing_discovery_run_filters_target_label(tmp_path: Path) -> None:
     checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_best.pt"
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -726,6 +780,59 @@ def test_find_existing_discovery_run_rejects_mismatched_runtime_config(tmp_path:
             experiment_config_path=runtime_config,
         )
         is None
+    )
+
+
+def test_find_existing_discovery_run_supports_experiment_specific_output_paths(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_best.pt"
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_text("checkpoint", encoding="utf-8")
+    experiment_paths = build_notebook_diagnostics_experiment_paths(
+        local_artifact_root=tmp_path / "artifacts",
+        checkpoint_path=checkpoint_path,
+        experiment_name="baseline_stimulus_change",
+    )
+    experiment_paths.discovery_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_config = experiment_paths.runtime_experiment_config_path
+    runtime_config.parent.mkdir(parents=True, exist_ok=True)
+    runtime_config.write_text(
+        "\n".join(
+            [
+                "dataset_id: allen_visual_behavior_neuropixels",
+                "split_name: train",
+                "data_runtime: {}",
+                "execution: {}",
+                "evaluation:",
+                "  max_batches: 16",
+                "discovery:",
+                "  target_label: stimulus_change",
+                "runtime_subset: {}",
+                "splits: {}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    experiment_paths.discovery_artifact_path.write_text(
+        json.dumps(
+            {
+                "decoder_summary": {"target_label": "stimulus_change"},
+                "config_snapshot": yaml.safe_load(runtime_config.read_text(encoding="utf-8")),
+            }
+        ),
+        encoding="utf-8",
+    )
+    experiment_paths.decode_coverage_summary_path.write_text("{}", encoding="utf-8")
+    experiment_paths.cluster_summary_json_path.write_text("{}", encoding="utf-8")
+    experiment_paths.cluster_summary_csv_path.write_text("cluster_id\n0\n", encoding="utf-8")
+
+    assert (
+        find_existing_discovery_run(
+            checkpoint_path=checkpoint_path,
+            target_label="stimulus_change",
+            experiment_config_path=runtime_config,
+            discovery_output_path=experiment_paths.discovery_artifact_path,
+        )
+        is not None
     )
 
 

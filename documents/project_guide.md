@@ -144,6 +144,7 @@ Every token and every discovered candidate must remain traceable back to:
 
 - thin Colab orchestration notebooks
 - no core logic should live here
+- includes training, discovery/validation, and multi-experiment diagnostics notebooks
 
 `documents/`
 

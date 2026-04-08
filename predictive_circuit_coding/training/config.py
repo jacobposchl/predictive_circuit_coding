@@ -175,6 +175,7 @@ class EvaluationConfig:
 class DiscoveryConfig:
     target_label: str = "stimulus_change"
     target_label_mode: str = "auto"
+    target_label_match_value: str | None = None
     max_batches: int = 6
     sampling_strategy: str = "sequential"
     min_positive_windows: int = 1
@@ -407,6 +408,11 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         discovery=DiscoveryConfig(
             target_label=str(discovery_raw.get("target_label", "stimulus_change")),
             target_label_mode=str(discovery_raw.get("target_label_mode", "auto")),
+            target_label_match_value=(
+                str(discovery_raw["target_label_match_value"])
+                if discovery_raw.get("target_label_match_value") is not None
+                else None
+            ),
             max_batches=int(discovery_raw.get("max_batches", 6)),
             sampling_strategy=str(discovery_raw.get("sampling_strategy", "sequential")),
             min_positive_windows=int(discovery_raw.get("min_positive_windows", 1)),
@@ -537,6 +543,11 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
             )
     if not config.discovery.target_label.strip():
         raise ValueError("discovery.target_label must not be empty")
+    if (
+        config.discovery.target_label_match_value is not None
+        and not config.discovery.target_label_match_value.strip()
+    ):
+        raise ValueError("discovery.target_label_match_value must not be blank when provided")
     if config.discovery.target_label_mode not in {"auto", "overlap", "onset_within_window", "centered_onset"}:
         raise ValueError(
             "discovery.target_label_mode must be one of 'auto', 'overlap', 'onset_within_window', or "

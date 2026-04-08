@@ -91,7 +91,14 @@ def _write_preparation_config(tmp_path: Path) -> Path:
     return config_path
 
 
-def _write_experiment_config(tmp_path: Path, *, discovery_sampling_strategy: str = "sequential") -> Path:
+def _write_experiment_config(
+    tmp_path: Path,
+    *,
+    discovery_sampling_strategy: str = "sequential",
+    discovery_target_label: str = "stimulus_change",
+    discovery_target_label_mode: str = "auto",
+    discovery_target_label_match_value: str | None = None,
+) -> Path:
     config_dir = tmp_path / "configs" / "pcc"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "experiment.yaml"
@@ -156,7 +163,9 @@ def _write_experiment_config(tmp_path: Path, *, discovery_sampling_strategy: str
                 "  max_batches: 2",
                 "  sequential_step_s: 2.0",
                 "discovery:",
-                "  target_label: stimulus_change",
+                f"  target_label: {discovery_target_label}",
+                f"  target_label_mode: {discovery_target_label_mode}",
+                f"  target_label_match_value: {'' if discovery_target_label_match_value is None else discovery_target_label_match_value}",
                 "  max_batches: 2",
                 "  probe_epochs: 20",
                 "  probe_learning_rate: 0.05",
@@ -478,6 +487,65 @@ def test_stage_5_and_6_cli_workflow_runs_end_to_end(tmp_path: Path):
     assert evaluation_sidecar_payload["outputs"]["evaluation_summary_path"] == str(evaluation_path)
     assert discovery_sidecar_payload["command_name"] == "discover"
     assert discovery_sidecar_payload["outputs"]["decode_coverage_summary_path"] == str(discovery_coverage_path)
+
+
+def test_image_identity_one_vs_rest_workflow_runs_end_to_end(tmp_path: Path):
+    prep_config_path, _, _ = _create_prepared_workspace(tmp_path)
+    experiment_config_path = _write_experiment_config(
+        tmp_path,
+        discovery_target_label="stimulus_presentations.image_name",
+        discovery_target_label_mode="onset_within_window",
+        discovery_target_label_match_value="im2",
+    )
+    checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best.pt"
+    discovery_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_image_discovery.json"
+    validation_json_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_image_validation.json"
+
+    for entrypoint, argv in (
+        [train_main, ["--config", str(experiment_config_path), "--data-config", str(prep_config_path)]],
+        [
+            discover_main,
+            [
+                "--config",
+                str(experiment_config_path),
+                "--data-config",
+                str(prep_config_path),
+                "--checkpoint",
+                str(checkpoint_path),
+                "--split",
+                "discovery",
+                "--output",
+                str(discovery_path),
+            ],
+        ],
+        [
+            validate_main,
+            [
+                "--config",
+                str(experiment_config_path),
+                "--data-config",
+                str(prep_config_path),
+                "--checkpoint",
+                str(checkpoint_path),
+                "--discovery-artifact",
+                str(discovery_path),
+                "--output-json",
+                str(validation_json_path),
+            ],
+        ],
+    ):
+        try:
+            entrypoint(argv)
+        except SystemExit as exc:
+            assert exc.code == 0
+
+    discovery_payload = json.loads(discovery_path.read_text(encoding="utf-8"))
+    validation_payload = json.loads(validation_json_path.read_text(encoding="utf-8"))
+
+    assert discovery_payload["decoder_summary"]["target_label"] == "stimulus_presentations.image_name"
+    assert discovery_payload["config_snapshot"]["discovery"]["target_label_match_value"] == "im2"
+    assert len(discovery_payload["candidates"]) >= 1
+    assert "held_out_test_metrics" in validation_payload
 
 
 def test_train_model_writes_fallback_best_checkpoint_when_validation_metric_is_nan(tmp_path: Path, monkeypatch):
