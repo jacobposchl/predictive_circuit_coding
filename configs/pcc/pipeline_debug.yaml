@@ -3,6 +3,7 @@ paths:
   data_config_path: allen_visual_behavior_neuropixels_local.yaml
   local_artifact_root: ../../artifacts
   drive_export_root: /content/drive/MyDrive/pcc_colab_outputs
+  source_dataset_root: /content/drive/MyDrive/pcc_runs/data/allen_visual_behavior_neuropixels
 
 stages:
   train: true
@@ -13,6 +14,7 @@ stages:
   image_identity_appendix: false
 
 pipeline:
+  stage_prepared_sessions_locally: true
   step_log_every: 1
   pca_components: 16
   session_holdout_fraction: 0.5

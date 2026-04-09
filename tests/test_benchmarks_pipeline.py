@@ -15,6 +15,14 @@ from predictive_circuit_coding.benchmarks.run import (
     run_motif_benchmark_matrix,
     run_representation_benchmark_matrix,
 )
+from predictive_circuit_coding.data import (
+    build_session_catalog_from_manifest,
+    create_workspace,
+    load_preparation_config,
+    load_session_manifest,
+    write_session_catalog,
+    write_session_catalog_csv,
+)
 from predictive_circuit_coding.training import load_experiment_config
 from predictive_circuit_coding.training.loop import train_model
 from predictive_circuit_coding.utils.notebook import NotebookDatasetConfig, NotebookTrainingConfig
@@ -44,6 +52,7 @@ def test_load_notebook_pipeline_config_resolves_relative_paths(tmp_path: Path) -
               data_config_path: allen_visual_behavior_neuropixels_local.yaml
               local_artifact_root: ../../artifacts
               drive_export_root: /content/drive/MyDrive/pcc_colab_outputs
+              source_dataset_root: /content/drive/MyDrive/pcc_runs/data/allen_visual_behavior_neuropixels
 
             stages:
               train: true
@@ -54,6 +63,7 @@ def test_load_notebook_pipeline_config_resolves_relative_paths(tmp_path: Path) -
               image_identity_appendix: false
 
             pipeline:
+              stage_prepared_sessions_locally: true
               step_log_every: 3
               pca_components: 16
               session_holdout_fraction: 0.5
@@ -77,6 +87,10 @@ def test_load_notebook_pipeline_config_resolves_relative_paths(tmp_path: Path) -
     assert config.experiment_config_path == (pipeline_config_path.parent / "predictive_circuit_coding_debug.yaml").resolve()
     assert config.data_config_path == (pipeline_config_path.parent / "allen_visual_behavior_neuropixels_local.yaml").resolve()
     assert config.local_artifact_root == (pipeline_config_path.parent / "../../artifacts").resolve()
+    assert str(config.source_dataset_root).replace("\\", "/").endswith(
+        "/content/drive/MyDrive/pcc_runs/data/allen_visual_behavior_neuropixels"
+    )
+    assert config.stage_prepared_sessions_locally is True
     assert config.representation_task_names == ("stimulus_change",)
     assert config.representation_arm_names == ("encoder_raw",)
 
@@ -279,3 +293,75 @@ def test_run_notebook_pipeline_from_config_uses_repo_config_surface(tmp_path: Pa
     assert result.representation_summary_json_path.is_file()
     assert state_payload["stages"]["train"]["status"] == "complete"
     assert state_payload["stages"]["representation_benchmark"]["status"] == "complete"
+
+
+def test_run_notebook_pipeline_from_config_stages_source_dataset_root(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    prep_config_path, experiment_config_path, source_workspace_root = _create_prepared_workspace(source_root)
+    source_prep_config = load_preparation_config(prep_config_path)
+    source_workspace = create_workspace(source_prep_config)
+    source_manifest = load_session_manifest(source_workspace.session_manifest_path)
+    source_catalog = build_session_catalog_from_manifest(source_manifest)
+    write_session_catalog(source_catalog, source_workspace.session_catalog_path)
+    write_session_catalog_csv(source_catalog, source_workspace.session_catalog_csv_path)
+    target_config_dir = tmp_path / "target" / "configs" / "pcc"
+    target_config_dir.mkdir(parents=True, exist_ok=True)
+    target_prep_config_path = target_config_dir / "prep.yaml"
+    target_prep_config_path.write_text(
+        Path(prep_config_path).read_text(encoding="utf-8").replace(
+            "workspace_root: data/allen_visual_behavior_neuropixels",
+            "workspace_root: data/local_stage_target",
+        ),
+        encoding="utf-8",
+    )
+    pipeline_config_path = target_config_dir / "pipeline_stage_from_source.yaml"
+    pipeline_config_path.write_text(
+        textwrap.dedent(
+            f"""
+            paths:
+              experiment_config_path: {experiment_config_path.as_posix()}
+              data_config_path: {target_prep_config_path.as_posix()}
+              local_artifact_root: { (tmp_path / 'local_artifacts').as_posix() }
+              drive_export_root: { (tmp_path / 'drive' / 'pcc_colab_outputs').as_posix() }
+              source_dataset_root: { source_workspace_root.as_posix() }
+
+            stages:
+              train: true
+              evaluate: true
+              representation_benchmark: true
+              motif_benchmark: false
+              alignment_diagnostic: false
+              image_identity_appendix: false
+
+            pipeline:
+              stage_prepared_sessions_locally: true
+              step_log_every: 1
+              pca_components: 8
+              session_holdout_fraction: 0.5
+              session_holdout_seed: 5
+              neighbor_k: 3
+              debug_retain_intermediates: false
+
+            tasks:
+              representation: [stimulus_change]
+              motifs: [stimulus_change]
+
+            arms:
+              representation: [encoder_raw]
+              motifs: [encoder_raw]
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    result = run_notebook_pipeline_from_config(
+        pipeline_config_path=pipeline_config_path,
+        pipeline_run_id="run_stage_from_source",
+        output_stream=io.StringIO(),
+    )
+
+    staged_workspace_root = tmp_path / "target" / "data" / "local_stage_target"
+    assert (staged_workspace_root / "manifests" / "session_catalog.json").is_file()
+    assert any((staged_workspace_root / "prepared" / "allen_visual_behavior_neuropixels").glob("*.h5"))
+    assert result.training_summary_path.is_file()
+    assert result.representation_summary_json_path.is_file()

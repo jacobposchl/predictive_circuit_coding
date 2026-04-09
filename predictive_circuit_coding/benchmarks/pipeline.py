@@ -26,12 +26,19 @@ from predictive_circuit_coding.benchmarks.run import (
     run_motif_benchmark_matrix,
     run_representation_benchmark_matrix,
 )
-from predictive_circuit_coding.data import create_workspace, load_preparation_config
+from predictive_circuit_coding.data import (
+    build_workspace,
+    create_workspace,
+    filter_session_catalog,
+    load_preparation_config,
+    load_session_catalog,
+)
 from predictive_circuit_coding.evaluation import evaluate_checkpoint_on_split
 from predictive_circuit_coding.training import load_experiment_config, write_evaluation_summary
 from predictive_circuit_coding.utils.notebook import (
     NotebookDatasetConfig,
     NotebookTrainingConfig,
+    materialize_notebook_prepared_sessions,
     prepare_notebook_runtime_context,
     prepare_notebook_runtime_context_from_experiment_config,
     resolve_notebook_checkpoint,
@@ -168,6 +175,103 @@ def _sync_run_relatives(paths: NotebookPipelinePaths, relatives: Iterable[str]) 
         source = paths.local_run_root / relative
         target = paths.drive_run_root / relative
         _sync_path(source, target)
+
+
+def _ensure_local_dataset_workspace(
+    *,
+    base_experiment_config: str | Path,
+    data_config_path: str | Path,
+    source_dataset_root: str | Path | None,
+    stage_prepared_sessions_locally: bool,
+    output_stream: TextIO | None = None,
+) -> dict[str, Any] | None:
+    if source_dataset_root is None:
+        return None
+
+    prep_config = load_preparation_config(data_config_path)
+    workspace = build_workspace(prep_config)
+    source_root = Path(source_dataset_root).resolve()
+    target_root = workspace.root.resolve()
+    if source_root == target_root:
+        return {
+            "mode": "source_equals_target",
+            "source_dataset_root": str(source_root),
+            "target_dataset_root": str(target_root),
+        }
+
+    experiment_config = load_experiment_config(base_experiment_config)
+    source_catalog_path = source_root / "manifests" / "session_catalog.json"
+    if not source_catalog_path.is_file():
+        raise FileNotFoundError(
+            f"Source dataset session catalog not found: {source_catalog_path}. "
+            "Point the pipeline config at the processed Drive dataset root."
+        )
+    source_catalog = load_session_catalog(source_catalog_path)
+
+    if experiment_config.dataset_selection.is_active and stage_prepared_sessions_locally:
+        selected_catalog = filter_session_catalog(source_catalog, selection=experiment_config.dataset_selection)
+        session_ids = tuple(record.session_id for record in selected_catalog.records)
+        if not session_ids:
+            raise ValueError(
+                "Dataset selection matched zero sessions in the source dataset root. "
+                "Relax the experiment config filters or verify the source dataset catalog."
+            )
+        local_prepared_root = target_root / prep_config.dataset.prepared_subdir / experiment_config.dataset_id
+        manifests_ready = (target_root / prep_config.dataset.manifests_subdir / "session_catalog.json").is_file()
+        all_sessions_present = all((local_prepared_root / f"{session_id}.h5").is_file() for session_id in session_ids)
+        if manifests_ready and all_sessions_present:
+            return {
+                "mode": "reuse_local_subset",
+                "source_dataset_root": str(source_root),
+                "target_dataset_root": str(target_root),
+                "session_count": len(session_ids),
+            }
+        result = materialize_notebook_prepared_sessions(
+            source_dataset_root=source_root,
+            target_dataset_root=target_root,
+            session_ids=session_ids,
+            dataset_id=experiment_config.dataset_id,
+            reset_target=True,
+        )
+        if output_stream is not None:
+            output_stream.write(
+                f"Prepared-session staging: local copy enabled | staged sessions={len(result.staged_session_ids)} "
+                f"| target={result.target_prepared_root}\n"
+            )
+        return {
+            "mode": "staged_subset",
+            "source_dataset_root": str(source_root),
+            "target_dataset_root": str(result.target_dataset_root),
+            "session_count": len(result.staged_session_ids),
+        }
+
+    if target_root.is_symlink() and target_root.resolve() == source_root:
+        return {
+            "mode": "reuse_symlink",
+            "source_dataset_root": str(source_root),
+            "target_dataset_root": str(target_root),
+        }
+    if target_root.exists():
+        if target_root.is_symlink() or target_root.is_file():
+            target_root.unlink()
+        else:
+            shutil.rmtree(target_root)
+    target_root.parent.mkdir(parents=True, exist_ok=True)
+    mode = "symlink"
+    try:
+        target_root.symlink_to(source_root, target_is_directory=True)
+    except OSError:
+        shutil.copytree(source_root, target_root)
+        mode = "copytree"
+    if output_stream is not None:
+        output_stream.write(
+            f"Prepared-session staging: full dataset {mode} | source={source_root} | target={target_root}\n"
+        )
+    return {
+        "mode": mode,
+        "source_dataset_root": str(source_root),
+        "target_dataset_root": str(target_root),
+    }
 
 
 def _load_pipeline_state(path: Path) -> dict[str, dict[str, Any]]:
@@ -340,6 +444,7 @@ def prepare_or_restore_training_stage(
         "training_config": training_config.__dict__,
         "step_log_every": int(step_log_every),
         "run_stage_train": bool(run_stage_train),
+        "use_experiment_config_as_is": bool(use_experiment_config_as_is),
     }
     config_hash = _json_hash(stage_config)
     inputs = {
@@ -914,6 +1019,7 @@ def run_notebook_pipeline(
     data_config_path: str | Path,
     drive_export_root: str | Path | None,
     local_artifact_root: str | Path,
+    source_dataset_root: str | Path | None = None,
     pipeline_run_id: str | None,
     dataset_config: NotebookDatasetConfig,
     training_config: NotebookTrainingConfig,
@@ -934,6 +1040,7 @@ def run_notebook_pipeline(
     session_holdout_seed: int | None = None,
     neighbor_k: int = 5,
     debug_retain_intermediates: bool = False,
+    stage_prepared_sessions_locally: bool = False,
     use_experiment_config_as_is: bool = False,
     output_stream: TextIO | None = None,
 ) -> NotebookPipelineRunResult:
@@ -961,6 +1068,7 @@ def run_notebook_pipeline(
         "base_experiment_config": str(Path(base_experiment_config).resolve()),
         "data_config_path": str(Path(data_config_path).resolve()),
         "drive_export_root": (str(Path(drive_export_root).resolve()) if drive_export_root is not None else None),
+        "source_dataset_root": (str(Path(source_dataset_root).resolve()) if source_dataset_root is not None else None),
         "dataset_config": dataset_config.__dict__,
         "training_config": training_config.__dict__,
         "step_log_every": int(step_log_every),
@@ -980,6 +1088,7 @@ def run_notebook_pipeline(
         "session_holdout_seed": session_holdout_seed,
         "neighbor_k": int(neighbor_k),
         "debug_retain_intermediates": bool(debug_retain_intermediates),
+        "stage_prepared_sessions_locally": bool(stage_prepared_sessions_locally),
         "use_experiment_config_as_is": bool(use_experiment_config_as_is),
     }
     paths.pipeline_config_snapshot_path.write_text(
@@ -996,6 +1105,13 @@ def run_notebook_pipeline(
     states = _load_pipeline_state(paths.pipeline_state_path)
 
     output_stream = output_stream or __import__("sys").stdout
+    _ensure_local_dataset_workspace(
+        base_experiment_config=base_experiment_config,
+        data_config_path=data_config_path,
+        source_dataset_root=source_dataset_root,
+        stage_prepared_sessions_locally=stage_prepared_sessions_locally,
+        output_stream=output_stream,
+    )
     train_outputs = prepare_or_restore_training_stage(
         paths=paths,
         states=states,
@@ -1120,6 +1236,7 @@ def run_notebook_pipeline_from_config(
         data_config_path=config.data_config_path,
         drive_export_root=config.drive_export_root,
         local_artifact_root=config.local_artifact_root,
+        source_dataset_root=config.source_dataset_root,
         pipeline_run_id=pipeline_run_id,
         dataset_config=NotebookDatasetConfig(),
         training_config=NotebookTrainingConfig(),
@@ -1140,6 +1257,7 @@ def run_notebook_pipeline_from_config(
         session_holdout_seed=config.session_holdout_seed,
         neighbor_k=config.neighbor_k,
         debug_retain_intermediates=config.debug_retain_intermediates,
+        stage_prepared_sessions_locally=config.stage_prepared_sessions_locally,
         use_experiment_config_as_is=True,
         output_stream=output_stream,
     )

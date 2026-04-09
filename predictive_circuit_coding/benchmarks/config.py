@@ -32,12 +32,14 @@ class NotebookPipelineConfig:
     data_config_path: Path
     local_artifact_root: Path
     drive_export_root: Path | None
+    source_dataset_root: Path | None
     run_stage_train: bool
     run_stage_evaluate: bool
     run_stage_representation_benchmark: bool
     run_stage_motif_benchmark: bool
     run_stage_alignment_diagnostic: bool
     run_stage_image_identity_appendix: bool
+    stage_prepared_sessions_locally: bool
     step_log_every: int
     pca_components: int
     session_holdout_fraction: float
@@ -80,6 +82,7 @@ def load_notebook_pipeline_config(path: str | Path) -> NotebookPipelineConfig:
     data_config_path = _resolve_path(config_dir, str(paths.get("data_config_path", "")))
     local_artifact_root = _resolve_path(config_dir, str(paths.get("local_artifact_root", "artifacts")))
     drive_export_root = _resolve_path(config_dir, paths.get("drive_export_root"))
+    source_dataset_root = _resolve_path(config_dir, paths.get("source_dataset_root"))
     if experiment_config_path is None:
         raise ValueError("paths.experiment_config_path is required")
     if data_config_path is None:
@@ -93,12 +96,14 @@ def load_notebook_pipeline_config(path: str | Path) -> NotebookPipelineConfig:
         data_config_path=data_config_path,
         local_artifact_root=local_artifact_root,
         drive_export_root=drive_export_root,
+        source_dataset_root=source_dataset_root,
         run_stage_train=bool(stages.get("train", True)),
         run_stage_evaluate=bool(stages.get("evaluate", True)),
         run_stage_representation_benchmark=bool(stages.get("representation_benchmark", True)),
         run_stage_motif_benchmark=bool(stages.get("motif_benchmark", True)),
         run_stage_alignment_diagnostic=bool(stages.get("alignment_diagnostic", False)),
         run_stage_image_identity_appendix=bool(stages.get("image_identity_appendix", False)),
+        stage_prepared_sessions_locally=bool(pipeline.get("stage_prepared_sessions_locally", False)),
         step_log_every=int(pipeline.get("step_log_every", 10)),
         pca_components=int(pipeline.get("pca_components", 64)),
         session_holdout_fraction=float(pipeline.get("session_holdout_fraction", 0.5)),
