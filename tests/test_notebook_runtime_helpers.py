@@ -762,6 +762,7 @@ def test_build_notebook_discovery_comparison_summary_row_reads_primary_and_stand
 
     assert row["arm_name"] == "whitening_only"
     assert row["target_label"] == "stimulus_change"
+    assert row["comparison_status"] is None
     assert row["candidate_count"] == 32
     assert row["primary_within_session_held_out_probe_accuracy"] == 0.7
     assert row["standard_test_probe_accuracy"] == 0.58

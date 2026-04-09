@@ -1433,6 +1433,8 @@ def _flatten_comparison_validation_summary(summary: dict[str, object]) -> dict[s
     return {
         "arm_name": summary.get("arm_name"),
         "transform_mode": summary.get("transform_mode"),
+        "comparison_status": summary.get("comparison_status"),
+        "failure_reason": summary.get("failure_reason"),
         "fit_window_count": summary.get("fit_window_count"),
         "heldout_window_count": summary.get("heldout_window_count"),
         "candidate_count": summary.get("candidate_count"),
@@ -1565,6 +1567,8 @@ def build_notebook_discovery_comparison_summary_row(
     return {
         "arm_name": str(arm_name),
         "target_label": discovery_payload.get("decoder_summary", {}).get("target_label"),
+        "comparison_status": validation_payload.get("comparison_status"),
+        "failure_reason": validation_payload.get("failure_reason"),
         "candidate_count": validation_payload.get("candidate_count"),
         "cluster_count": validation_payload.get("cluster_count"),
         "discovery_probe_accuracy": discovery_fit.get("probe_accuracy"),

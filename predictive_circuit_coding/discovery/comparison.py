@@ -161,6 +161,18 @@ def _held_out_similarity_summary(
     }
 
 
+def _unavailable_similarity_summary(*, reason: str) -> dict[str, Any]:
+    return {
+        "window_roc_auc": None,
+        "window_pr_auc": None,
+        "positive_window_count": None,
+        "negative_window_count": None,
+        "per_session_roc_auc": {},
+        "comparison_available": False,
+        "failure_reason": str(reason),
+    }
+
+
 def _copy_or_transform_selected_shards(
     *,
     shard_paths: tuple[Path, ...],
@@ -330,16 +342,21 @@ def _standard_cross_session_validation_summary(
         labels=test_collection.labels,
     )
     centroids = _candidate_centroids(candidates)
-    window_scores = _window_similarity_scores(
-        tokens=test_tokens,
-        token_mask=test_collection.token_mask,
-        centroids=centroids,
-    )
-    held_out_similarity_summary = _held_out_similarity_summary(
-        labels=test_collection.labels,
-        window_session_ids=test_collection.window_session_ids,
-        window_scores=window_scores,
-    )
+    if centroids:
+        window_scores = _window_similarity_scores(
+            tokens=test_tokens,
+            token_mask=test_collection.token_mask,
+            centroids=centroids,
+        )
+        held_out_similarity_summary = _held_out_similarity_summary(
+            labels=test_collection.labels,
+            window_session_ids=test_collection.window_session_ids,
+            window_scores=window_scores,
+        )
+    else:
+        held_out_similarity_summary = _unavailable_similarity_summary(
+            reason="no_non_noise_clusters_for_similarity_validation",
+        )
     return {
         "transform_mode": transform_mode,
         "real_label_metrics": real_label_metrics,
@@ -509,26 +526,37 @@ def run_representation_comparison_from_encoded(
         )
         if transformed_shards:
             shutil.rmtree(arm_shard_dir)
+        failure_reason = None
         if not candidates:
-            raise ValueError(
-                f"No candidate tokens were selected for comparison arm '{arm_name}'. "
-                "Lower the candidate threshold, increase discovery coverage, or confirm positive labels exist."
+            clustered_candidates = tuple()
+            cluster_stats = {
+                "cluster_count": 0.0,
+                "noise_count": 0.0,
+                "non_noise_fraction": 0.0,
+                "silhouette_score": None,
+                "cluster_persistence_mean": None,
+                "cluster_persistence_min": None,
+                "cluster_persistence_max": None,
+                "cluster_persistence_by_cluster": {},
+            }
+            cluster_quality_summary = cluster_stats.copy()
+            failure_reason = "no_candidates_selected"
+        else:
+            clustered_candidates, cluster_stats = cluster_candidate_tokens(
+                candidates=candidates,
+                min_cluster_size=experiment_config.discovery.min_cluster_size,
             )
-        clustered_candidates, cluster_stats = cluster_candidate_tokens(
-            candidates=candidates,
-            min_cluster_size=experiment_config.discovery.min_cluster_size,
-        )
-        if int(cluster_stats.get("cluster_count", 0)) <= 0:
-            raise ValueError(
-                f"Comparison arm '{arm_name}' selected candidate tokens but produced no non-noise clusters."
-            )
-        cluster_quality_summary = estimate_clustering_stability(
-            candidates=clustered_candidates,
-            cluster_stats=cluster_stats,
-            min_cluster_size=experiment_config.discovery.min_cluster_size,
-            stability_rounds=experiment_config.discovery.stability_rounds,
-            seed=experiment_config.seed,
-        )
+            if int(cluster_stats.get("cluster_count", 0)) <= 0:
+                cluster_quality_summary = cluster_stats.copy()
+                failure_reason = "no_non_noise_clusters"
+            else:
+                cluster_quality_summary = estimate_clustering_stability(
+                    candidates=clustered_candidates,
+                    cluster_stats=cluster_stats,
+                    min_cluster_size=experiment_config.discovery.min_cluster_size,
+                    stability_rounds=experiment_config.discovery.stability_rounds,
+                    seed=experiment_config.seed,
+                )
         artifact = DiscoveryArtifact(
             dataset_id=experiment_config.dataset_id,
             split_name=split_name,
@@ -557,15 +585,20 @@ def run_representation_comparison_from_encoded(
             labels=heldout_labels,
         )
         centroids = _candidate_centroids(clustered_candidates)
-        heldout_similarity_summary = _held_out_similarity_summary(
-            labels=heldout_labels,
-            window_session_ids=heldout_session_ids,
-            window_scores=_window_similarity_scores(
-                tokens=arm_heldout_tokens,
-                token_mask=heldout_token_mask,
-                centroids=centroids,
-            ),
-        )
+        if centroids:
+            heldout_similarity_summary = _held_out_similarity_summary(
+                labels=heldout_labels,
+                window_session_ids=heldout_session_ids,
+                window_scores=_window_similarity_scores(
+                    tokens=arm_heldout_tokens,
+                    token_mask=heldout_token_mask,
+                    centroids=centroids,
+                ),
+            )
+        else:
+            heldout_similarity_summary = _unavailable_similarity_summary(
+                reason=failure_reason or "no_non_noise_clusters_for_similarity_validation",
+            )
         standard_validation_summary = None
         if run_standard_test_validation and transform_mode in {"baseline", "whitening_only"}:
             standard_validation_summary = _standard_cross_session_validation_summary(
@@ -592,6 +625,8 @@ def run_representation_comparison_from_encoded(
             "candidate_count": len(clustered_candidates),
             "cluster_count": int(cluster_stats.get("cluster_count", 0)),
             "cluster_quality_summary": cluster_quality_summary,
+            "comparison_status": "ok" if failure_reason is None else "degraded",
+            "failure_reason": failure_reason,
             "standard_test_validation": standard_validation_summary,
         }
         arm_results.append(
