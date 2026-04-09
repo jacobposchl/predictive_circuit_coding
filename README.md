@@ -5,7 +5,7 @@ This repository is an Allen-first Neuropixels pipeline for predictive population
 - local CPU for Allen data preparation, split planning, and inspection
 - Google Colab A100 for training, evaluation, discovery, and validation
 
-The current repo is Stage 7 complete: it supports `pcc-prepare-data`, `pcc-train`, `pcc-evaluate`, `pcc-discover`, and `pcc-validate`, plus two thin Colab notebooks that sit on top of the CLI/library surface.
+The current repo is Stage 7 complete: it supports `pcc-prepare-data`, `pcc-train`, `pcc-evaluate`, `pcc-discover`, `pcc-validate`, and `pcc-benchmark`, plus one supported Colab pipeline notebook that sits on top of the CLI/library surface.
 
 If you want to preview the notebook-style stage flow and artifact summaries without touching Allen data or Colab, run:
 
@@ -23,10 +23,11 @@ The main human-facing guide for how the repo is organized and how to run the exp
 pcc-prepare-data prepare-allen-visual-behavior-neuropixels --config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
 pcc-prepare-data process-allen-visual-behavior-neuropixels --config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
 pcc-prepare-data build-session-catalog --config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
-pcc-train --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
-pcc-evaluate --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_best.pt --split valid
-pcc-discover --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_best.pt --split discovery
-pcc-validate --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_best.pt --discovery-artifact artifacts/checkpoints/pcc_best_discovery_discovery.json
+pcc-train --config configs/pcc/predictive_circuit_coding_full.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
+pcc-evaluate --config configs/pcc/predictive_circuit_coding_full.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_full_best.pt --split valid
+pcc-discover --config configs/pcc/predictive_circuit_coding_full.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_full_best.pt --split discovery
+pcc-validate --config configs/pcc/predictive_circuit_coding_full.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_full_best.pt --discovery-artifact artifacts/checkpoints/pcc_full_best_discovery_discovery.json
+pcc-benchmark --config configs/pcc/predictive_circuit_coding_full.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_full_best.pt --output-root artifacts/benchmarks
 pcc-preview-notebook-ui --output-root artifacts/notebook_ui_preview --force
 ```
 
@@ -38,33 +39,35 @@ Each Stage 5-7 command writes:
 
 ## Dataset Selection
 
-The canonical local dataset can contain the full processed Allen session store. Normal Colab runs are now notebook-first:
+The canonical local dataset can contain the full processed Allen session store. Normal Colab runs are now config-first:
 
-- the training notebook defines the subset with simple scalars like `EXPERIENCE_LEVEL`, `MAX_SESSIONS`, and split fractions
-- the notebook writes an artifact-local runtime subset bundle under `artifacts/runtime_subset/`
-- the discovery notebook restores a selected training `run_id`, reuses that exact saved subset, and now runs a comparison-first three-arm experiment on one `DECODE_TYPE`: `baseline`, `whitening_only`, and `whitening_plus_held_out_alignment`
+- choose a repo-native pipeline config such as `configs/pcc/pipeline_debug.yaml` or `configs/pcc/pipeline_full.yaml`
+- each pipeline config points at an experiment config such as `predictive_circuit_coding_debug.yaml` or `predictive_circuit_coding_full.yaml`
+- the unified notebook loads that config, writes stage outputs under one run root, and can resume a selected `run_id`
 
 You can:
 
 - process the full dataset once
 - rebuild the rich session catalog cheaply
-- select notebook subsets by metadata like `experience_level` and `max_sessions`
+- define debug and full experiment panels directly in repo configs
 - recompute split manifests for the selected subset without recreating `.h5` files
 
 ## Notebooks
 
-The repo ends with two Colab notebooks:
+The supported Colab entrypoint is:
 
-- [train_predictive_circuit_coding_colab.ipynb](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/notebooks/train_predictive_circuit_coding_colab.ipynb)
-- [discover_validate_inspect_colab.ipynb](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/notebooks/discover_validate_inspect_colab.ipynb)
-- [diagnose_representation_motifs_colab.ipynb](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/notebooks/diagnose_representation_motifs_colab.ipynb)
+- [run_predictive_circuit_coding_pipeline_colab.ipynb](/C:/Users/Jacob%20Poschl/Desktop/population-dynamics/notebooks/run_predictive_circuit_coding_pipeline_colab.ipynb)
 
-They are intentionally thin and call the same CLI surface listed above.
+It is intentionally thin and calls the same CLI/library surface listed above.
 
-- the training notebook owns subset choice and split fractions
-- the training notebook creates a fresh `run_id` and exports to `pcc_colab_outputs/<run_id>/run_1/train/`
-- the discovery notebook restores `TRAINING_RUN_ID` or the latest exported training run, then writes grouped comparison attempts under `pcc_colab_outputs/<run_id>/run_1/discovery/<decode_type>__<timestamp>/` with per-arm `baseline/`, `whitening_only/`, and `whitening_plus_held_out_alignment/` artifacts plus a shared comparison summary
-- the diagnostics notebook restores the same training run, runs a session-alignment diagnostic first by default, and writes grouped outputs under `pcc_colab_outputs/<run_id>/run_1/diagnostics/<timestamp>/`
+- the notebook asks for a single repo config path plus an optional `PIPELINE_RUN_ID`
+- it restores or creates one `run_id`, then writes stage outputs under `pcc_colab_outputs/<run_id>/run_1/`
+- it runs training, evaluation, representation benchmarks, motif benchmarks, and optional appendix diagnostics as explicit stages
+- it writes compact stage state and manifest files under `pipeline/` so interrupted runs can resume without wasting storage
+- repo-native config presets now include:
+  `configs/pcc/pipeline_debug.yaml`, `configs/pcc/pipeline_full.yaml`,
+  `configs/pcc/predictive_circuit_coding_debug.yaml`, and `configs/pcc/predictive_circuit_coding_full.yaml`
+- representation benchmarks are now crossed by feature family x geometry mode, with raw versus whitened comparisons made explicit across count-based, PCA, and frozen-encoder feature families
 - discovery supports both capped `sequential` planning and `label_balanced` planning with explicit `max_batches`, `search_max_batches`, `min_positive_windows`, and `negative_to_positive_ratio` controls
 - major Allen decode targets default to event-local onset labeling rather than broad overlap labeling
 - discovery candidate selection is session-balanced by default via `discovery.candidate_session_balance_fraction` so one session does not dominate the top-k motif pool; set it to `1.0` to restore pure global top-k scoring for comparisons
@@ -106,7 +109,7 @@ Training problems:
 
 - if `split_manifest.json` is missing, rerun local prep first
 - if `session_catalog.json` is missing, run `pcc-prepare-data build-session-catalog`
-- if a notebook subset should be used, change the subset scalars in the training notebook and rerun from the top
+- if a different subset or budget should be used, switch to another repo config or edit the relevant experiment / pipeline YAML
 - if a resume checkpoint is missing, clear `training.resume_checkpoint` or point it at a real checkpoint
 - if a checkpoint dataset mismatch is reported, use a checkpoint produced from the same dataset/config family
 - if `training_summary.json` looks inconsistent with the latest epoch, remember it now intentionally describes the selected best checkpoint, not the latest completed epoch
@@ -117,7 +120,7 @@ Discovery problems:
 - if no candidate tokens are selected, lower `discovery.min_candidate_score` or increase `discovery.max_batches`
 - if one session still dominates the discovered candidates, lower `discovery.candidate_session_balance_fraction`; set it to `1.0` only when you intentionally want the old global top-k behavior
 - if clustering produces no motif clusters, reduce `discovery.min_cluster_size` or expand the discovery subset; singleton clusters are now rejected up front, so `min_cluster_size` must be at least `2`
-- if `TRAINING_RUN_ID` points at a missing export, clear it to use the latest exported training run or rerun the training notebook so it writes a fresh `run_id`
+- if `PIPELINE_RUN_ID` points at a missing export, clear it to use the latest compatible exported run or rerun the unified notebook so it writes a fresh `run_id`
 
 Validation problems:
 

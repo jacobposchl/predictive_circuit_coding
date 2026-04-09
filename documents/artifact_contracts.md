@@ -2,6 +2,22 @@
 
 This repo treats these outputs as first-class artifacts.
 
+## Unified Pipeline Run Root
+
+The unified Colab runner writes one stage-resumable run root under:
+
+- `pcc_colab_outputs/<run_id>/run_1/`
+
+Expected top-level subdirectories:
+
+- `train/`
+- `evaluation/`
+- `benchmarks/representation/`
+- `benchmarks/motifs/`
+- `benchmarks/diagnostics/` when optional appendix stages are enabled
+- `reports/`
+- `pipeline/`
+
 ## Session Catalog JSON
 
 Location:
@@ -46,6 +62,7 @@ Purpose:
 Location:
 
 - typically `artifacts/checkpoints/<prefix>_best.pt`
+- in unified Colab runs, under `pcc_colab_outputs/<run_id>/run_1/train/checkpoints/<prefix>_best.pt`
 
 Required payload:
 
@@ -85,6 +102,11 @@ Semantics:
 - `training_summary.json` must describe the checkpoint named in `checkpoint_path`
 - `epoch` and `best_epoch` therefore refer to the selected best checkpoint, not necessarily the latest completed epoch
 
+Storage policy:
+
+- notebook-driven final runs retain only the selected `best` and `latest` checkpoints by default
+- verbose per-epoch checkpoints are not first-class artifacts in the compact final workflow
+
 ## Evaluation Summary JSON
 
 Required keys:
@@ -103,6 +125,76 @@ Expected metrics:
 - `predictive_raw_mse`
 - `predictive_improvement`
 - `reconstruction_loss`
+
+## Representation Benchmark Summary JSON And CSV
+
+Unified runs emit one combined representation benchmark summary under:
+
+- `reports/representation_benchmark_summary.json`
+- `reports/representation_benchmark_summary.csv`
+
+Each row must retain:
+
+- `task_name`
+- `target_label`
+- `target_label_match_value`
+- `arm_name`
+- `feature_family`
+- `geometry_mode`
+- `status`
+- `cross_session_test_probe_accuracy`
+- `cross_session_test_probe_bce`
+- `cross_session_test_probe_roc_auc`
+- `cross_session_test_probe_pr_auc`
+- `within_session_holdout_probe_accuracy`
+- `within_session_holdout_probe_bce`
+- `within_session_holdout_probe_roc_auc`
+- `within_session_holdout_probe_pr_auc`
+- `label_neighbor_enrichment`
+- `session_neighbor_enrichment`
+- `subject_neighbor_enrichment`
+- `summary_json_path`
+- `transform_summary_json_path`
+
+Semantics:
+
+- the representation benchmark is the claim-facing crossed matrix over feature family x geometry mode
+- optional tasks that cannot run because a field is absent must report `status = skipped_missing_field` instead of failing the whole run
+
+## Motif Benchmark Summary JSON And CSV
+
+Unified runs emit one combined motif benchmark summary under:
+
+- `reports/motif_benchmark_summary.json`
+- `reports/motif_benchmark_summary.csv`
+
+Each row must retain:
+
+- `task_name`
+- `target_label`
+- `target_label_match_value`
+- `arm_name`
+- `feature_family`
+- `geometry_mode`
+- `status`
+- `candidate_count`
+- `cluster_count`
+- `cluster_persistence_mean`
+- `silhouette_score`
+- `held_out_test_probe_accuracy`
+- `held_out_test_probe_bce`
+- `held_out_test_probe_roc_auc`
+- `held_out_test_probe_pr_auc`
+- `held_out_test_similarity_roc_auc`
+- `held_out_test_similarity_pr_auc`
+- `cluster_summary_json_path`
+- `discovery_artifact_path`
+- `validation_summary_json_path`
+
+Semantics:
+
+- motif benchmark rows correspond only to the selected arm subset for motif analysis, not the full representation matrix
+- `status` must distinguish successful rows from degraded or skipped rows so the final report can stay compact and honest
 
 ## Discovery Artifact JSON
 
@@ -245,6 +337,63 @@ Required columns:
 - `shuffled_probe_bce`
 - `held_out_test_probe_bce`
 - `provenance_issue_count`
+
+## Final Project Summary JSON And CSV
+
+Unified runs also emit a compact final project report under:
+
+- `reports/final_project_summary.json`
+- `reports/final_project_summary.csv`
+
+Each row must retain:
+
+- `stage_name`
+- `status`
+- `summary_json_path`
+- `summary_csv_path`
+- `notes`
+
+The final project summary is a run-level report artifact, not a replacement for the benchmark and validation detail artifacts.
+
+## Pipeline Manifest And State
+
+Unified notebook runs write resumability metadata under:
+
+- `pipeline/pipeline_manifest.json`
+- `pipeline/pipeline_state.json`
+- `pipeline/pipeline_config_snapshot.yaml`
+
+`pipeline_manifest.json` required keys:
+
+- `run_id`
+- `dataset_id`
+- `stage_order`
+- `local_run_root`
+- `drive_run_root`
+- `config_snapshot_path`
+- `created_at_utc`
+- `updated_at_utc`
+
+`pipeline_state.json` required structure:
+
+- top-level `stages`
+- one object per stage, keyed by stage name
+
+Each stage object must retain:
+
+- `stage_name`
+- `status`
+- `config_hash`
+- `inputs`
+- `outputs`
+- `created_at_utc`
+- `updated_at_utc`
+- `error_message`
+
+Semantics:
+
+- stage reuse is valid only when `status == complete`, the config hash matches, upstream inputs still match, and declared outputs still exist
+- interrupted or failed stages must remain visible in the state file instead of being silently discarded
 
 ## Run-Manifest Sidecars
 

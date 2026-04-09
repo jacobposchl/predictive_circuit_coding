@@ -337,6 +337,91 @@ def prepare_notebook_runtime_context(
     )
 
 
+def prepare_notebook_runtime_context_from_experiment_config(
+    *,
+    base_experiment_config: str | Path,
+    runtime_experiment_config: str | Path,
+    artifact_root: str | Path,
+    step_log_every: int,
+    run_id: str | None = None,
+) -> NotebookRuntimeContext:
+    from predictive_circuit_coding.training import load_experiment_config
+
+    base_config = load_experiment_config(base_experiment_config)
+    runtime_path = Path(runtime_experiment_config)
+    artifact_path = Path(artifact_root)
+    checkpoint_dir = artifact_path / "checkpoints"
+    summary_path = artifact_path / "training_summary.json"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path.mkdir(parents=True, exist_ok=True)
+
+    resolved_run_id = str(run_id).strip() if run_id is not None else datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    if not resolved_run_id:
+        raise ValueError("run_id must not be empty")
+
+    payload = base_config.to_dict()
+    payload.setdefault("training", {})["log_every_steps"] = int(step_log_every)
+    artifacts = payload.setdefault("artifacts", {})
+    artifacts["checkpoint_dir"] = str(checkpoint_dir.resolve())
+    artifacts["summary_path"] = str(summary_path.resolve())
+
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    exported_runtime_config_path = artifact_path / "colab_runtime_experiment.yaml"
+    exported_runtime_config_path.write_text(runtime_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    checkpoint_prefix = str(artifacts.get("checkpoint_prefix", "pcc"))
+    checkpoint_path = checkpoint_dir / f"{checkpoint_prefix}_best.pt"
+    runtime_subset = payload.get("runtime_subset") or {}
+    runtime_split_manifest_path = (
+        Path(str(runtime_subset["split_manifest_path"]))
+        if runtime_subset.get("split_manifest_path")
+        else artifact_path / "runtime_subset" / "selected_split_manifest.json"
+    )
+    runtime_session_catalog_path = (
+        Path(str(runtime_subset["session_catalog_path"]))
+        if runtime_subset.get("session_catalog_path")
+        else artifact_path / "runtime_subset" / "selected_session_catalog.json"
+    )
+    runtime_config_dir = (
+        Path(str(runtime_subset["config_dir"]))
+        if runtime_subset.get("config_dir")
+        else artifact_path / "runtime_subset" / "splits"
+    )
+    config_name_prefix = str(runtime_subset.get("config_name_prefix", "torch_brain_runtime"))
+
+    profile_path = artifact_path / "colab_notebook_profile.json"
+    profile_payload = {
+        "run_id": resolved_run_id,
+        "runtime_experiment_config": str(runtime_path.resolve()),
+        "checkpoint_dir": str(checkpoint_dir.resolve()),
+        "summary_path": str(summary_path.resolve()),
+        "checkpoint_path": str(checkpoint_path.resolve()),
+        "runtime_split_manifest_path": str(runtime_split_manifest_path.resolve()),
+        "runtime_session_catalog_path": str(runtime_session_catalog_path.resolve()),
+        "runtime_config_dir": str(runtime_config_dir.resolve()),
+        "config_name_prefix": config_name_prefix,
+        "step_log_every": int(step_log_every),
+        "dataset_selection_active": base_config.dataset_selection.is_active,
+        "runtime_subset_active": base_config.runtime_subset is not None,
+    }
+    profile_path.write_text(json.dumps(profile_payload, indent=2), encoding="utf-8")
+    return NotebookRuntimeContext(
+        experiment_config_path=runtime_path,
+        checkpoint_dir=checkpoint_dir,
+        summary_path=summary_path,
+        checkpoint_path=checkpoint_path,
+        run_id=resolved_run_id,
+        selected_session_count=0,
+        profile_path=profile_path,
+        runtime_split_manifest_path=runtime_split_manifest_path,
+        runtime_session_catalog_path=runtime_session_catalog_path,
+        runtime_config_dir=runtime_config_dir,
+        config_name_prefix=config_name_prefix,
+        exported_runtime_config_path=exported_runtime_config_path,
+    )
+
+
 def build_notebook_discovery_runtime_config(
     *,
     source_experiment_config: str | Path,

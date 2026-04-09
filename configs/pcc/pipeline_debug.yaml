@@ -1,0 +1,30 @@
+paths:
+  experiment_config_path: predictive_circuit_coding_debug.yaml
+  data_config_path: allen_visual_behavior_neuropixels_local.yaml
+  local_artifact_root: ../../artifacts
+  drive_export_root: /content/drive/MyDrive/pcc_colab_outputs
+
+stages:
+  train: true
+  evaluate: true
+  representation_benchmark: true
+  motif_benchmark: true
+  alignment_diagnostic: false
+  image_identity_appendix: false
+
+pipeline:
+  step_log_every: 1
+  pca_components: 16
+  session_holdout_fraction: 0.5
+  session_holdout_seed: 7
+  neighbor_k: 3
+  debug_retain_intermediates: false
+
+tasks:
+  image_target_name:
+  representation: [stimulus_change]
+  motifs: [stimulus_change]
+
+arms:
+  representation: [count_patch_mean_raw, encoder_raw, encoder_whitened]
+  motifs: [encoder_raw, encoder_whitened]

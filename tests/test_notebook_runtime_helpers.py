@@ -871,11 +871,11 @@ def test_export_notebook_discovery_comparison_artifacts_uses_grouped_attempt_lay
     assert (export_path / "comparison_summary.json").is_file()
 
 
-def test_discovery_notebook_json_parses() -> None:
-    notebook_path = Path(__file__).resolve().parents[1] / "notebooks" / "discover_validate_inspect_colab.ipynb"
+def test_unified_pipeline_notebook_json_parses() -> None:
+    notebook_path = Path(__file__).resolve().parents[1] / "notebooks" / "run_predictive_circuit_coding_pipeline_colab.ipynb"
     payload = json.loads(notebook_path.read_text(encoding="utf-8"))
     assert isinstance(payload.get("cells"), list)
-    assert len(payload["cells"]) >= 10
+    assert len(payload["cells"]) >= 5
 
 
 def test_export_notebook_diagnostics_artifacts_uses_run_timestamp_layout(tmp_path: Path) -> None:

@@ -142,10 +142,11 @@ Every token and every discovered candidate must remain traceable back to:
 
 `notebooks/`
 
-- thin Colab orchestration notebooks
+- thin Colab orchestration only
 - no core logic should live here
-- includes training, discovery/validation, and multi-experiment diagnostics notebooks
-  the diagnostics notebook now starts with a session-alignment / alignability experiment and leaves the slower discovery comparisons as explicit opt-in toggles
+- the supported notebook is the unified stage-resume runner:
+  `notebooks/run_predictive_circuit_coding_pipeline_colab.ipynb`
+- legacy training / discovery / diagnostics notebooks may remain for reference, but they are no longer the primary experiment surface
 
 `documents/`
 
@@ -360,11 +361,11 @@ Outputs:
 
 Subset experiments do not require reprocessing raw Allen sessions.
 
-The repo now treats the full processed session store as canonical. The normal Colab workflow is notebook-first:
+The repo now treats the full processed session store as canonical. The normal Colab workflow is config-first:
 
-- the training notebook defines the subset with simple scalars such as `EXPERIENCE_LEVEL`, `MAX_SESSIONS`, and split fractions
-- the notebook writes an artifact-local runtime subset bundle under `artifacts/runtime_subset/`
-- the discovery notebook restores a selected training `run_id`, reuses that saved runtime config and exact subset, then applies a decode-task-first config cell with focused discovery budgets plus comparison controls for `baseline`, `whitening_only`, and `whitening_plus_held_out_alignment`
+- the unified pipeline notebook takes a single repo-native pipeline config path plus an optional `PIPELINE_RUN_ID`
+- the pipeline config points at a repo-native experiment config that defines the scientific subset and budgets
+- the notebook restores or creates a single `run_id` and reuses completed config-matched stages automatically
 
 The runtime subset bundle includes:
 
@@ -386,16 +387,16 @@ Input:
 
 - processed bundle on Drive
 - experiment config
-- training notebook or CLI
+- unified notebook or CLI
 
 Notebook:
 
-- `notebooks/train_predictive_circuit_coding_colab.ipynb`
+- `notebooks/run_predictive_circuit_coding_pipeline_colab.ipynb`
 
 CLI:
 
 ```bash
-pcc-train --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
+pcc-train --config configs/pcc/predictive_circuit_coding_full.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml
 ```
 
 Outputs:
@@ -404,7 +405,7 @@ Outputs:
 - training summary JSON
 - training run-manifest sidecar
 - if a notebook runtime subset is active, the run-manifest records the artifact-local split manifest and session catalog paths
-- the training notebook also saves the realized runtime experiment config inside `artifacts/` so discovery can reuse the exact subset later
+- the unified notebook also saves the realized runtime experiment config inside the run root so downstream stages can reuse the exact subset later
 
 ### 5. Colab evaluation
 
@@ -415,13 +416,61 @@ Purpose:
 CLI:
 
 ```bash
-pcc-evaluate --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_best.pt --split valid
+pcc-evaluate --config configs/pcc/predictive_circuit_coding_full.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_full_best.pt --split valid
 ```
 
 Outputs:
 
 - evaluation summary JSON
 - evaluation run-manifest sidecar
+- stage state under `pipeline/pipeline_state.json` when driven from the unified notebook
+
+### 5b. Benchmark matrix
+
+Purpose:
+
+- run the final crossed experiment surface for the project claims
+- compare feature family and geometry mode separately instead of collapsing them into one choice
+- write compact benchmark summaries and per-arm artifacts under one run root
+
+CLI:
+
+```bash
+pcc-benchmark --config configs/pcc/predictive_circuit_coding_full.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_full_best.pt --output-root artifacts/benchmarks
+```
+
+Primary representation benchmark arms:
+
+- `count_patch_mean_raw`
+- `count_patch_mean_whitened`
+- `count_patch_mean_pca_raw`
+- `count_patch_mean_pca_whitened`
+- `encoder_raw`
+- `encoder_whitened`
+
+Primary motif benchmark arms:
+
+- `count_patch_mean_pca_raw`
+- `count_patch_mean_pca_whitened`
+- `encoder_raw`
+- `encoder_whitened`
+
+Primary task panel:
+
+- `stimulus_change`
+- `trials.go`
+- `stimulus_presentations.omitted`
+
+Optional appendix task:
+
+- image identity one-vs-rest, only when `stimulus_presentations.image_name` exists in the prepared dataset
+
+Outputs:
+
+- representation benchmark summary JSON and CSV
+- motif benchmark summary JSON and CSV
+- final project summary JSON and CSV
+- per-task/per-arm artifact folders under `benchmarks/representation/` and `benchmarks/motifs/`
 
 ### 6. Colab discovery
 
@@ -442,12 +491,12 @@ Purpose:
 
 Notebook:
 
-- `notebooks/discover_validate_inspect_colab.ipynb`
+- `notebooks/run_predictive_circuit_coding_pipeline_colab.ipynb`
 
 CLI:
 
 ```bash
-pcc-discover --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_best.pt --split discovery
+pcc-discover --config configs/pcc/predictive_circuit_coding_full.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_full_best.pt --split discovery
 ```
 
 Outputs:
@@ -472,7 +521,7 @@ Purpose:
 CLI:
 
 ```bash
-pcc-validate --config configs/pcc/predictive_circuit_coding_base.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_best.pt --discovery-artifact artifacts/checkpoints/pcc_best_discovery_discovery.json
+pcc-validate --config configs/pcc/predictive_circuit_coding_full.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_full_best.pt --discovery-artifact artifacts/checkpoints/pcc_full_best_discovery_discovery.json
 ```
 
 Outputs:
@@ -483,38 +532,25 @@ Outputs:
 
 ## Notebook Role
 
-The repo intentionally ends with two notebooks only.
+The repo intentionally ends with one supported Colab notebook.
 
-### Training notebook
+### Unified pipeline notebook
 
-`notebooks/train_predictive_circuit_coding_colab.ipynb`
+`notebooks/run_predictive_circuit_coding_pipeline_colab.ipynb`
 
 Responsibilities:
 
 - mount Drive
 - install the repo and notebook extras
 - run preflight checks
-- define the subset with simple notebook scalars such as `EXPERIENCE_LEVEL`, `MAX_SESSIONS`, and split fractions
-- write the artifact-local runtime subset bundle automatically
-- generate a fresh `run_id` and export the completed training bundle to `pcc_colab_outputs/<run_id>/run_1/train/`
-- launch training
-- launch evaluation
-- surface stage boundaries, elapsed time, checkpoint reminders, and realized split counts
-
-### Discovery and validation notebook
-
-`notebooks/discover_validate_inspect_colab.ipynb`
-
-Responsibilities:
-
-- reuse the saved training runtime config and subset
-- select `TRAINING_RUN_ID` or default to the latest exported training run
-- select a decode target first, then shared discovery budgets plus comparison controls such as `SESSION_HOLDOUT_FRACTION`, `SESSION_HOLDOUT_SEED`, and `INSPECT_ARM`
-- run one grouped three-arm comparison on the same selected discovery windows
-- treat the within-session held-out benchmark as the primary comparison across arms
-- keep standard cross-session test validation as a secondary metric for `baseline` and `whitening_only`
-- export each notebook attempt to `pcc_colab_outputs/<run_id>/run_1/discovery/<decode_type>__<timestamp>/`
-- inspect shared decode coverage, combined comparison summaries, and one selected arm's cluster / validation / transform summaries directly in notebook tables
+- choose a repo-native pipeline config such as `configs/pcc/pipeline_debug.yaml` or `configs/pcc/pipeline_full.yaml`
+- use the referenced experiment config as the source of truth for subset filters, split behavior, and budgets
+- restore or create one `run_id`
+- run training, evaluation, representation benchmarks, motif benchmarks, and optional appendix diagnostics as explicit stages
+- reuse completed stages when config hashes and upstream inputs still match
+- export the grouped run to `pcc_colab_outputs/<run_id>/run_1/`
+- surface stage boundaries, elapsed time, resume status, realized split counts, and per-task benchmark leaderboards
+- print concise “what we can claim / what we cannot claim yet” summaries from the benchmark outputs
 
 ### Notebook rules
 
@@ -538,6 +574,15 @@ The main artifact sequence is:
 
 4. discovery decode-coverage summary  
    produced by discovery, records how many positive and negative windows were found and selected for the chosen decode target
+
+5. representation benchmark summaries  
+   produced by the benchmark stage, compare feature family x geometry mode across the task panel
+
+6. motif benchmark summaries  
+   produced by the benchmark stage, compare motif quality for the selected arm subset
+
+7. pipeline manifest/state  
+   produced by the unified notebook runner, records stage status, config hashes, inputs, and outputs for resume behavior
 
 5. discovery artifact  
    produced by discovery, contains token-level candidates and cluster assignments

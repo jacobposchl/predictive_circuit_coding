@@ -1,0 +1,117 @@
+dataset_id: allen_visual_behavior_neuropixels
+split_name: train
+seed: 7
+
+splits:
+  train: train
+  valid: valid
+  discovery: discovery
+  test: test
+
+dataset_selection:
+  output_name: familiar_g_full_subject_split
+  experience_levels: [Familiar]
+  image_sets: [G]
+  session_types: []
+  session_ids: []
+  subject_ids: []
+  exclude_session_ids: []
+  exclude_subject_ids: []
+  session_ids_file:
+  subject_ids_file:
+  exclude_session_ids_file:
+  exclude_subject_ids_file:
+  project_codes: []
+  session_numbers: []
+  brain_regions_any: []
+  min_n_units:
+  max_n_units:
+  min_trial_count:
+  max_trial_count:
+  min_duration_s:
+  max_duration_s:
+  split_seed: 7
+  split_primary_axis: subject
+  train_fraction: 0.5
+  valid_fraction: 0.2
+  discovery_fraction: 0.15
+  test_fraction: 0.15
+
+data_runtime:
+  bin_width_ms: 20.0
+  context_bins: 500
+  patch_bins: 50
+  min_unit_spikes: 0
+  max_units:
+  padding_strategy: mask
+  include_trials: true
+  include_stimulus_presentations: true
+  include_optotagging: true
+
+model:
+  d_model: 256
+  num_heads: 8
+  temporal_layers: 2
+  spatial_layers: 2
+  dropout: 0.1
+  mlp_ratio: 4.0
+  l2_normalize_tokens: true
+  norm_eps: 1.0e-5
+
+objective:
+  predictive_target_type: delta
+  continuation_baseline_type: previous_patch
+  predictive_loss: mse
+  reconstruction_loss: mse
+  reconstruction_weight: 0.2
+  exclude_final_prediction_patch: true
+
+optimization:
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip_norm: 1.0
+  batch_size: 4
+  scheduler_type: cosine
+  scheduler_warmup_steps: 0
+
+training:
+  num_epochs: 8
+  train_steps_per_epoch: 128
+  validation_steps: 16
+  checkpoint_every_epochs: 1
+  evaluate_every_epochs: 1
+  resume_checkpoint:
+  dataloader_workers: 0
+  train_window_seed: 11
+  log_every_steps: 10
+
+execution:
+  device: auto
+  mixed_precision: true
+
+evaluation:
+  max_batches: 128
+  sequential_step_s:
+
+discovery:
+  target_label: stimulus_change
+  target_label_mode: auto
+  max_batches: 128
+  sampling_strategy: sequential
+  min_positive_windows: 1
+  negative_to_positive_ratio: 1.0
+  search_max_batches:
+  probe_epochs: 50
+  probe_learning_rate: 1.0e-2
+  top_k_candidates: 64
+  candidate_session_balance_fraction: 0.2
+  min_candidate_score: 0.0
+  min_cluster_size: 2
+  stability_rounds: 8
+  shuffle_seed: 17
+
+artifacts:
+  checkpoint_dir: ../../artifacts/checkpoints
+  summary_path: ../../artifacts/training_summary.json
+  checkpoint_prefix: pcc_full
+  save_config_snapshot: true
