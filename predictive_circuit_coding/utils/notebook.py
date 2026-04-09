@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TextIO
+from typing import Any, Callable, Iterable, TextIO
 
 import yaml
 
@@ -30,6 +30,561 @@ def format_duration(seconds: float) -> str:
 
 def verify_paths_exist(paths: dict[str, str | Path]) -> dict[str, bool]:
     return {label: Path(path).exists() for label, path in paths.items()}
+
+
+@dataclass(frozen=True)
+class NotebookProgressConfig:
+    enabled: bool = True
+    progress_backend: str = "tqdm"
+    mode: str = "clean_dashboard"
+    log_mode: str = "failures_only"
+    leave_pipeline_bar: bool = True
+    leave_stage_bars: bool = False
+    show_stage_summaries: bool = True
+    show_artifact_paths: str = "compact"
+    metric_snapshot_every_n: int | None = None
+
+
+@dataclass(frozen=True)
+class NotebookProgressEvent:
+    scope: str
+    event_type: str
+    stage_name: str | None = None
+    label: str | None = None
+    current: int | None = None
+    total: int | None = None
+    message: str | None = None
+    metrics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TrainingProgressEvent:
+    event_type: str
+    epoch: int | None = None
+    epoch_total: int | None = None
+    step: int | None = None
+    step_total: int | None = None
+    metrics: dict[str, float] = field(default_factory=dict)
+    message: str | None = None
+    checkpoint_path: str | None = None
+
+
+@dataclass(frozen=True)
+class EvaluationProgressEvent:
+    event_type: str
+    split_name: str
+    current_batch: int | None = None
+    total_batches: int | None = None
+    metrics: dict[str, float] = field(default_factory=dict)
+    window_count: int | None = None
+    message: str | None = None
+
+
+@dataclass(frozen=True)
+class BenchmarkProgressEvent:
+    benchmark_name: str
+    event_type: str
+    task_name: str | None = None
+    task_index: int | None = None
+    task_total: int | None = None
+    arm_name: str | None = None
+    arm_index: int | None = None
+    arm_total: int | None = None
+    step_name: str | None = None
+    current: int | None = None
+    total: int | None = None
+    status: str | None = None
+    metrics: dict[str, Any] = field(default_factory=dict)
+    message: str | None = None
+
+
+@dataclass(frozen=True)
+class NotebookStageSummary:
+    stage_name: str
+    status: str
+    headline: str
+    rows: tuple[dict[str, Any], ...] = ()
+    notes: tuple[str, ...] = ()
+    artifact_paths: dict[str, str] = field(default_factory=dict)
+    debug_log_path: str | None = None
+
+
+class NotebookProgressUI:
+    def __init__(
+        self,
+        *,
+        config: NotebookProgressConfig | None = None,
+        stream: TextIO | None = None,
+    ) -> None:
+        self.config = config or NotebookProgressConfig()
+        self.stream = stream or sys.stdout
+        self._pipeline_bar = None
+        self._stage_bar = None
+        self._detail_bar = None
+        self._stage_name: str | None = None
+        self._last_detail_label: str | None = None
+        self._last_training_epoch: int | None = None
+        self._last_metric_snapshot: dict[str, int] = {}
+        self._force_auto_tqdm = False
+
+    def _tqdm_cls(self):
+        if not self._force_auto_tqdm:
+            try:
+                from tqdm.notebook import IProgress, tqdm as notebook_tqdm
+
+                if IProgress is None:
+                    raise ImportError("ipywidgets progress unavailable")
+
+                return notebook_tqdm
+            except Exception:
+                self._force_auto_tqdm = True
+        try:
+            from tqdm.auto import tqdm as auto_tqdm
+
+            return auto_tqdm
+        except Exception:
+            from tqdm.notebook import tqdm as notebook_tqdm
+
+            return notebook_tqdm
+
+    def _display_markdown(self, text: str) -> None:
+        try:
+            from IPython.display import Markdown, display
+
+            display(Markdown(text))
+        except Exception:
+            self.stream.write(text + "\n")
+
+    def _display_rows(self, rows: Iterable[dict[str, Any]]) -> None:
+        materialized = list(rows)
+        if not materialized:
+            return
+        try:
+            import pandas as pd
+            from IPython.display import display
+
+            display(pd.DataFrame(materialized))
+        except Exception:
+            for row in materialized:
+                self.stream.write(str(row) + "\n")
+
+    def _close_bar(self, name: str) -> None:
+        bar = getattr(self, name)
+        if bar is not None:
+            bar.close()
+            setattr(self, name, None)
+
+    def _ensure_bar(
+        self,
+        *,
+        current_bar_name: str,
+        desc: str,
+        total: int | None,
+        position: int,
+        leave: bool,
+    ):
+        tqdm_cls = self._tqdm_cls()
+        bar = getattr(self, current_bar_name)
+        if bar is None:
+            try:
+                bar = tqdm_cls(total=total, desc=desc, leave=leave, position=position, dynamic_ncols=True)
+            except Exception:
+                self._force_auto_tqdm = True
+                tqdm_cls = self._tqdm_cls()
+                bar = tqdm_cls(total=total, desc=desc, leave=leave, position=position, dynamic_ncols=True)
+            setattr(self, current_bar_name, bar)
+            return bar
+        if total is not None and getattr(bar, "total", None) != total:
+            bar.total = total
+            bar.refresh()
+        if desc and getattr(bar, "desc", None) != desc:
+            bar.set_description_str(desc)
+        return bar
+
+    def start_pipeline(self, *, total_stages: int, completed_stages: int = 0) -> None:
+        if not self.config.enabled:
+            return
+        bar = self._ensure_bar(
+            current_bar_name="_pipeline_bar",
+            desc="Pipeline",
+            total=total_stages,
+            position=0,
+            leave=self.config.leave_pipeline_bar,
+        )
+        bar.n = int(completed_stages)
+        bar.refresh()
+
+    def start_stage(self, *, stage_name: str, total: int | None = None, description: str | None = None) -> None:
+        if not self.config.enabled:
+            return
+        self._close_bar("_stage_bar")
+        self._close_bar("_detail_bar")
+        self._stage_name = stage_name
+        self._last_detail_label = None
+        self._ensure_bar(
+            current_bar_name="_stage_bar",
+            desc=description or stage_name.replace("_", " ").title(),
+            total=total,
+            position=1,
+            leave=self.config.leave_stage_bars,
+        )
+
+    def update_stage(
+        self,
+        *,
+        current: int | None = None,
+        total: int | None = None,
+        description: str | None = None,
+        metrics: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.config.enabled or self._stage_bar is None:
+            return
+        bar = self._ensure_bar(
+            current_bar_name="_stage_bar",
+            desc=description or getattr(self._stage_bar, "desc", None) or "",
+            total=total,
+            position=1,
+            leave=self.config.leave_stage_bars,
+        )
+        if current is not None:
+            bar.n = int(current)
+        if metrics:
+            bar.set_postfix({key: value for key, value in metrics.items() if value is not None}, refresh=False)
+        bar.refresh()
+
+    def update_detail(
+        self,
+        *,
+        label: str,
+        current: int | None = None,
+        total: int | None = None,
+        metrics: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.config.enabled:
+            return
+        if self._detail_bar is None or self._last_detail_label != label:
+            self._close_bar("_detail_bar")
+            self._last_detail_label = label
+            self._ensure_bar(
+                current_bar_name="_detail_bar",
+                desc=label,
+                total=total,
+                position=2,
+                leave=False,
+            )
+        bar = self._ensure_bar(
+            current_bar_name="_detail_bar",
+            desc=label,
+            total=total,
+            position=2,
+            leave=False,
+        )
+        if current is not None:
+            bar.n = int(current)
+        if metrics:
+            bar.set_postfix({key: value for key, value in metrics.items() if value is not None}, refresh=False)
+        bar.refresh()
+
+    def clear_detail(self) -> None:
+        self._close_bar("_detail_bar")
+        self._last_detail_label = None
+
+    def advance_pipeline(self, steps: int = 1) -> None:
+        if not self.config.enabled or self._pipeline_bar is None:
+            return
+        self._pipeline_bar.update(int(steps))
+        self._pipeline_bar.refresh()
+
+    def render_stage_summary(self, summary: NotebookStageSummary) -> None:
+        if not self.config.enabled or not self.config.show_stage_summaries:
+            return
+        status = "reused" if summary.status == "reused" else summary.status
+        self._display_markdown(f"### {summary.stage_name.replace('_', ' ').title()} — {status}\n\n{summary.headline}")
+        if summary.notes:
+            self._display_markdown("\n".join(f"- {note}" for note in summary.notes))
+        if summary.rows:
+            self._display_rows(summary.rows)
+        if summary.artifact_paths and self.config.show_artifact_paths != "hidden":
+            artifact_rows = [
+                {"artifact": key, "path": value}
+                for key, value in summary.artifact_paths.items()
+            ]
+            self._display_rows(artifact_rows)
+
+    def finish_stage(self, summary: NotebookStageSummary | None = None) -> None:
+        if self.config.enabled:
+            self._close_bar("_detail_bar")
+            self._close_bar("_stage_bar")
+        if summary is not None:
+            self.render_stage_summary(summary)
+        self._stage_name = None
+
+    def fail_stage(
+        self,
+        *,
+        stage_name: str,
+        error_message: str,
+        debug_log_path: str | None,
+        tail_lines: Iterable[str] = (),
+    ) -> None:
+        self._close_bar("_detail_bar")
+        self._close_bar("_stage_bar")
+        headline = f"Failed with `{error_message}`."
+        notes = tuple(line.rstrip() for line in tail_lines if str(line).strip())
+        self.render_stage_summary(
+            NotebookStageSummary(
+                stage_name=stage_name,
+                status="failed",
+                headline=headline,
+                notes=notes,
+                artifact_paths=(
+                    {"debug_log": debug_log_path}
+                    if debug_log_path is not None
+                    else {}
+                ),
+                debug_log_path=debug_log_path,
+            )
+        )
+        self._stage_name = None
+
+    def finish_pipeline(self) -> None:
+        self._close_bar("_detail_bar")
+        self._close_bar("_stage_bar")
+        if self._pipeline_bar is not None:
+            self._pipeline_bar.refresh()
+
+    def make_training_callback(self, *, stage_name: str) -> Callable[[TrainingProgressEvent], None]:
+        def _callback(event: TrainingProgressEvent) -> None:
+            if event.event_type == "epoch_start":
+                self.update_stage(
+                    current=(event.epoch - 1) if event.epoch is not None else None,
+                    total=event.epoch_total,
+                    description="Training",
+                )
+                self.update_detail(
+                    label=f"Epoch {event.epoch}/{event.epoch_total}",
+                    current=0,
+                    total=event.step_total,
+                )
+                self._last_training_epoch = event.epoch
+                return
+            if event.event_type == "step":
+                metrics = {}
+                snapshot_every = self.config.metric_snapshot_every_n
+                if snapshot_every is not None and event.step is not None and event.step % snapshot_every == 0:
+                    metrics = {
+                        key: event.metrics.get(key)
+                        for key in ("predictive_improvement", "predictive_loss", "total_loss")
+                    }
+                self.update_detail(
+                    label=f"Epoch {event.epoch}/{event.epoch_total}",
+                    current=event.step,
+                    total=event.step_total,
+                    metrics=metrics or None,
+                )
+                return
+            if event.event_type == "validation_start":
+                self.clear_detail()
+                self.update_detail(label="Validation", current=0, total=1)
+                return
+            if event.event_type == "validation_end":
+                self.update_detail(
+                    label="Validation",
+                    current=1,
+                    total=1,
+                    metrics={
+                        "predictive_improvement": event.metrics.get("predictive_improvement"),
+                    },
+                )
+                return
+            if event.event_type == "epoch_end":
+                self.update_stage(
+                    current=event.epoch,
+                    total=event.epoch_total,
+                    description="Training",
+                )
+                return
+            if event.event_type == "checkpoint_saved":
+                self.update_detail(label=event.message or "checkpoint", current=1, total=1)
+                return
+            if event.event_type == "training_complete":
+                self.clear_detail()
+
+        return _callback
+
+    def make_evaluation_callback(self, *, split_total: int) -> Callable[[EvaluationProgressEvent], None]:
+        split_progress: dict[str, int] = {}
+
+        def _callback(event: EvaluationProgressEvent) -> None:
+            if event.event_type == "split_start":
+                current_completed = len(split_progress)
+                self.update_stage(current=current_completed, total=split_total, description="Evaluation")
+                self.update_detail(
+                    label=f"Split {event.split_name}",
+                    current=0,
+                    total=event.total_batches,
+                )
+                return
+            if event.event_type == "batch":
+                metrics = {}
+                snapshot_every = self.config.metric_snapshot_every_n
+                if snapshot_every is not None and event.current_batch is not None and event.current_batch % snapshot_every == 0:
+                    metrics = {
+                        key: event.metrics.get(key)
+                        for key in ("predictive_improvement", "predictive_loss", "total_loss")
+                    }
+                self.update_detail(
+                    label=f"Split {event.split_name}",
+                    current=event.current_batch,
+                    total=event.total_batches,
+                    metrics=metrics or None,
+                )
+                return
+            if event.event_type == "split_end":
+                split_progress[event.split_name] = 1
+                self.update_stage(current=len(split_progress), total=split_total, description="Evaluation")
+                self.update_detail(
+                    label=f"Split {event.split_name}",
+                    current=event.current_batch,
+                    total=event.total_batches,
+                    metrics={
+                        "predictive_improvement": event.metrics.get("predictive_improvement"),
+                    },
+                )
+
+        return _callback
+
+    def make_benchmark_callback(self, *, benchmark_name: str, total_arms: int | None = None) -> Callable[[BenchmarkProgressEvent], None]:
+        def _callback(event: BenchmarkProgressEvent) -> None:
+            if event.event_type == "task_start":
+                self.update_stage(
+                    current=event.arm_index or (event.arm_total and 0) or 0,
+                    total=event.arm_total or total_arms,
+                    description=f"{benchmark_name.title()} Benchmark",
+                )
+                return
+            if event.event_type == "arm_start":
+                self.update_stage(
+                    current=(event.arm_index - 1) if event.arm_index is not None else None,
+                    total=event.arm_total or total_arms,
+                    description=f"{benchmark_name.title()} Benchmark",
+                )
+                self.update_detail(
+                    label=f"{event.task_name} / {event.arm_name}",
+                    current=0,
+                    total=1,
+                )
+                return
+            if event.event_type == "arm_step":
+                label = f"{event.task_name} / {event.arm_name}: {event.step_name}"
+                self.update_detail(
+                    label=label,
+                    current=event.current,
+                    total=event.total,
+                )
+                return
+            if event.event_type == "arm_end":
+                self.update_stage(
+                    current=event.arm_index,
+                    total=event.arm_total or total_arms,
+                    description=f"{benchmark_name.title()} Benchmark",
+                    metrics={"status": event.status},
+                )
+                self.clear_detail()
+
+        return _callback
+
+
+def build_notebook_preflight_rows(
+    *,
+    path_status: dict[str, bool],
+) -> tuple[dict[str, str], ...]:
+    return tuple(
+        {
+            "item": key,
+            "status": ("OK" if bool(value) else "Missing"),
+            "icon": ("check" if bool(value) else "x"),
+        }
+        for key, value in path_status.items()
+    )
+
+
+def load_pipeline_display_tables(
+    *,
+    representation_summary_csv_path: str | Path,
+    motif_summary_csv_path: str | Path,
+    final_summary_csv_path: str | Path,
+) -> dict[str, Any]:
+    try:
+        import pandas as pd
+    except Exception:
+        return {
+            "representation": [],
+            "motif": [],
+            "final": [],
+        }
+
+    def _load(path: str | Path):
+        candidate = Path(path)
+        if not candidate.is_file():
+            return pd.DataFrame()
+        return pd.read_csv(candidate)
+
+    representation = _load(representation_summary_csv_path)
+    motif = _load(motif_summary_csv_path)
+    final = _load(final_summary_csv_path)
+
+    if not representation.empty:
+        sort_column = (
+            "test_probe_pr_auc"
+            if "test_probe_pr_auc" in representation.columns
+            else "test_probe_roc_auc"
+        )
+        representation = representation.sort_values(sort_column, ascending=False, na_position="last")
+        preferred = [
+            "task_name",
+            "arm_name",
+            "status",
+            "feature_family",
+            "geometry_mode",
+            "test_probe_accuracy",
+            "test_probe_bce",
+            "test_probe_pr_auc",
+            "test_probe_roc_auc",
+            "within_session_probe_pr_auc",
+            "within_session_probe_roc_auc",
+        ]
+        representation = representation[[column for column in preferred if column in representation.columns]]
+
+    if not motif.empty:
+        sort_column = (
+            "held_out_similarity_pr_auc"
+            if "held_out_similarity_pr_auc" in motif.columns
+            else "held_out_similarity_roc_auc"
+        )
+        motif = motif.sort_values(sort_column, ascending=False, na_position="last")
+        preferred = [
+            "task_name",
+            "arm_name",
+            "status",
+            "feature_family",
+            "geometry_mode",
+            "candidate_count",
+            "cluster_count",
+            "held_out_test_probe_pr_auc",
+            "held_out_test_probe_roc_auc",
+            "held_out_similarity_pr_auc",
+            "held_out_similarity_roc_auc",
+            "cluster_persistence_mean",
+            "silhouette_score",
+        ]
+        motif = motif[[column for column in preferred if column in motif.columns]]
+
+    return {
+        "representation": representation,
+        "motif": motif,
+        "final": final,
+    }
 
 
 @dataclass(frozen=True)

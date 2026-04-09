@@ -25,7 +25,12 @@ from predictive_circuit_coding.data import (
 )
 from predictive_circuit_coding.training import load_experiment_config
 from predictive_circuit_coding.training.loop import train_model
-from predictive_circuit_coding.utils.notebook import NotebookDatasetConfig, NotebookTrainingConfig
+from predictive_circuit_coding.utils.notebook import (
+    NotebookDatasetConfig,
+    NotebookProgressConfig,
+    NotebookProgressUI,
+    NotebookTrainingConfig,
+)
 from tests.test_stage5_stage6_workflow import _create_prepared_workspace
 
 
@@ -71,6 +76,17 @@ def test_load_notebook_pipeline_config_resolves_relative_paths(tmp_path: Path) -
               neighbor_k: 4
               debug_retain_intermediates: false
 
+            notebook_ui:
+              enabled: true
+              progress_backend: tqdm
+              mode: clean_dashboard
+              log_mode: failures_only
+              leave_pipeline_bar: true
+              leave_stage_bars: false
+              show_stage_summaries: true
+              show_artifact_paths: compact
+              metric_snapshot_every_n:
+
             tasks:
               representation: [stimulus_change]
               motifs: [stimulus_change]
@@ -93,6 +109,8 @@ def test_load_notebook_pipeline_config_resolves_relative_paths(tmp_path: Path) -
     assert config.stage_prepared_sessions_locally is True
     assert config.representation_task_names == ("stimulus_change",)
     assert config.representation_arm_names == ("encoder_raw",)
+    assert config.notebook_ui.mode == "clean_dashboard"
+    assert config.notebook_ui.log_mode == "failures_only"
 
 
 def test_representation_benchmark_skips_optional_missing_field(tmp_path: Path) -> None:
@@ -204,6 +222,7 @@ def test_run_notebook_pipeline_writes_resume_state(tmp_path: Path) -> None:
     assert first.representation_summary_json_path.is_file()
     assert first.motif_summary_json_path.is_file()
     assert first.final_summary_json_path.is_file()
+    assert "epoch=1 step=" not in stream.getvalue()
 
     second = run_notebook_pipeline(
         base_experiment_config=experiment_config_path,
@@ -239,6 +258,115 @@ def test_run_notebook_pipeline_writes_resume_state(tmp_path: Path) -> None:
     assert state_after["stages"]["representation_benchmark"]["status"] == "complete"
     assert state_after["stages"]["motif_benchmark"]["status"] == "complete"
     assert state_after["stages"]["final_reports"]["status"] == "complete"
+
+
+def test_notebook_progress_ui_falls_back_without_widgets() -> None:
+    ui = NotebookProgressUI(config=NotebookProgressConfig(enabled=True))
+    ui.start_pipeline(total_stages=2, completed_stages=0)
+    ui.start_stage(stage_name="train", total=1, description="Training")
+    ui.update_stage(current=1, total=1, description="Training")
+    ui.finish_stage()
+    ui.finish_pipeline()
+
+
+def test_train_model_emits_structured_progress_events(tmp_path: Path) -> None:
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    experiment_config = load_experiment_config(experiment_config_path)
+    events = []
+
+    train_model(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        train_split="train",
+        valid_split="valid",
+        progress_callback=events.append,
+        emit_logs=False,
+    )
+
+    event_types = [event.event_type for event in events]
+    assert "epoch_start" in event_types
+    assert "step" in event_types
+    assert "validation_start" in event_types
+    assert "validation_end" in event_types
+    assert "checkpoint_saved" in event_types
+    assert "epoch_end" in event_types
+    assert event_types[-1] == "training_complete"
+
+
+def test_evaluate_checkpoint_on_split_emits_progress_events(tmp_path: Path) -> None:
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    experiment_config = load_experiment_config(experiment_config_path)
+    training_result = train_model(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        train_split="train",
+        valid_split="valid",
+        emit_logs=False,
+    )
+    from predictive_circuit_coding.evaluation import evaluate_checkpoint_on_split
+
+    events = []
+    evaluate_checkpoint_on_split(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        checkpoint_path=str(training_result.checkpoint_path),
+        split_name="test",
+        max_batches=1,
+        progress_callback=events.append,
+    )
+    assert [event.event_type for event in events] == ["split_start", "batch", "split_end"]
+
+
+def test_benchmark_matrices_emit_progress_events(tmp_path: Path) -> None:
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    experiment_config = load_experiment_config(experiment_config_path)
+    training_result = train_model(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        train_split="train",
+        valid_split="valid",
+        emit_logs=False,
+    )
+
+    representation_events = []
+    motif_events = []
+    run_representation_benchmark_matrix(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        checkpoint_path=training_result.checkpoint_path,
+        output_root=tmp_path / "representation_benchmarks",
+        task_specs=(BenchmarkTaskSpec(name="stimulus_change", target_label="stimulus_change"),),
+        arm_specs=(BenchmarkArmSpec("encoder_raw", "encoder", "raw"),),
+        session_holdout_fraction=0.5,
+        session_holdout_seed=11,
+        neighbor_k=3,
+        progress_callback=representation_events.append,
+    )
+    run_motif_benchmark_matrix(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        checkpoint_path=training_result.checkpoint_path,
+        output_root=tmp_path / "motif_benchmarks",
+        task_specs=(BenchmarkTaskSpec(name="stimulus_change", target_label="stimulus_change"),),
+        arm_specs=(BenchmarkArmSpec("encoder_raw", "encoder", "raw"),),
+        session_holdout_fraction=0.5,
+        session_holdout_seed=11,
+        progress_callback=motif_events.append,
+    )
+
+    assert "task_start" in [event.event_type for event in representation_events]
+    assert "arm_start" in [event.event_type for event in representation_events]
+    assert "arm_end" in [event.event_type for event in representation_events]
+    assert any(event.step_name == "discovery_extraction" for event in representation_events if event.event_type == "arm_step")
+
+    assert "task_start" in [event.event_type for event in motif_events]
+    assert "arm_start" in [event.event_type for event in motif_events]
+    assert "arm_end" in [event.event_type for event in motif_events]
+    assert any(
+        event.step_name in {"discovery_extraction", "test_extraction", "token_shards", "probe_fit", "candidate_selection"}
+        for event in motif_events
+        if event.event_type == "arm_step"
+    )
 
 
 def test_run_notebook_pipeline_from_config_uses_repo_config_surface(tmp_path: Path) -> None:

@@ -22,6 +22,17 @@ pipeline:
   neighbor_k: 5
   debug_retain_intermediates: false
 
+notebook_ui:
+  enabled: true
+  progress_backend: tqdm
+  mode: clean_dashboard
+  log_mode: failures_only
+  leave_pipeline_bar: true
+  leave_stage_bars: false
+  show_stage_summaries: true
+  show_artifact_paths: compact
+  metric_snapshot_every_n:
+
 tasks:
   image_target_name:
   representation: [stimulus_change, trials_go, stimulus_omitted]

@@ -6,6 +6,7 @@ import random
 import shutil
 from pathlib import Path
 from typing import Any
+from typing import Callable
 
 import torch
 from sklearn.metrics import average_precision_score, roc_auc_score
@@ -49,9 +50,19 @@ from predictive_circuit_coding.discovery.run import (
 from predictive_circuit_coding.discovery.stability import estimate_clustering_stability
 from predictive_circuit_coding.training.config import ExperimentConfig
 from predictive_circuit_coding.training.contracts import CandidateTokenRecord, DecoderSummary, DiscoveryArtifact
+from predictive_circuit_coding.utils.notebook import BenchmarkProgressEvent
 
 
 _SIMILARITY_CHUNK_SIZE = 512
+BenchmarkProgressCallback = Callable[[BenchmarkProgressEvent], None]
+
+
+def _maybe_emit_benchmark_progress(
+    progress_callback: BenchmarkProgressCallback | None,
+    event: BenchmarkProgressEvent,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(event)
 
 
 def default_benchmark_task_specs(
@@ -584,6 +595,7 @@ def run_representation_benchmark_matrix(
     session_holdout_seed: int | None = None,
     test_max_batches: int | None = None,
     neighbor_k: int = 5,
+    progress_callback: BenchmarkProgressCallback | None = None,
 ) -> tuple[RepresentationBenchmarkResult, ...]:
     dataset_view = resolve_runtime_dataset_view(
         experiment_config=experiment_config,
@@ -600,9 +612,24 @@ def run_representation_benchmark_matrix(
         if session_holdout_seed is not None
         else int(experiment_config.discovery.shuffle_seed)
     )
+    representation_tasks = tuple(task for task in tasks if task.include_in_representation)
     results: list[RepresentationBenchmarkResult] = []
+    total_arms = len(representation_tasks) * len(arms)
+    completed_arms = 0
 
-    for task in tasks:
+    for task_index, task in enumerate(representation_tasks, start=1):
+        _maybe_emit_benchmark_progress(
+            progress_callback,
+            BenchmarkProgressEvent(
+                benchmark_name="representation",
+                event_type="task_start",
+                task_name=task.name,
+                task_index=task_index,
+                task_total=len(representation_tasks),
+                arm_total=total_arms,
+                message=f"representation task {task.name}",
+            ),
+        )
         if not task.include_in_representation:
             continue
         skip_status, skip_reason = _task_skip_status(
@@ -615,13 +642,27 @@ def run_representation_benchmark_matrix(
         task_output_root.mkdir(parents=True, exist_ok=True)
         family_cache: dict[str, tuple[BenchmarkWindowCollection, BenchmarkWindowCollection, Any]] = {}
 
-        for arm in arms:
+        for arm_index, arm in enumerate(arms, start=1):
             arm_root = task_output_root / arm.name
             arm_root.mkdir(parents=True, exist_ok=True)
             summary_json_path = arm_root / "summary.json"
             summary_csv_path = arm_root / "summary.csv"
             transform_summary_json_path = arm_root / "transform_summary.json"
             transform_summary_csv_path = arm_root / "transform_summary.csv"
+            _maybe_emit_benchmark_progress(
+                progress_callback,
+                BenchmarkProgressEvent(
+                    benchmark_name="representation",
+                    event_type="arm_start",
+                    task_name=task.name,
+                    task_index=task_index,
+                    task_total=len(representation_tasks),
+                    arm_name=arm.name,
+                    arm_index=completed_arms + 1,
+                    arm_total=total_arms,
+                    message=f"{task.name} / {arm.name}",
+                ),
+            )
 
             if skip_status is not None:
                 row = _representation_row(
@@ -668,11 +709,40 @@ def run_representation_benchmark_matrix(
                         transform_summary_csv_path=transform_summary_csv_path,
                     )
                 )
+                completed_arms += 1
+                _maybe_emit_benchmark_progress(
+                    progress_callback,
+                    BenchmarkProgressEvent(
+                        benchmark_name="representation",
+                        event_type="arm_end",
+                        task_name=task.name,
+                        task_index=task_index,
+                        task_total=len(representation_tasks),
+                        arm_name=arm.name,
+                        arm_index=completed_arms,
+                        arm_total=total_arms,
+                        status=skip_status,
+                        metrics=row,
+                    ),
+                )
                 continue
 
             try:
                 cached = family_cache.get(arm.feature_family)
                 if cached is None:
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="representation",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="discovery_extraction",
+                            current=0,
+                            total=None,
+                            message="extract discovery windows",
+                        ),
+                    )
                     window_plan = prepare_discovery_collection(
                         experiment_config=task_config,
                         data_config_path=data_config_path,
@@ -686,8 +756,34 @@ def run_representation_benchmark_matrix(
                         checkpoint_path=checkpoint_path,
                         dataset_view=dataset_view,
                         window_plan=window_plan,
+                        progress_callback=lambda current, total, task_name=task.name, arm_name=arm.name: _maybe_emit_benchmark_progress(
+                            progress_callback,
+                            BenchmarkProgressEvent(
+                                benchmark_name="representation",
+                                event_type="arm_step",
+                                task_name=task_name,
+                                arm_name=arm_name,
+                                step_name="discovery_extraction",
+                                current=current,
+                                total=total,
+                                message="extract discovery windows",
+                            ),
+                        ),
                     )
                     _ensure_binary_label_coverage(discovery_collection.coverage_summary)  # type: ignore[arg-type]
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="representation",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="test_extraction",
+                            current=0,
+                            total=test_max_batches or task_config.evaluation.max_batches,
+                            message="extract test split",
+                        ),
+                    )
                     test_collection = extract_benchmark_split_collection(
                         experiment_config=task_config,
                         data_config_path=data_config_path,
@@ -699,6 +795,19 @@ def run_representation_benchmark_matrix(
                         checkpoint_path=checkpoint_path,
                         dataset_view=dataset_view,
                         max_batches=test_max_batches or task_config.evaluation.max_batches,
+                        progress_callback=lambda current, total, task_name=task.name, arm_name=arm.name: _maybe_emit_benchmark_progress(
+                            progress_callback,
+                            BenchmarkProgressEvent(
+                                benchmark_name="representation",
+                                event_type="arm_step",
+                                task_name=task_name,
+                                arm_name=arm_name,
+                                step_name="test_extraction",
+                                current=current,
+                                total=total,
+                                message="extract test split",
+                            ),
+                        ),
                     )
                     split = build_session_stratified_holdout_split(
                         labels=discovery_collection.labels,
@@ -709,18 +818,71 @@ def run_representation_benchmark_matrix(
                     )
                     family_cache[arm.feature_family] = (discovery_collection, test_collection, split)
                     cached = family_cache[arm.feature_family]
+                else:
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="representation",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="reuse_cached_features",
+                            current=1,
+                            total=1,
+                            message=f"reuse {arm.feature_family} features",
+                        ),
+                    )
 
                 discovery_collection, test_collection, split = cached
+                _maybe_emit_benchmark_progress(
+                    progress_callback,
+                    BenchmarkProgressEvent(
+                        benchmark_name="representation",
+                        event_type="arm_step",
+                        task_name=task.name,
+                        arm_name=arm.name,
+                        step_name="pca",
+                        current=0,
+                        total=1,
+                        message="fit/apply PCA",
+                    ),
+                )
                 transformed_discovery, transformed_test, _, pca_summary = _fit_optional_pca(
                     arm=arm,
                     discovery_collection=discovery_collection,
                     test_collection=test_collection,
                     fit_indices=split.fit_indices,
                 )
+                _maybe_emit_benchmark_progress(
+                    progress_callback,
+                    BenchmarkProgressEvent(
+                        benchmark_name="representation",
+                        event_type="arm_step",
+                        task_name=task.name,
+                        arm_name=arm.name,
+                        step_name="pca",
+                        current=1,
+                        total=1,
+                        message="fit/apply PCA",
+                    ),
+                )
 
                 whitening_summary = None
                 test_whitening_summary = None
                 if arm.geometry_mode == "whitened":
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="representation",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="whitening",
+                            current=0,
+                            total=1,
+                            message="apply whitening",
+                        ),
+                    )
                     transformed_discovery, whitening_summary, _ = _apply_session_whitening_to_collection(
                         collection=transformed_discovery,
                         fit_indices=split.fit_indices,
@@ -728,15 +890,67 @@ def run_representation_benchmark_matrix(
                     transformed_test, test_whitening_summary, _ = _build_whitened_test_collection(
                         collection=transformed_test,
                     )
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="representation",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="whitening",
+                            current=1,
+                            total=1,
+                            message="apply whitening",
+                        ),
+                    )
 
                 fit_features = transformed_discovery.pooled_features.index_select(0, split.fit_indices)
                 fit_labels = transformed_discovery.labels.index_select(0, split.fit_indices)
+                _maybe_emit_benchmark_progress(
+                    progress_callback,
+                    BenchmarkProgressEvent(
+                        benchmark_name="representation",
+                        event_type="arm_step",
+                        task_name=task.name,
+                        arm_name=arm.name,
+                        step_name="probe_fit",
+                        current=0,
+                        total=1,
+                        message="fit additive probe",
+                    ),
+                )
                 discovery_fit = fit_additive_probe_features(
                     features=fit_features,
                     labels=fit_labels,
                     epochs=task_config.discovery.probe_epochs,
                     learning_rate=task_config.discovery.probe_learning_rate,
                     label_name=task.target_label,
+                )
+                _maybe_emit_benchmark_progress(
+                    progress_callback,
+                    BenchmarkProgressEvent(
+                        benchmark_name="representation",
+                        event_type="arm_step",
+                        task_name=task.name,
+                        arm_name=arm.name,
+                        step_name="probe_fit",
+                        current=1,
+                        total=1,
+                        message="fit additive probe",
+                    ),
+                )
+                _maybe_emit_benchmark_progress(
+                    progress_callback,
+                    BenchmarkProgressEvent(
+                        benchmark_name="representation",
+                        event_type="arm_step",
+                        task_name=task.name,
+                        arm_name=arm.name,
+                        step_name="shuffled_probe_fit",
+                        current=0,
+                        total=1,
+                        message="fit shuffled probe",
+                    ),
                 )
                 shuffled_fit = _fit_shuffled_probe_features(
                     features=fit_features,
@@ -745,6 +959,19 @@ def run_representation_benchmark_matrix(
                     learning_rate=task_config.discovery.probe_learning_rate,
                     seed=task_config.discovery.shuffle_seed,
                     label_name=task.target_label,
+                )
+                _maybe_emit_benchmark_progress(
+                    progress_callback,
+                    BenchmarkProgressEvent(
+                        benchmark_name="representation",
+                        event_type="arm_step",
+                        task_name=task.name,
+                        arm_name=arm.name,
+                        step_name="shuffled_probe_fit",
+                        current=1,
+                        total=1,
+                        message="fit shuffled probe",
+                    ),
                 )
                 discovery_heldout_metrics = _collection_subset_metrics(
                     state_dict=discovery_fit.state_dict,
@@ -767,6 +994,19 @@ def run_representation_benchmark_matrix(
                         "subject_id": transformed_discovery.window_subject_ids,
                     },
                     neighbor_k=neighbor_k,
+                )
+                _maybe_emit_benchmark_progress(
+                    progress_callback,
+                    BenchmarkProgressEvent(
+                        benchmark_name="representation",
+                        event_type="arm_step",
+                        task_name=task.name,
+                        arm_name=arm.name,
+                        step_name="geometry_summary",
+                        current=1,
+                        total=1,
+                        message="neighbor geometry summary",
+                    ),
                 )
                 status = "ok"
                 failure_reason = None
@@ -836,7 +1076,35 @@ def run_representation_benchmark_matrix(
                     transform_summary_csv_path=transform_summary_csv_path,
                 )
             )
+            completed_arms += 1
+            _maybe_emit_benchmark_progress(
+                progress_callback,
+                BenchmarkProgressEvent(
+                    benchmark_name="representation",
+                    event_type="arm_end",
+                    task_name=task.name,
+                    task_index=task_index,
+                    task_total=len(representation_tasks),
+                    arm_name=arm.name,
+                    arm_index=completed_arms,
+                    arm_total=total_arms,
+                    status=status,
+                    metrics=row,
+                ),
+            )
 
+        _maybe_emit_benchmark_progress(
+            progress_callback,
+            BenchmarkProgressEvent(
+                benchmark_name="representation",
+                event_type="task_end",
+                task_name=task.name,
+                task_index=task_index,
+                task_total=len(representation_tasks),
+                arm_index=completed_arms,
+                arm_total=total_arms,
+            ),
+        )
     return tuple(results)
 
 
@@ -854,6 +1122,7 @@ def run_motif_benchmark_matrix(
     session_holdout_seed: int | None = None,
     test_max_batches: int | None = None,
     debug_retain_intermediates: bool = False,
+    progress_callback: BenchmarkProgressCallback | None = None,
 ) -> tuple[MotifBenchmarkResult, ...]:
     dataset_view = resolve_runtime_dataset_view(
         experiment_config=experiment_config,
@@ -870,9 +1139,24 @@ def run_motif_benchmark_matrix(
         if session_holdout_seed is not None
         else int(experiment_config.discovery.shuffle_seed)
     )
+    motif_tasks = tuple(task for task in tasks if task.include_in_motifs)
     results: list[MotifBenchmarkResult] = []
+    total_arms = len(motif_tasks) * len(arms)
+    completed_arms = 0
 
-    for task in tasks:
+    for task_index, task in enumerate(motif_tasks, start=1):
+        _maybe_emit_benchmark_progress(
+            progress_callback,
+            BenchmarkProgressEvent(
+                benchmark_name="motif",
+                event_type="task_start",
+                task_name=task.name,
+                task_index=task_index,
+                task_total=len(motif_tasks),
+                arm_total=total_arms,
+                message=f"motif task {task.name}",
+            ),
+        )
         if not task.include_in_motifs:
             continue
         skip_status, skip_reason = _task_skip_status(
@@ -898,7 +1182,7 @@ def run_motif_benchmark_matrix(
         else:
             plan_error = None
 
-        for arm in arms:
+        for arm_index, arm in enumerate(arms, start=1):
             arm_root = task_output_root / arm.name
             arm_root.mkdir(parents=True, exist_ok=True)
             summary_json_path = arm_root / "summary.json"
@@ -908,6 +1192,20 @@ def run_motif_benchmark_matrix(
             discovery_artifact_path = arm_root / "discovery_artifact.json"
             transform_summary_json_path = arm_root / "transform_summary.json"
             transform_summary_csv_path = arm_root / "transform_summary.csv"
+            _maybe_emit_benchmark_progress(
+                progress_callback,
+                BenchmarkProgressEvent(
+                    benchmark_name="motif",
+                    event_type="arm_start",
+                    task_name=task.name,
+                    task_index=task_index,
+                    task_total=len(motif_tasks),
+                    arm_name=arm.name,
+                    arm_index=completed_arms + 1,
+                    arm_total=total_arms,
+                    message=f"{task.name} / {arm.name}",
+                ),
+            )
 
             if skip_status is not None:
                 row = _motif_row(
@@ -966,6 +1264,22 @@ def run_motif_benchmark_matrix(
                         transform_summary_csv_path=transform_summary_csv_path,
                     )
                 )
+                completed_arms += 1
+                _maybe_emit_benchmark_progress(
+                    progress_callback,
+                    BenchmarkProgressEvent(
+                        benchmark_name="motif",
+                        event_type="arm_end",
+                        task_name=task.name,
+                        task_index=task_index,
+                        task_total=len(motif_tasks),
+                        arm_name=arm.name,
+                        arm_index=completed_arms,
+                        arm_total=total_arms,
+                        status=skip_status,
+                        metrics=row,
+                    ),
+                )
                 continue
 
             if plan is None:
@@ -1009,6 +1323,19 @@ def run_motif_benchmark_matrix(
                     cached = raw_cache.get(arm.feature_family)
                     if cached is None:
                         raw_shard_dir = task_output_root / "_tmp_feature_shards" / arm.feature_family
+                        _maybe_emit_benchmark_progress(
+                            progress_callback,
+                            BenchmarkProgressEvent(
+                                benchmark_name="motif",
+                                event_type="arm_step",
+                                task_name=task.name,
+                                arm_name=arm.name,
+                                step_name="discovery_extraction",
+                                current=0,
+                                total=None,
+                                message="extract discovery windows",
+                            ),
+                        )
                         discovery_collection = extract_benchmark_selected_windows(
                             experiment_config=task_config,
                             data_config_path=data_config_path,
@@ -1017,8 +1344,34 @@ def run_motif_benchmark_matrix(
                             dataset_view=dataset_view,
                             window_plan=plan,
                             shard_dir=raw_shard_dir,
+                            progress_callback=lambda current, total, task_name=task.name, arm_name=arm.name: _maybe_emit_benchmark_progress(
+                                progress_callback,
+                                BenchmarkProgressEvent(
+                                    benchmark_name="motif",
+                                    event_type="arm_step",
+                                    task_name=task_name,
+                                    arm_name=arm_name,
+                                    step_name="discovery_extraction",
+                                    current=current,
+                                    total=total,
+                                    message="extract discovery windows",
+                                ),
+                            ),
                         )
                         _ensure_binary_label_coverage(discovery_collection.coverage_summary)  # type: ignore[arg-type]
+                        _maybe_emit_benchmark_progress(
+                            progress_callback,
+                            BenchmarkProgressEvent(
+                                benchmark_name="motif",
+                                event_type="arm_step",
+                                task_name=task.name,
+                                arm_name=arm.name,
+                                step_name="test_extraction",
+                                current=0,
+                                total=test_max_batches or task_config.evaluation.max_batches,
+                                message="extract test split",
+                            ),
+                        )
                         test_collection = extract_benchmark_split_collection(
                             experiment_config=task_config,
                             data_config_path=data_config_path,
@@ -1030,6 +1383,19 @@ def run_motif_benchmark_matrix(
                             checkpoint_path=checkpoint_path,
                             dataset_view=dataset_view,
                             max_batches=test_max_batches or task_config.evaluation.max_batches,
+                            progress_callback=lambda current, total, task_name=task.name, arm_name=arm.name: _maybe_emit_benchmark_progress(
+                                progress_callback,
+                                BenchmarkProgressEvent(
+                                    benchmark_name="motif",
+                                    event_type="arm_step",
+                                    task_name=task_name,
+                                    arm_name=arm_name,
+                                    step_name="test_extraction",
+                                    current=current,
+                                    total=total,
+                                    message="extract test split",
+                                ),
+                            ),
                         )
                         split = build_session_stratified_holdout_split(
                             labels=discovery_collection.labels,
@@ -1040,18 +1406,71 @@ def run_motif_benchmark_matrix(
                         )
                         raw_cache[arm.feature_family] = (discovery_collection, test_collection, split, raw_shard_dir)
                         cached = raw_cache[arm.feature_family]
+                    else:
+                        _maybe_emit_benchmark_progress(
+                            progress_callback,
+                            BenchmarkProgressEvent(
+                                benchmark_name="motif",
+                                event_type="arm_step",
+                                task_name=task.name,
+                                arm_name=arm.name,
+                                step_name="reuse_cached_features",
+                                current=1,
+                                total=1,
+                                message=f"reuse {arm.feature_family} features",
+                            ),
+                        )
 
                     discovery_collection, test_collection, split, _ = cached
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="motif",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="pca",
+                            current=0,
+                            total=1,
+                            message="fit/apply PCA",
+                        ),
+                    )
                     transformed_discovery, transformed_test, global_transform, pca_summary = _fit_optional_pca(
                         arm=arm,
                         discovery_collection=discovery_collection,
                         test_collection=test_collection,
                         fit_indices=split.fit_indices,
                     )
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="motif",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="pca",
+                            current=1,
+                            total=1,
+                            message="fit/apply PCA",
+                        ),
+                    )
                     whitening_summary = None
                     discovery_session_transforms = None
                     test_whitening_summary = None
                     if arm.geometry_mode == "whitened":
+                        _maybe_emit_benchmark_progress(
+                            progress_callback,
+                            BenchmarkProgressEvent(
+                                benchmark_name="motif",
+                                event_type="arm_step",
+                                task_name=task.name,
+                                arm_name=arm.name,
+                                step_name="whitening",
+                                current=0,
+                                total=1,
+                                message="apply whitening",
+                            ),
+                        )
                         transformed_discovery, whitening_summary, discovery_session_transforms = _apply_session_whitening_to_collection(
                             collection=transformed_discovery,
                             fit_indices=split.fit_indices,
@@ -1059,21 +1478,99 @@ def run_motif_benchmark_matrix(
                         transformed_test, test_whitening_summary, _ = _build_whitened_test_collection(
                             collection=transformed_test,
                         )
+                        _maybe_emit_benchmark_progress(
+                            progress_callback,
+                            BenchmarkProgressEvent(
+                                benchmark_name="motif",
+                                event_type="arm_step",
+                                task_name=task.name,
+                                arm_name=arm.name,
+                                step_name="whitening",
+                                current=1,
+                                total=1,
+                                message="apply whitening",
+                            ),
+                        )
 
                     transformed_shard_dir = arm_root / "_tmp_transformed_shards"
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="motif",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="token_shards",
+                            current=0,
+                            total=len(discovery_collection.shard_paths),
+                            message="write transformed token shards",
+                        ),
+                    )
                     transformed_shards = write_collection_token_shards(
                         collection=discovery_collection,
                         output_dir=transformed_shard_dir,
                         global_transform=global_transform,
                         session_transforms=discovery_session_transforms,
+                        progress_callback=lambda current, total, task_name=task.name, arm_name=arm.name: _maybe_emit_benchmark_progress(
+                            progress_callback,
+                            BenchmarkProgressEvent(
+                                benchmark_name="motif",
+                                event_type="arm_step",
+                                task_name=task_name,
+                                arm_name=arm_name,
+                                step_name="token_shards",
+                                current=current,
+                                total=total,
+                                message="write transformed token shards",
+                            ),
+                        ),
                     )
 
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="motif",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="probe_fit",
+                            current=0,
+                            total=1,
+                            message="fit additive probe",
+                        ),
+                    )
                     fit_probe = fit_additive_probe_features(
                         features=transformed_discovery.pooled_features,
                         labels=transformed_discovery.labels,
                         epochs=task_config.discovery.probe_epochs,
                         learning_rate=task_config.discovery.probe_learning_rate,
                         label_name=task.target_label,
+                    )
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="motif",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="probe_fit",
+                            current=1,
+                            total=1,
+                            message="fit additive probe",
+                        ),
+                    )
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="motif",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="shuffled_probe_fit",
+                            current=0,
+                            total=1,
+                            message="fit shuffled probe",
+                        ),
                     )
                     shuffled_probe = _fit_shuffled_probe_features(
                         features=transformed_discovery.pooled_features,
@@ -1083,7 +1580,33 @@ def run_motif_benchmark_matrix(
                         seed=task_config.discovery.shuffle_seed,
                         label_name=task.target_label,
                     )
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="motif",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="shuffled_probe_fit",
+                            current=1,
+                            total=1,
+                            message="fit shuffled probe",
+                        ),
+                    )
 
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="motif",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="candidate_selection",
+                            current=0,
+                            total=1,
+                            message="select candidate tokens",
+                        ),
+                    )
                     candidates = select_candidate_tokens_from_shards(
                         shard_paths=transformed_shards,
                         probe_state_dict=fit_probe.state_dict,
@@ -1103,6 +1626,19 @@ def run_motif_benchmark_matrix(
                         )
                         candidate_selection_fallback_used = True
                         candidate_selection_effective_min_score = None
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="motif",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="candidate_selection",
+                            current=1,
+                            total=1,
+                            message="select candidate tokens",
+                        ),
+                    )
 
                     if not candidates:
                         clustered_candidates = tuple()
@@ -1110,20 +1646,72 @@ def run_motif_benchmark_matrix(
                         cluster_quality_summary = _default_cluster_stats()
                         failure_reason = "no_candidates_selected"
                     else:
+                        _maybe_emit_benchmark_progress(
+                            progress_callback,
+                            BenchmarkProgressEvent(
+                                benchmark_name="motif",
+                                event_type="arm_step",
+                                task_name=task.name,
+                                arm_name=arm.name,
+                                step_name="clustering",
+                                current=0,
+                                total=1,
+                                message="cluster candidate tokens",
+                            ),
+                        )
                         clustered_candidates, cluster_stats = cluster_candidate_tokens(
                             candidates=candidates,
                             min_cluster_size=task_config.discovery.min_cluster_size,
+                        )
+                        _maybe_emit_benchmark_progress(
+                            progress_callback,
+                            BenchmarkProgressEvent(
+                                benchmark_name="motif",
+                                event_type="arm_step",
+                                task_name=task.name,
+                                arm_name=arm.name,
+                                step_name="clustering",
+                                current=1,
+                                total=1,
+                                message="cluster candidate tokens",
+                            ),
                         )
                         if int(cluster_stats.get("cluster_count", 0)) <= 0:
                             cluster_quality_summary = cluster_stats.copy()
                             failure_reason = "no_non_noise_clusters"
                         else:
+                            _maybe_emit_benchmark_progress(
+                                progress_callback,
+                                BenchmarkProgressEvent(
+                                    benchmark_name="motif",
+                                    event_type="arm_step",
+                                    task_name=task.name,
+                                    arm_name=arm.name,
+                                    step_name="stability",
+                                    current=0,
+                                    total=1,
+                                    message="estimate cluster stability",
+                                ),
+                            )
                             cluster_quality_summary = estimate_clustering_stability(
                                 candidates=clustered_candidates,
                                 cluster_stats=cluster_stats,
                                 min_cluster_size=task_config.discovery.min_cluster_size,
                                 stability_rounds=task_config.discovery.stability_rounds,
                                 seed=task_config.seed,
+                            )
+                            _maybe_emit_benchmark_progress(
+                                progress_callback,
+                                BenchmarkProgressEvent(
+                                    benchmark_name="motif",
+                                    event_type="arm_step",
+                                    task_name=task.name,
+                                    arm_name=arm.name,
+                                    step_name="stability",
+                                    current=1,
+                                    total=1,
+                                    message="estimate cluster stability",
+                                ),
                             )
                             failure_reason = None
 
@@ -1155,6 +1743,19 @@ def run_motif_benchmark_matrix(
                     )
                     centroids = _candidate_centroids(clustered_candidates)
                     if centroids:
+                        _maybe_emit_benchmark_progress(
+                            progress_callback,
+                            BenchmarkProgressEvent(
+                                benchmark_name="motif",
+                                event_type="arm_step",
+                                task_name=task.name,
+                                arm_name=arm.name,
+                                step_name="held_out_similarity",
+                                current=0,
+                                total=1,
+                                message="score held-out motif similarity",
+                            ),
+                        )
                         held_out_similarity_summary = _held_out_similarity_summary(
                             labels=transformed_test.labels,
                             window_session_ids=transformed_test.window_session_ids,
@@ -1162,6 +1763,19 @@ def run_motif_benchmark_matrix(
                                 tokens=transformed_test.token_tensors,
                                 token_mask=transformed_test.token_mask,
                                 centroids=centroids,
+                            ),
+                        )
+                        _maybe_emit_benchmark_progress(
+                            progress_callback,
+                            BenchmarkProgressEvent(
+                                benchmark_name="motif",
+                                event_type="arm_step",
+                                task_name=task.name,
+                                arm_name=arm.name,
+                                step_name="held_out_similarity",
+                                current=1,
+                                total=1,
+                                message="score held-out motif similarity",
                             ),
                         )
                     else:
@@ -1279,9 +1893,38 @@ def run_motif_benchmark_matrix(
                     transform_summary_csv_path=transform_summary_csv_path,
                 )
             )
+            completed_arms += 1
+            _maybe_emit_benchmark_progress(
+                progress_callback,
+                BenchmarkProgressEvent(
+                    benchmark_name="motif",
+                    event_type="arm_end",
+                    task_name=task.name,
+                    task_index=task_index,
+                    task_total=len(motif_tasks),
+                    arm_name=arm.name,
+                    arm_index=completed_arms,
+                    arm_total=total_arms,
+                    status=status,
+                    metrics=row,
+                ),
+            )
 
         for _, _, _, raw_shard_dir in raw_cache.values():
             if raw_shard_dir.exists() and not debug_retain_intermediates:
                 shutil.rmtree(raw_shard_dir)
+
+        _maybe_emit_benchmark_progress(
+            progress_callback,
+            BenchmarkProgressEvent(
+                benchmark_name="motif",
+                event_type="task_end",
+                task_name=task.name,
+                task_index=task_index,
+                task_total=len(motif_tasks),
+                arm_index=completed_arms,
+                arm_total=total_arms,
+            ),
+        )
 
     return tuple(results)

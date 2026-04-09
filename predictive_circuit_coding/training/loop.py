@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import math
 import random
+from typing import Callable
 
 import numpy as np
 import torch
@@ -32,6 +33,7 @@ from predictive_circuit_coding.training.factories import (
 from predictive_circuit_coding.training.logging import StageLogger
 from predictive_circuit_coding.training.runtime import iter_sampler_batches, resolve_device
 from predictive_circuit_coding.training.step import run_training_step
+from predictive_circuit_coding.utils.notebook import TrainingProgressEvent
 from predictive_circuit_coding.windowing import (
     FixedWindowConfig,
     build_dataset_bundle,
@@ -93,6 +95,17 @@ class TrainingRunResult:
     best_metric: float
 
 
+TrainingProgressCallback = Callable[[TrainingProgressEvent], None]
+
+
+def _maybe_emit_training_progress(
+    progress_callback: TrainingProgressCallback | None,
+    event: TrainingProgressEvent,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(event)
+
+
 def _set_training_seed(seed: int, *, device: torch.device) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -131,6 +144,9 @@ def train_model(
     train_split: str,
     valid_split: str,
     dataset_view=None,
+    progress_callback: TrainingProgressCallback | None = None,
+    log_sink: Callable[[str], None] | None = None,
+    emit_logs: bool = True,
 ) -> TrainingRunResult:
     dataset_view = dataset_view or resolve_runtime_dataset_view(
         experiment_config=experiment_config,
@@ -149,7 +165,7 @@ def train_model(
     model = model.to(device)
     scaler_enabled = bool(experiment_config.execution.mixed_precision and device.type == "cuda")
     grad_scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
-    logger = StageLogger(name="train")
+    logger = StageLogger(name="train", emit_console=emit_logs, log_sink=log_sink)
     if experiment_config.artifacts.save_config_snapshot:
         snapshot_path = (
             experiment_config.artifacts.checkpoint_dir
@@ -187,11 +203,30 @@ def train_model(
             else None
         )
         logger.log(f"Resumed from checkpoint at epoch {state['epoch']}")
+        _maybe_emit_training_progress(
+            progress_callback,
+            TrainingProgressEvent(
+                event_type="resume",
+                epoch=int(state["epoch"]),
+                epoch_total=experiment_config.training.num_epochs,
+                message=f"Resumed from checkpoint at epoch {state['epoch']}",
+            ),
+        )
 
     for epoch in range(start_epoch, experiment_config.training.num_epochs + 1):
         logger.log_stage(
             f"epoch {epoch}/{experiment_config.training.num_epochs}",
             expected_next="checkpoint or training summary",
+        )
+        _maybe_emit_training_progress(
+            progress_callback,
+            TrainingProgressEvent(
+                event_type="epoch_start",
+                epoch=epoch,
+                epoch_total=experiment_config.training.num_epochs,
+                step_total=experiment_config.training.train_steps_per_epoch,
+                message=f"epoch {epoch}/{experiment_config.training.num_epochs}",
+            ),
         )
         model.train()
         train_bundle = build_dataset_bundle(
@@ -248,6 +283,17 @@ def train_model(
             global_step += 1
             train_metrics.append({**step_output.metrics, **step_output.losses})
             train_metric_weights.append(float(step_output.batch_size))
+            _maybe_emit_training_progress(
+                progress_callback,
+                TrainingProgressEvent(
+                    event_type="step",
+                    epoch=epoch,
+                    epoch_total=experiment_config.training.num_epochs,
+                    step=step_index,
+                    step_total=experiment_config.training.train_steps_per_epoch,
+                    metrics={**step_output.metrics, **step_output.losses},
+                ),
+            )
             if step_index % experiment_config.training.log_every_steps == 0:
                 logger.log_metrics(prefix=f"epoch={epoch} step={step_index}", metrics={**step_output.metrics, **step_output.losses})
 
@@ -258,6 +304,15 @@ def train_model(
         latest_training_losses = current_training_losses
 
         if epoch % experiment_config.training.evaluate_every_epochs == 0:
+            _maybe_emit_training_progress(
+                progress_callback,
+                TrainingProgressEvent(
+                    event_type="validation_start",
+                    epoch=epoch,
+                    epoch_total=experiment_config.training.num_epochs,
+                    message=f"validation {valid_split}",
+                ),
+            )
             evaluation = evaluate_checkpoint_on_split(
                 experiment_config=experiment_config,
                 data_config_path=data_config_path,
@@ -269,6 +324,16 @@ def train_model(
             )
             valid_metric = float(evaluation.metrics["predictive_improvement"])
             latest_evaluation_metrics = dict(evaluation.metrics)
+            _maybe_emit_training_progress(
+                progress_callback,
+                TrainingProgressEvent(
+                    event_type="validation_end",
+                    epoch=epoch,
+                    epoch_total=experiment_config.training.num_epochs,
+                    metrics=dict(evaluation.metrics),
+                    message=f"validation {valid_split}",
+                ),
+            )
             if math.isfinite(valid_metric) and valid_metric >= best_metric:
                 best_metric = valid_metric
                 best_epoch = epoch
@@ -288,6 +353,16 @@ def train_model(
                 )
                 save_training_checkpoint(checkpoint, best_checkpoint_path)
                 logger.log_artifact(label="best checkpoint", path=best_checkpoint_path)
+                _maybe_emit_training_progress(
+                    progress_callback,
+                    TrainingProgressEvent(
+                        event_type="checkpoint_saved",
+                        epoch=epoch,
+                        epoch_total=experiment_config.training.num_epochs,
+                        checkpoint_path=str(best_checkpoint_path),
+                        message="best checkpoint",
+                    ),
+                )
 
             if best_epoch > 0 and best_validation_metrics is not None and best_training_losses is not None:
                 summary = _build_training_summary(
@@ -320,6 +395,29 @@ def train_model(
             latest_epoch_checkpoint_path = epoch_path
             latest_epoch_checkpoint = checkpoint
             logger.log_artifact(label="latest checkpoint", path=epoch_path)
+            _maybe_emit_training_progress(
+                progress_callback,
+                TrainingProgressEvent(
+                    event_type="checkpoint_saved",
+                    epoch=epoch,
+                    epoch_total=experiment_config.training.num_epochs,
+                    checkpoint_path=str(epoch_path),
+                    message="latest checkpoint",
+                ),
+            )
+
+        _maybe_emit_training_progress(
+            progress_callback,
+            TrainingProgressEvent(
+                event_type="epoch_end",
+                epoch=epoch,
+                epoch_total=experiment_config.training.num_epochs,
+                step=experiment_config.training.train_steps_per_epoch,
+                step_total=experiment_config.training.train_steps_per_epoch,
+                metrics=dict(current_training_losses),
+                message=f"epoch {epoch} complete",
+            ),
+        )
 
     if not best_checkpoint_path.exists() and latest_epoch_checkpoint is not None:
         save_training_checkpoint(latest_epoch_checkpoint, best_checkpoint_path)
@@ -348,6 +446,18 @@ def train_model(
         )
         write_training_summary(fallback_summary, experiment_config.artifacts.summary_path)
         logger.log_artifact(label="training summary", path=experiment_config.artifacts.summary_path)
+
+    _maybe_emit_training_progress(
+        progress_callback,
+        TrainingProgressEvent(
+            event_type="training_complete",
+            epoch=best_epoch,
+            epoch_total=experiment_config.training.num_epochs,
+            checkpoint_path=str(best_checkpoint_path),
+            metrics={"predictive_improvement": float(best_metric)},
+            message="training complete",
+        ),
+    )
 
     return TrainingRunResult(
         checkpoint_path=best_checkpoint_path,

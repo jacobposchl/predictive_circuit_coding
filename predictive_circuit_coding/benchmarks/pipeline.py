@@ -34,8 +34,13 @@ from predictive_circuit_coding.data import (
     load_session_catalog,
 )
 from predictive_circuit_coding.evaluation import evaluate_checkpoint_on_split
-from predictive_circuit_coding.training import load_experiment_config, write_evaluation_summary
+from predictive_circuit_coding.training import load_experiment_config, train_model, write_evaluation_summary, write_run_manifest
 from predictive_circuit_coding.utils.notebook import (
+    NotebookProgressConfig,
+    NotebookProgressUI,
+    NotebookStageSummary,
+    build_notebook_preflight_rows,
+    load_pipeline_display_tables,
     NotebookDatasetConfig,
     NotebookTrainingConfig,
     materialize_notebook_prepared_sessions,
@@ -43,7 +48,6 @@ from predictive_circuit_coding.utils.notebook import (
     prepare_notebook_runtime_context_from_experiment_config,
     resolve_notebook_checkpoint,
     run_notebook_session_alignment_diagnostics,
-    run_streaming_command,
 )
 
 
@@ -396,6 +400,228 @@ def _summary_rows_from_json(path: Path, root_key: str) -> list[dict[str, Any]]:
     return list(payload.get(root_key, []))
 
 
+def _stage_root(paths: NotebookPipelinePaths, stage_name: str) -> Path:
+    mapping = {
+        "train": paths.train_root,
+        "evaluate": paths.evaluation_root,
+        "representation_benchmark": paths.representation_root,
+        "motif_benchmark": paths.motif_root,
+        "alignment_diagnostic": paths.diagnostics_root,
+        "final_reports": paths.reports_root,
+    }
+    return mapping.get(stage_name, paths.pipeline_root)
+
+
+def _append_stage_log(log_lines: list[str], message: str) -> None:
+    log_lines.append(str(message).rstrip("\n"))
+
+
+def _write_stage_debug_log(
+    *,
+    paths: NotebookPipelinePaths,
+    stage_name: str,
+    log_lines: list[str],
+    error_message: str | None = None,
+    persist: bool = False,
+) -> Path | None:
+    if not persist and error_message is None:
+        return None
+    target = _stage_root(paths, stage_name) / "stage_debug.log"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lines = list(log_lines)
+    if error_message is not None:
+        lines.append(f"ERROR: {error_message}")
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return target
+
+
+def _load_json(path: str | Path) -> dict[str, Any]:
+    candidate = Path(path)
+    if not candidate.is_file():
+        return {}
+    return json.loads(candidate.read_text(encoding="utf-8"))
+
+
+def _build_train_stage_summary(
+    *,
+    outputs: dict[str, Any],
+    status: str,
+    debug_log_path: Path | None = None,
+) -> NotebookStageSummary:
+    summary_payload = _load_json(outputs.get("training_summary_path", ""))
+    metrics = summary_payload.get("metrics", {})
+    headline = (
+        f"Best epoch `{summary_payload.get('best_epoch', 'n/a')}` "
+        f"with predictive improvement `{metrics.get('predictive_improvement', 'n/a')}`."
+    )
+    rows = ({
+        "best_epoch": summary_payload.get("best_epoch"),
+        "predictive_improvement": metrics.get("predictive_improvement"),
+        "predictive_loss": metrics.get("predictive_loss"),
+        "predictive_baseline_mse": metrics.get("predictive_baseline_mse"),
+        "predictive_raw_mse": metrics.get("predictive_raw_mse"),
+    },)
+    return NotebookStageSummary(
+        stage_name="train",
+        status=status,
+        headline=headline,
+        rows=rows,
+        artifact_paths={
+            "checkpoint": str(outputs.get("checkpoint_path", "")),
+            "training_summary": str(outputs.get("training_summary_path", "")),
+        },
+        debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
+    )
+
+
+def _build_evaluation_stage_summary(
+    *,
+    outputs: dict[str, Any],
+    status: str,
+    debug_log_path: Path | None = None,
+) -> NotebookStageSummary:
+    rows: list[dict[str, Any]] = []
+    for path in outputs.get("evaluation_summary_paths", []):
+        payload = _load_json(path)
+        rows.append(
+            {
+                "split_name": payload.get("split_name"),
+                "predictive_improvement": payload.get("metrics", {}).get("predictive_improvement"),
+                "predictive_loss": payload.get("metrics", {}).get("predictive_loss"),
+                "window_count": payload.get("window_count"),
+            }
+        )
+    return NotebookStageSummary(
+        stage_name="evaluate",
+        status=status,
+        headline="Evaluation summaries written for the configured splits.",
+        rows=tuple(rows),
+        artifact_paths=(
+            {"evaluation_summary_count": str(len(outputs.get("evaluation_summary_paths", [])))}
+            if outputs.get("evaluation_summary_paths")
+            else {}
+        ),
+        debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
+    )
+
+
+def _build_representation_stage_summary(
+    *,
+    outputs: dict[str, Any],
+    status: str,
+    debug_log_path: Path | None = None,
+) -> NotebookStageSummary:
+    tables = load_pipeline_display_tables(
+        representation_summary_csv_path=outputs.get("representation_summary_csv_path", ""),
+        motif_summary_csv_path="",
+        final_summary_csv_path="",
+    )
+    frame = tables.get("representation")
+    rows = tuple(frame.head(5).to_dict(orient="records")) if hasattr(frame, "empty") and not frame.empty else ()
+    headline = "Representation benchmark leaderboard."
+    if rows:
+        best = rows[0]
+        headline = (
+            f"Best row: `{best.get('task_name')}` / `{best.get('arm_name')}` "
+            f"with test PR-AUC `{best.get('test_probe_pr_auc')}`."
+        )
+    return NotebookStageSummary(
+        stage_name="representation_benchmark",
+        status=status,
+        headline=headline,
+        rows=rows,
+        artifact_paths={"representation_summary": str(outputs.get("representation_summary_json_path", ""))},
+        debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
+    )
+
+
+def _build_motif_stage_summary(
+    *,
+    outputs: dict[str, Any],
+    status: str,
+    debug_log_path: Path | None = None,
+) -> NotebookStageSummary:
+    tables = load_pipeline_display_tables(
+        representation_summary_csv_path="",
+        motif_summary_csv_path=outputs.get("motif_summary_csv_path", ""),
+        final_summary_csv_path="",
+    )
+    frame = tables.get("motif")
+    rows = tuple(frame.head(5).to_dict(orient="records")) if hasattr(frame, "empty") and not frame.empty else ()
+    headline = "Motif benchmark leaderboard."
+    if rows:
+        best = rows[0]
+        headline = (
+            f"Best row: `{best.get('task_name')}` / `{best.get('arm_name')}` "
+            f"with held-out motif PR-AUC `{best.get('held_out_similarity_pr_auc')}`."
+        )
+    return NotebookStageSummary(
+        stage_name="motif_benchmark",
+        status=status,
+        headline=headline,
+        rows=rows,
+        artifact_paths={"motif_summary": str(outputs.get("motif_summary_json_path", ""))},
+        debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
+    )
+
+
+def _build_alignment_stage_summary(
+    *,
+    outputs: dict[str, Any],
+    status: str,
+    debug_log_path: Path | None = None,
+) -> NotebookStageSummary:
+    payload = _load_json(outputs.get("alignment_summary_json_path", "")) if outputs.get("alignment_summary_json_path") else {}
+    rows = ()
+    if payload:
+        root_key = next(iter(payload.keys()))
+        raw_rows = payload.get(root_key, [])
+        if isinstance(raw_rows, list):
+            rows = tuple(raw_rows[:5])
+    return NotebookStageSummary(
+        stage_name="alignment_diagnostic",
+        status=status,
+        headline="Optional alignment diagnostic completed.",
+        rows=rows,
+        artifact_paths=(
+            {"alignment_summary": str(outputs.get("alignment_summary_json_path", ""))}
+            if outputs.get("alignment_summary_json_path")
+            else {}
+        ),
+        debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
+    )
+
+
+def _build_final_stage_summary(
+    *,
+    outputs: dict[str, Any],
+    status: str,
+    debug_log_path: Path | None = None,
+) -> NotebookStageSummary:
+    payload = _load_json(outputs.get("final_summary_json_path", ""))
+    rows = tuple(payload.get("final_project_summary", []))
+    claims = []
+    if rows:
+        claims = tuple(rows[0].get("claims", []))
+    return NotebookStageSummary(
+        stage_name="final_reports",
+        status=status,
+        headline="Final project summary written.",
+        rows=rows[:1] if rows else (),
+        notes=claims,
+        artifact_paths={"final_summary": str(outputs.get("final_summary_json_path", ""))},
+        debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
+    )
+
+
+def _build_reused_stage_summary(stage_name: str) -> NotebookStageSummary:
+    return NotebookStageSummary(
+        stage_name=stage_name,
+        status="reused",
+        headline="Reused from the existing config-matched pipeline state.",
+    )
+
+
 def _select_task_specs(
     *,
     include_image_identity: bool,
@@ -434,6 +660,8 @@ def prepare_or_restore_training_stage(
     run_stage_train: bool,
     use_experiment_config_as_is: bool,
     output_stream: TextIO,
+    progress_ui: NotebookProgressUI | None = None,
+    debug_retain_intermediates: bool = False,
 ) -> dict[str, Any]:
     prep_config = load_preparation_config(data_config_path)
     workspace = create_workspace(prep_config)
@@ -453,6 +681,8 @@ def prepare_or_restore_training_stage(
         "workspace_root": _path_identity(workspace.root),
     }
     if _stage_is_reusable(states=states, stage_name="train", config_hash=config_hash, inputs=inputs):
+        if progress_ui is not None:
+            progress_ui.render_stage_summary(_build_reused_stage_summary("train"))
         return dict(states["train"]["outputs"])
 
     _set_stage_state(
@@ -463,6 +693,13 @@ def prepare_or_restore_training_stage(
         config_hash=config_hash,
         inputs=inputs,
     )
+    if progress_ui is not None:
+        progress_ui.start_stage(
+            stage_name="train",
+            total=(training_config.num_epochs if not use_experiment_config_as_is else None),
+            description="Training",
+        )
+    stage_logs: list[str] = []
     try:
         if use_experiment_config_as_is:
             context = prepare_notebook_runtime_context_from_experiment_config(
@@ -494,38 +731,63 @@ def prepare_or_restore_training_stage(
             )
 
         if run_stage_train:
-            run_streaming_command(
-                [
-                    sys.executable,
-                    "-m",
-                    "predictive_circuit_coding.cli.train",
-                    "--config",
-                    str(context.experiment_config_path),
-                    "--data-config",
-                    str(Path(data_config_path).resolve()),
-                ],
-                stream=output_stream,
-                cwd=Path.cwd(),
-                step_log_every=step_log_every,
+            train_result = train_model(
+                experiment_config=runtime_config,
+                data_config_path=data_config_path,
+                train_split=runtime_config.splits.train,
+                valid_split=runtime_config.splits.valid,
+                progress_callback=(
+                    progress_ui.make_training_callback(stage_name="train")
+                    if progress_ui is not None
+                    else None
+                ),
+                log_sink=lambda line: _append_stage_log(stage_logs, line),
+                emit_logs=progress_ui is None,
             )
-            checkpoint_path = resolve_notebook_checkpoint(
-                summary_path=context.summary_path,
-                checkpoint_dir=context.checkpoint_dir,
-                checkpoint_prefix=checkpoint_prefix,
+            checkpoint_path = train_result.checkpoint_path
+            training_summary_path = train_result.summary_path
+            run_manifest_path = context.summary_path.with_name(f"{context.summary_path.stem}_train_run_manifest.json")
+            write_run_manifest(
+                {
+                    "command_name": "train",
+                    "created_at_utc": _utc_now(),
+                    "dataset_id": runtime_config.dataset_id,
+                    "inputs": {
+                        "config": str(context.experiment_config_path),
+                        "data_config": str(Path(data_config_path).resolve()),
+                    },
+                    "outputs": {
+                        "checkpoint_path": str(checkpoint_path),
+                        "training_summary_path": str(training_summary_path),
+                    },
+                },
+                run_manifest_path,
             )
         elif not checkpoint_path.exists():
             raise FileNotFoundError(
                 "Training stage is disabled, but no checkpoint was found for the selected run. "
                 "Enable RUN_STAGE_TRAIN or point PIPELINE_RUN_ID at an exported run with train artifacts."
             )
+        else:
+            training_summary_path = context.summary_path
+            run_manifest_path = context.summary_path.with_name(f"{context.summary_path.stem}_train_run_manifest.json")
 
         outputs = {
             "runtime_experiment_config_path": str(context.experiment_config_path),
             "exported_runtime_config_path": str(context.exported_runtime_config_path),
             "checkpoint_path": str(checkpoint_path),
-            "training_summary_path": str(context.summary_path),
+            "training_summary_path": str(training_summary_path),
+            "run_manifest_path": str(run_manifest_path) if run_manifest_path.exists() else "",
             "train_root": str(paths.train_root),
         }
+        debug_log_path = _write_stage_debug_log(
+            paths=paths,
+            stage_name="train",
+            log_lines=stage_logs,
+            persist=debug_retain_intermediates or (progress_ui is None),
+        )
+        if debug_log_path is not None:
+            outputs["debug_log_path"] = str(debug_log_path)
         _set_stage_state(
             states=states,
             paths=paths,
@@ -536,8 +798,20 @@ def prepare_or_restore_training_stage(
             outputs=outputs,
         )
         _sync_run_relatives(paths, ("train", "pipeline"))
+        if progress_ui is not None:
+            progress_ui.finish_stage(
+                _build_train_stage_summary(outputs=outputs, status="complete", debug_log_path=debug_log_path)
+            )
+            progress_ui.advance_pipeline()
         return outputs
     except Exception as exc:
+        debug_log_path = _write_stage_debug_log(
+            paths=paths,
+            stage_name="train",
+            log_lines=stage_logs,
+            error_message=str(exc),
+            persist=True,
+        )
         _set_stage_state(
             states=states,
             paths=paths,
@@ -545,8 +819,16 @@ def prepare_or_restore_training_stage(
             status="failed",
             config_hash=config_hash,
             inputs=inputs,
+            outputs=({"debug_log_path": str(debug_log_path)} if debug_log_path is not None else None),
             error_message=str(exc),
         )
+        if progress_ui is not None:
+            progress_ui.fail_stage(
+                stage_name="train",
+                error_message=str(exc),
+                debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
+                tail_lines=stage_logs[-50:],
+            )
         raise
 
 
@@ -559,6 +841,8 @@ def run_standard_evaluation_stage(
     checkpoint_path: str | Path,
     run_stage_evaluate: bool,
     evaluation_splits: tuple[str, ...] = ("valid", "test"),
+    progress_ui: NotebookProgressUI | None = None,
+    debug_retain_intermediates: bool = False,
 ) -> dict[str, Any]:
     stage_config = {
         "runtime_experiment_config_path": str(Path(runtime_experiment_config_path).resolve()),
@@ -574,6 +858,8 @@ def run_standard_evaluation_stage(
         "checkpoint_path": _path_identity(checkpoint_path),
     }
     if _stage_is_reusable(states=states, stage_name="evaluate", config_hash=config_hash, inputs=inputs):
+        if progress_ui is not None:
+            progress_ui.render_stage_summary(_build_reused_stage_summary("evaluate"))
         return dict(states["evaluate"]["outputs"])
     if not run_stage_evaluate:
         outputs = {"evaluation_summary_paths": []}
@@ -587,6 +873,9 @@ def run_standard_evaluation_stage(
             outputs=outputs,
         )
         _sync_run_relatives(paths, ("pipeline",))
+        if progress_ui is not None:
+            progress_ui.render_stage_summary(_build_evaluation_stage_summary(outputs=outputs, status="complete"))
+            progress_ui.advance_pipeline()
         return outputs
 
     _set_stage_state(
@@ -597,21 +886,39 @@ def run_standard_evaluation_stage(
         config_hash=config_hash,
         inputs=inputs,
     )
+    if progress_ui is not None:
+        progress_ui.start_stage(stage_name="evaluate", total=len(evaluation_splits), description="Evaluation")
+    stage_logs: list[str] = []
     try:
         config = load_experiment_config(runtime_experiment_config_path)
         outputs_list: list[str] = []
         paths.evaluation_root.mkdir(parents=True, exist_ok=True)
+        evaluation_callback = (
+            progress_ui.make_evaluation_callback(split_total=len(evaluation_splits))
+            if progress_ui is not None
+            else None
+        )
         for split_name in evaluation_splits:
+            _append_stage_log(stage_logs, f"evaluate split={split_name}")
             summary = evaluate_checkpoint_on_split(
                 experiment_config=config,
                 data_config_path=data_config_path,
                 checkpoint_path=str(checkpoint_path),
                 split_name=split_name,
+                progress_callback=evaluation_callback,
             )
             output_path = paths.evaluation_root / f"{split_name}_evaluation.json"
             write_evaluation_summary(summary, output_path)
             outputs_list.append(str(output_path))
         outputs = {"evaluation_summary_paths": outputs_list}
+        debug_log_path = _write_stage_debug_log(
+            paths=paths,
+            stage_name="evaluate",
+            log_lines=stage_logs,
+            persist=debug_retain_intermediates,
+        )
+        if debug_log_path is not None:
+            outputs["debug_log_path"] = str(debug_log_path)
         _set_stage_state(
             states=states,
             paths=paths,
@@ -622,8 +929,20 @@ def run_standard_evaluation_stage(
             outputs=outputs,
         )
         _sync_run_relatives(paths, ("evaluation", "pipeline"))
+        if progress_ui is not None:
+            progress_ui.finish_stage(
+                _build_evaluation_stage_summary(outputs=outputs, status="complete", debug_log_path=debug_log_path)
+            )
+            progress_ui.advance_pipeline()
         return outputs
     except Exception as exc:
+        debug_log_path = _write_stage_debug_log(
+            paths=paths,
+            stage_name="evaluate",
+            log_lines=stage_logs,
+            error_message=str(exc),
+            persist=True,
+        )
         _set_stage_state(
             states=states,
             paths=paths,
@@ -631,8 +950,16 @@ def run_standard_evaluation_stage(
             status="failed",
             config_hash=config_hash,
             inputs=inputs,
+            outputs=({"debug_log_path": str(debug_log_path)} if debug_log_path is not None else None),
             error_message=str(exc),
         )
+        if progress_ui is not None:
+            progress_ui.fail_stage(
+                stage_name="evaluate",
+                error_message=str(exc),
+                debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
+                tail_lines=stage_logs[-50:],
+            )
         raise
 
 
@@ -649,6 +976,8 @@ def run_representation_benchmark_stage(
     session_holdout_fraction: float,
     session_holdout_seed: int | None,
     neighbor_k: int,
+    progress_ui: NotebookProgressUI | None = None,
+    debug_retain_intermediates: bool = False,
 ) -> dict[str, Any]:
     stage_config = {
         "runtime_experiment_config_path": str(Path(runtime_experiment_config_path).resolve()),
@@ -668,6 +997,8 @@ def run_representation_benchmark_stage(
         "data_config_path": _path_identity(data_config_path),
     }
     if _stage_is_reusable(states=states, stage_name="representation_benchmark", config_hash=config_hash, inputs=inputs):
+        if progress_ui is not None:
+            progress_ui.render_stage_summary(_build_reused_stage_summary("representation_benchmark"))
         return dict(states["representation_benchmark"]["outputs"])
     if not run_stage_representation_benchmark:
         outputs = {
@@ -684,6 +1015,9 @@ def run_representation_benchmark_stage(
             outputs=outputs,
         )
         _sync_run_relatives(paths, ("pipeline",))
+        if progress_ui is not None:
+            progress_ui.render_stage_summary(_build_representation_stage_summary(outputs=outputs, status="complete"))
+            progress_ui.advance_pipeline()
         return outputs
 
     _set_stage_state(
@@ -694,8 +1028,33 @@ def run_representation_benchmark_stage(
         config_hash=config_hash,
         inputs=inputs,
     )
+    if progress_ui is not None:
+        progress_ui.start_stage(
+            stage_name="representation_benchmark",
+            total=len(task_specs) * len(arm_specs),
+            description="Representation Benchmark",
+        )
+    stage_logs: list[str] = []
     try:
         config = load_experiment_config(runtime_experiment_config_path)
+        ui_callback = (
+            progress_ui.make_benchmark_callback(
+                benchmark_name="representation",
+                total_arms=len(task_specs) * len(arm_specs),
+            )
+            if progress_ui is not None
+            else None
+        )
+
+        def _progress_callback(event) -> None:
+            _append_stage_log(
+                stage_logs,
+                f"{event.event_type}: task={event.task_name} arm={event.arm_name} step={event.step_name} "
+                f"current={event.current} total={event.total} status={event.status}",
+            )
+            if ui_callback is not None:
+                ui_callback(event)
+
         results = run_representation_benchmark_matrix(
             experiment_config=config,
             data_config_path=data_config_path,
@@ -706,6 +1065,7 @@ def run_representation_benchmark_stage(
             session_holdout_fraction=session_holdout_fraction,
             session_holdout_seed=session_holdout_seed,
             neighbor_k=neighbor_k,
+            progress_callback=_progress_callback if ui_callback is not None or stage_logs is not None else None,
         )
         rows = [result.summary for result in results]
         summary_json_path, summary_csv_path = write_summary_rows(
@@ -718,6 +1078,14 @@ def run_representation_benchmark_stage(
             "representation_summary_json_path": str(summary_json_path),
             "representation_summary_csv_path": str(summary_csv_path),
         }
+        debug_log_path = _write_stage_debug_log(
+            paths=paths,
+            stage_name="representation_benchmark",
+            log_lines=stage_logs,
+            persist=debug_retain_intermediates,
+        )
+        if debug_log_path is not None:
+            outputs["debug_log_path"] = str(debug_log_path)
         _set_stage_state(
             states=states,
             paths=paths,
@@ -728,8 +1096,20 @@ def run_representation_benchmark_stage(
             outputs=outputs,
         )
         _sync_run_relatives(paths, ("benchmarks", "reports", "pipeline"))
+        if progress_ui is not None:
+            progress_ui.finish_stage(
+                _build_representation_stage_summary(outputs=outputs, status="complete", debug_log_path=debug_log_path)
+            )
+            progress_ui.advance_pipeline()
         return outputs
     except Exception as exc:
+        debug_log_path = _write_stage_debug_log(
+            paths=paths,
+            stage_name="representation_benchmark",
+            log_lines=stage_logs,
+            error_message=str(exc),
+            persist=True,
+        )
         _set_stage_state(
             states=states,
             paths=paths,
@@ -737,8 +1117,16 @@ def run_representation_benchmark_stage(
             status="failed",
             config_hash=config_hash,
             inputs=inputs,
+            outputs=({"debug_log_path": str(debug_log_path)} if debug_log_path is not None else None),
             error_message=str(exc),
         )
+        if progress_ui is not None:
+            progress_ui.fail_stage(
+                stage_name="representation_benchmark",
+                error_message=str(exc),
+                debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
+                tail_lines=stage_logs[-50:],
+            )
         raise
 
 
@@ -755,6 +1143,7 @@ def run_motif_benchmark_stage(
     session_holdout_fraction: float,
     session_holdout_seed: int | None,
     debug_retain_intermediates: bool,
+    progress_ui: NotebookProgressUI | None = None,
 ) -> dict[str, Any]:
     stage_config = {
         "runtime_experiment_config_path": str(Path(runtime_experiment_config_path).resolve()),
@@ -774,6 +1163,8 @@ def run_motif_benchmark_stage(
         "data_config_path": _path_identity(data_config_path),
     }
     if _stage_is_reusable(states=states, stage_name="motif_benchmark", config_hash=config_hash, inputs=inputs):
+        if progress_ui is not None:
+            progress_ui.render_stage_summary(_build_reused_stage_summary("motif_benchmark"))
         return dict(states["motif_benchmark"]["outputs"])
     if not run_stage_motif_benchmark:
         outputs = {
@@ -790,6 +1181,9 @@ def run_motif_benchmark_stage(
             outputs=outputs,
         )
         _sync_run_relatives(paths, ("pipeline",))
+        if progress_ui is not None:
+            progress_ui.render_stage_summary(_build_motif_stage_summary(outputs=outputs, status="complete"))
+            progress_ui.advance_pipeline()
         return outputs
 
     _set_stage_state(
@@ -800,8 +1194,33 @@ def run_motif_benchmark_stage(
         config_hash=config_hash,
         inputs=inputs,
     )
+    if progress_ui is not None:
+        progress_ui.start_stage(
+            stage_name="motif_benchmark",
+            total=len(task_specs) * len(arm_specs),
+            description="Motif Benchmark",
+        )
+    stage_logs: list[str] = []
     try:
         config = load_experiment_config(runtime_experiment_config_path)
+        ui_callback = (
+            progress_ui.make_benchmark_callback(
+                benchmark_name="motif",
+                total_arms=len(task_specs) * len(arm_specs),
+            )
+            if progress_ui is not None
+            else None
+        )
+
+        def _progress_callback(event) -> None:
+            _append_stage_log(
+                stage_logs,
+                f"{event.event_type}: task={event.task_name} arm={event.arm_name} step={event.step_name} "
+                f"current={event.current} total={event.total} status={event.status}",
+            )
+            if ui_callback is not None:
+                ui_callback(event)
+
         results = run_motif_benchmark_matrix(
             experiment_config=config,
             data_config_path=data_config_path,
@@ -812,6 +1231,7 @@ def run_motif_benchmark_stage(
             session_holdout_fraction=session_holdout_fraction,
             session_holdout_seed=session_holdout_seed,
             debug_retain_intermediates=debug_retain_intermediates,
+            progress_callback=_progress_callback if ui_callback is not None or stage_logs is not None else None,
         )
         rows = [result.summary for result in results]
         summary_json_path, summary_csv_path = write_summary_rows(
@@ -824,6 +1244,14 @@ def run_motif_benchmark_stage(
             "motif_summary_json_path": str(summary_json_path),
             "motif_summary_csv_path": str(summary_csv_path),
         }
+        debug_log_path = _write_stage_debug_log(
+            paths=paths,
+            stage_name="motif_benchmark",
+            log_lines=stage_logs,
+            persist=debug_retain_intermediates,
+        )
+        if debug_log_path is not None:
+            outputs["debug_log_path"] = str(debug_log_path)
         _set_stage_state(
             states=states,
             paths=paths,
@@ -834,8 +1262,20 @@ def run_motif_benchmark_stage(
             outputs=outputs,
         )
         _sync_run_relatives(paths, ("benchmarks", "reports", "pipeline"))
+        if progress_ui is not None:
+            progress_ui.finish_stage(
+                _build_motif_stage_summary(outputs=outputs, status="complete", debug_log_path=debug_log_path)
+            )
+            progress_ui.advance_pipeline()
         return outputs
     except Exception as exc:
+        debug_log_path = _write_stage_debug_log(
+            paths=paths,
+            stage_name="motif_benchmark",
+            log_lines=stage_logs,
+            error_message=str(exc),
+            persist=True,
+        )
         _set_stage_state(
             states=states,
             paths=paths,
@@ -843,8 +1283,16 @@ def run_motif_benchmark_stage(
             status="failed",
             config_hash=config_hash,
             inputs=inputs,
+            outputs=({"debug_log_path": str(debug_log_path)} if debug_log_path is not None else None),
             error_message=str(exc),
         )
+        if progress_ui is not None:
+            progress_ui.fail_stage(
+                stage_name="motif_benchmark",
+                error_message=str(exc),
+                debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
+                tail_lines=stage_logs[-50:],
+            )
         raise
 
 
@@ -857,6 +1305,8 @@ def run_optional_alignment_diagnostic_stage(
     checkpoint_path: str | Path,
     run_stage_alignment_diagnostic: bool,
     neighbor_k: int,
+    progress_ui: NotebookProgressUI | None = None,
+    debug_retain_intermediates: bool = False,
 ) -> dict[str, Any]:
     stage_config = {
         "runtime_experiment_config_path": str(Path(runtime_experiment_config_path).resolve()),
@@ -872,6 +1322,8 @@ def run_optional_alignment_diagnostic_stage(
         "data_config_path": _path_identity(data_config_path),
     }
     if _stage_is_reusable(states=states, stage_name="alignment_diagnostic", config_hash=config_hash, inputs=inputs):
+        if progress_ui is not None:
+            progress_ui.render_stage_summary(_build_reused_stage_summary("alignment_diagnostic"))
         return dict(states["alignment_diagnostic"]["outputs"])
     if not run_stage_alignment_diagnostic:
         outputs = {
@@ -888,6 +1340,9 @@ def run_optional_alignment_diagnostic_stage(
             outputs=outputs,
         )
         _sync_run_relatives(paths, ("pipeline",))
+        if progress_ui is not None:
+            progress_ui.render_stage_summary(_build_alignment_stage_summary(outputs=outputs, status="complete"))
+            progress_ui.advance_pipeline()
         return outputs
 
     _set_stage_state(
@@ -898,6 +1353,9 @@ def run_optional_alignment_diagnostic_stage(
         config_hash=config_hash,
         inputs=inputs,
     )
+    if progress_ui is not None:
+        progress_ui.start_stage(stage_name="alignment_diagnostic", total=1, description="Alignment Diagnostic")
+    stage_logs: list[str] = []
     try:
         output_json_path = paths.diagnostics_root / "session_alignment_summary.json"
         output_csv_path = paths.diagnostics_root / "session_alignment_summary.csv"
@@ -915,6 +1373,14 @@ def run_optional_alignment_diagnostic_stage(
             "alignment_summary_json_path": str(output_json_path),
             "alignment_summary_csv_path": str(output_csv_path),
         }
+        debug_log_path = _write_stage_debug_log(
+            paths=paths,
+            stage_name="alignment_diagnostic",
+            log_lines=stage_logs,
+            persist=debug_retain_intermediates,
+        )
+        if debug_log_path is not None:
+            outputs["debug_log_path"] = str(debug_log_path)
         _set_stage_state(
             states=states,
             paths=paths,
@@ -925,8 +1391,20 @@ def run_optional_alignment_diagnostic_stage(
             outputs=outputs,
         )
         _sync_run_relatives(paths, ("benchmarks", "pipeline"))
+        if progress_ui is not None:
+            progress_ui.finish_stage(
+                _build_alignment_stage_summary(outputs=outputs, status="complete", debug_log_path=debug_log_path)
+            )
+            progress_ui.advance_pipeline()
         return outputs
     except Exception as exc:
+        debug_log_path = _write_stage_debug_log(
+            paths=paths,
+            stage_name="alignment_diagnostic",
+            log_lines=stage_logs,
+            error_message=str(exc),
+            persist=True,
+        )
         _set_stage_state(
             states=states,
             paths=paths,
@@ -934,8 +1412,16 @@ def run_optional_alignment_diagnostic_stage(
             status="failed",
             config_hash=config_hash,
             inputs=inputs,
+            outputs=({"debug_log_path": str(debug_log_path)} if debug_log_path is not None else None),
             error_message=str(exc),
         )
+        if progress_ui is not None:
+            progress_ui.fail_stage(
+                stage_name="alignment_diagnostic",
+                error_message=str(exc),
+                debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
+                tail_lines=stage_logs[-50:],
+            )
         raise
 
 
@@ -944,6 +1430,7 @@ def write_final_project_reports(
     paths: NotebookPipelinePaths,
     states: dict[str, dict[str, Any]],
     run_stage_final_reports: bool = True,
+    progress_ui: NotebookProgressUI | None = None,
 ) -> dict[str, Any]:
     representation_rows = _summary_rows_from_json(
         paths.reports_root / "representation_benchmark_summary.json",
@@ -964,6 +1451,8 @@ def write_final_project_reports(
         "motif_summary_json_path": _path_identity(paths.reports_root / "motif_benchmark_summary.json"),
     }
     if _stage_is_reusable(states=states, stage_name="final_reports", config_hash=config_hash, inputs=inputs):
+        if progress_ui is not None:
+            progress_ui.render_stage_summary(_build_reused_stage_summary("final_reports"))
         return dict(states["final_reports"]["outputs"])
 
     _set_stage_state(
@@ -974,6 +1463,8 @@ def write_final_project_reports(
         config_hash=config_hash,
         inputs=inputs,
     )
+    if progress_ui is not None:
+        progress_ui.start_stage(stage_name="final_reports", total=1, description="Final Reports")
     try:
         summary_payload = build_final_project_summary(
             representation_rows=representation_rows,
@@ -999,6 +1490,9 @@ def write_final_project_reports(
             outputs=outputs,
         )
         _sync_run_relatives(paths, ("reports", "pipeline"))
+        if progress_ui is not None:
+            progress_ui.finish_stage(_build_final_stage_summary(outputs=outputs, status="complete"))
+            progress_ui.advance_pipeline()
         return outputs
     except Exception as exc:
         _set_stage_state(
@@ -1010,6 +1504,13 @@ def write_final_project_reports(
             inputs=inputs,
             error_message=str(exc),
         )
+        if progress_ui is not None:
+            progress_ui.fail_stage(
+                stage_name="final_reports",
+                error_message=str(exc),
+                debug_log_path=None,
+                tail_lines=(),
+            )
         raise
 
 
@@ -1043,6 +1544,8 @@ def run_notebook_pipeline(
     stage_prepared_sessions_locally: bool = False,
     use_experiment_config_as_is: bool = False,
     output_stream: TextIO | None = None,
+    progress_ui: bool = True,
+    notebook_progress_config: NotebookProgressConfig | None = None,
 ) -> NotebookPipelineRunResult:
     resolved_run_id = str(pipeline_run_id).strip() if pipeline_run_id is not None else ""
     if not resolved_run_id:
@@ -1090,6 +1593,12 @@ def run_notebook_pipeline(
         "debug_retain_intermediates": bool(debug_retain_intermediates),
         "stage_prepared_sessions_locally": bool(stage_prepared_sessions_locally),
         "use_experiment_config_as_is": bool(use_experiment_config_as_is),
+        "progress_ui": bool(progress_ui),
+        "notebook_progress_config": (
+            notebook_progress_config.__dict__
+            if notebook_progress_config is not None
+            else None
+        ),
     }
     paths.pipeline_config_snapshot_path.write_text(
         yaml.safe_dump(pipeline_config_payload, sort_keys=False),
@@ -1105,6 +1614,31 @@ def run_notebook_pipeline(
     states = _load_pipeline_state(paths.pipeline_state_path)
 
     output_stream = output_stream or __import__("sys").stdout
+    progress_config = notebook_progress_config or NotebookProgressConfig(enabled=bool(progress_ui))
+    notebook_ui = (
+        NotebookProgressUI(config=progress_config, stream=output_stream)
+        if progress_ui and progress_config.enabled
+        else None
+    )
+    enabled_stage_names = [
+        name
+        for name, enabled in (
+            ("train", True),
+            ("evaluate", run_stage_evaluate),
+            ("representation_benchmark", run_stage_representation_benchmark),
+            ("motif_benchmark", run_stage_motif_benchmark),
+            ("alignment_diagnostic", run_stage_alignment_diagnostic),
+            ("final_reports", True),
+        )
+        if enabled
+    ]
+    completed_stage_count = sum(
+        1
+        for stage_name in enabled_stage_names
+        if states.get(stage_name, {}).get("status") == "complete"
+    )
+    if notebook_ui is not None:
+        notebook_ui.start_pipeline(total_stages=len(enabled_stage_names), completed_stages=completed_stage_count)
     _ensure_local_dataset_workspace(
         base_experiment_config=base_experiment_config,
         data_config_path=data_config_path,
@@ -1123,6 +1657,8 @@ def run_notebook_pipeline(
         run_stage_train=run_stage_train,
         use_experiment_config_as_is=use_experiment_config_as_is,
         output_stream=output_stream,
+        progress_ui=notebook_ui,
+        debug_retain_intermediates=debug_retain_intermediates,
     )
     runtime_experiment_config_path = Path(train_outputs["runtime_experiment_config_path"])
     checkpoint_path = Path(train_outputs["checkpoint_path"])
@@ -1135,6 +1671,8 @@ def run_notebook_pipeline(
         data_config_path=data_config_path,
         checkpoint_path=checkpoint_path,
         run_stage_evaluate=run_stage_evaluate,
+        progress_ui=notebook_ui,
+        debug_retain_intermediates=debug_retain_intermediates,
     )
 
     representation_task_specs = _select_task_specs(
@@ -1170,6 +1708,8 @@ def run_notebook_pipeline(
         session_holdout_fraction=session_holdout_fraction,
         session_holdout_seed=session_holdout_seed,
         neighbor_k=neighbor_k,
+        progress_ui=notebook_ui,
+        debug_retain_intermediates=debug_retain_intermediates,
     )
     motif_outputs = run_motif_benchmark_stage(
         paths=paths,
@@ -1183,6 +1723,7 @@ def run_notebook_pipeline(
         session_holdout_fraction=session_holdout_fraction,
         session_holdout_seed=session_holdout_seed,
         debug_retain_intermediates=debug_retain_intermediates,
+        progress_ui=notebook_ui,
     )
     alignment_outputs = run_optional_alignment_diagnostic_stage(
         paths=paths,
@@ -1192,8 +1733,12 @@ def run_notebook_pipeline(
         checkpoint_path=checkpoint_path,
         run_stage_alignment_diagnostic=run_stage_alignment_diagnostic,
         neighbor_k=neighbor_k,
+        progress_ui=notebook_ui,
+        debug_retain_intermediates=debug_retain_intermediates,
     )
-    final_outputs = write_final_project_reports(paths=paths, states=states)
+    final_outputs = write_final_project_reports(paths=paths, states=states, progress_ui=notebook_ui)
+    if notebook_ui is not None:
+        notebook_ui.finish_pipeline()
 
     return NotebookPipelineRunResult(
         run_id=paths.run_id,
@@ -1260,6 +1805,8 @@ def run_notebook_pipeline_from_config(
         stage_prepared_sessions_locally=config.stage_prepared_sessions_locally,
         use_experiment_config_as_is=True,
         output_stream=output_stream,
+        progress_ui=config.notebook_ui.enabled,
+        notebook_progress_config=config.notebook_ui,
     )
 
 

@@ -6,6 +6,8 @@ from typing import Any
 
 import yaml
 
+from predictive_circuit_coding.utils.notebook import NotebookProgressConfig
+
 
 def _resolve_path(base_dir: Path, value: str | None) -> Path | None:
     if value in (None, ""):
@@ -51,6 +53,7 @@ class NotebookPipelineConfig:
     motif_task_names: tuple[str, ...] | None
     representation_arm_names: tuple[str, ...] | None
     motif_arm_names: tuple[str, ...] | None
+    notebook_ui: NotebookProgressConfig
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -60,6 +63,7 @@ class NotebookPipelineConfig:
             "data_config_path",
             "local_artifact_root",
             "drive_export_root",
+            "source_dataset_root",
         ):
             value = payload.get(key)
             if value is not None:
@@ -77,6 +81,7 @@ def load_notebook_pipeline_config(path: str | Path) -> NotebookPipelineConfig:
     pipeline = dict(raw.get("pipeline") or {})
     tasks = dict(raw.get("tasks") or {})
     arms = dict(raw.get("arms") or {})
+    notebook_ui = dict(raw.get("notebook_ui") or {})
 
     experiment_config_path = _resolve_path(config_dir, str(paths.get("experiment_config_path", "")))
     data_config_path = _resolve_path(config_dir, str(paths.get("data_config_path", "")))
@@ -123,4 +128,19 @@ def load_notebook_pipeline_config(path: str | Path) -> NotebookPipelineConfig:
         motif_task_names=_resolve_names(tasks.get("motifs")),
         representation_arm_names=_resolve_names(arms.get("representation")),
         motif_arm_names=_resolve_names(arms.get("motifs")),
+        notebook_ui=NotebookProgressConfig(
+            enabled=bool(notebook_ui.get("enabled", True)),
+            progress_backend=str(notebook_ui.get("progress_backend", "tqdm")),
+            mode=str(notebook_ui.get("mode", "clean_dashboard")),
+            log_mode=str(notebook_ui.get("log_mode", "failures_only")),
+            leave_pipeline_bar=bool(notebook_ui.get("leave_pipeline_bar", True)),
+            leave_stage_bars=bool(notebook_ui.get("leave_stage_bars", False)),
+            show_stage_summaries=bool(notebook_ui.get("show_stage_summaries", True)),
+            show_artifact_paths=str(notebook_ui.get("show_artifact_paths", "compact")),
+            metric_snapshot_every_n=(
+                int(notebook_ui["metric_snapshot_every_n"])
+                if notebook_ui.get("metric_snapshot_every_n") is not None
+                else None
+            ),
+        ),
     )

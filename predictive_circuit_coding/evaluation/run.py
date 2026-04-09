@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 import torch
 
@@ -15,12 +16,24 @@ from predictive_circuit_coding.training.factories import (
 )
 from predictive_circuit_coding.training.runtime import iter_sampler_batches, resolve_device
 from predictive_circuit_coding.training.step import run_training_step
+from predictive_circuit_coding.utils.notebook import EvaluationProgressEvent
 from predictive_circuit_coding.windowing import (
     FixedWindowConfig,
     build_dataset_bundle,
     build_sequential_fixed_window_sampler,
 )
 from predictive_circuit_coding.evaluation.metrics import aggregate_metric_dicts
+
+
+EvaluationProgressCallback = Callable[[EvaluationProgressEvent], None]
+
+
+def _maybe_emit_evaluation_progress(
+    progress_callback: EvaluationProgressCallback | None,
+    event: EvaluationProgressEvent,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(event)
 
 
 def evaluate_checkpoint_on_split(
@@ -32,6 +45,7 @@ def evaluate_checkpoint_on_split(
     model=None,
     max_batches: int | None = None,
     dataset_view=None,
+    progress_callback: EvaluationProgressCallback | None = None,
 ) -> EvaluationSummary:
     dataset_view = dataset_view or resolve_runtime_dataset_view(
         experiment_config=experiment_config,
@@ -68,13 +82,23 @@ def evaluate_checkpoint_on_split(
     loss_rows: list[dict[str, float]] = []
     batch_weights: list[float] = []
     window_count = 0
+    resolved_max_batches = max_batches or experiment_config.evaluation.max_batches
+    _maybe_emit_evaluation_progress(
+        progress_callback,
+        EvaluationProgressEvent(
+            event_type="split_start",
+            split_name=split_name,
+            total_batches=resolved_max_batches,
+            message=f"evaluating {split_name}",
+        ),
+    )
     with torch.no_grad():
         for batch in iter_sampler_batches(
             dataset=bundle.dataset,
             sampler=sampler,
             collator=tokenizer,
             batch_size=experiment_config.optimization.batch_size,
-            max_batches=max_batches or experiment_config.evaluation.max_batches,
+            max_batches=resolved_max_batches,
         ):
             batch = batch.to(device)
             output = run_training_step(model, objective, batch)
@@ -82,9 +106,20 @@ def evaluate_checkpoint_on_split(
             loss_rows.append(output.losses)
             batch_weights.append(float(output.batch_size))
             window_count += int(output.batch_size)
+            _maybe_emit_evaluation_progress(
+                progress_callback,
+                EvaluationProgressEvent(
+                    event_type="batch",
+                    split_name=split_name,
+                    current_batch=len(metric_rows),
+                    total_batches=resolved_max_batches,
+                    metrics={**output.metrics, **output.losses},
+                    window_count=window_count,
+                ),
+            )
     if hasattr(bundle.dataset, "_close_open_files"):
         bundle.dataset._close_open_files()
-    return EvaluationSummary(
+    summary = EvaluationSummary(
         dataset_id=experiment_config.dataset_id,
         split_name=split_name,
         checkpoint_path=checkpoint_path,
@@ -92,3 +127,16 @@ def evaluate_checkpoint_on_split(
         losses=aggregate_metric_dicts(loss_rows, weights=batch_weights),
         window_count=window_count,
     )
+    _maybe_emit_evaluation_progress(
+        progress_callback,
+        EvaluationProgressEvent(
+            event_type="split_end",
+            split_name=split_name,
+            current_batch=len(metric_rows),
+            total_batches=resolved_max_batches,
+            metrics={**summary.metrics, **summary.losses},
+            window_count=window_count,
+            message=f"finished {split_name}",
+        ),
+    )
+    return summary

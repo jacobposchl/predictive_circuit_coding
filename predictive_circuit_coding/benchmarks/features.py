@@ -543,12 +543,14 @@ def write_collection_token_shards(
     output_dir: str | Path,
     global_transform: GlobalLinearTransform | None = None,
     session_transforms: dict[str, object] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[Path, ...]:
     target_dir = Path(output_dir)
     if target_dir.exists():
         shutil.rmtree(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     output_paths: list[Path] = []
+    total_shards = len(collection.shard_paths)
     for shard_index, shard_path in enumerate(collection.shard_paths):
         payload = torch.load(Path(shard_path), map_location="cpu", weights_only=False)
         embeddings = payload["embeddings"].detach().cpu().to(dtype=torch.float32)
@@ -568,4 +570,5 @@ def write_collection_token_shards(
         output_path = target_dir / f"token_shard_{shard_index:05d}.pt"
         torch.save(output_payload, output_path)
         output_paths.append(output_path)
+        _maybe_update_progress(progress_callback, shard_index + 1, total_shards)
     return tuple(output_paths)
