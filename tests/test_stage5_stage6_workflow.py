@@ -762,7 +762,7 @@ def test_run_representation_comparison_from_encoded_reuses_shared_selected_windo
         assert arm_result.validation_summary["candidate_count"] >= 2
 
 
-def test_run_representation_comparison_from_encoded_records_degraded_arm_instead_of_raising(tmp_path: Path):
+def test_run_representation_comparison_from_encoded_falls_back_when_threshold_selects_no_candidates(tmp_path: Path):
     experiment_config_path = _write_experiment_config(tmp_path)
     experiment_config = load_experiment_config(experiment_config_path)
     experiment_config = replace(
@@ -905,10 +905,10 @@ def test_run_representation_comparison_from_encoded_records_degraded_arm_instead
     )
 
     for arm_result in comparison.arm_results:
-        assert arm_result.validation_summary["comparison_status"] == "degraded"
-        assert arm_result.validation_summary["failure_reason"] == "no_candidates_selected"
-        assert arm_result.validation_summary["candidate_count"] == 0
-        assert arm_result.validation_summary["cluster_count"] == 0
+        candidate_selection = arm_result.validation_summary["candidate_selection_summary"]
+        assert candidate_selection["fallback_used"] is True
+        assert candidate_selection["effective_min_score"] is None
+        assert arm_result.validation_summary["candidate_count"] >= 2
 
 
 def test_train_model_writes_fallback_best_checkpoint_when_validation_metric_is_nan(tmp_path: Path, monkeypatch):

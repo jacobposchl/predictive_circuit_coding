@@ -1430,6 +1430,7 @@ def _flatten_comparison_validation_summary(summary: dict[str, object]) -> dict[s
     standard_test_metrics = standard_validation.get("held_out_test_metrics") or {}
     standard_test_similarity = standard_validation.get("held_out_similarity_summary") or {}
     cluster_quality = summary.get("cluster_quality_summary") or {}
+    candidate_selection = summary.get("candidate_selection_summary") or {}
     return {
         "arm_name": summary.get("arm_name"),
         "transform_mode": summary.get("transform_mode"),
@@ -1440,6 +1441,8 @@ def _flatten_comparison_validation_summary(summary: dict[str, object]) -> dict[s
         "candidate_count": summary.get("candidate_count"),
         "cluster_count": summary.get("cluster_count"),
         "excluded_session_count": len(summary.get("excluded_sessions") or ()),
+        "candidate_selection_fallback_used": candidate_selection.get("fallback_used"),
+        "candidate_selection_effective_min_score": candidate_selection.get("effective_min_score"),
         "discovery_probe_accuracy": discovery_fit.get("probe_accuracy"),
         "discovery_probe_bce": discovery_fit.get("probe_bce"),
         "shuffled_probe_accuracy": shuffled_fit.get("probe_accuracy"),
@@ -1564,6 +1567,7 @@ def build_notebook_discovery_comparison_summary_row(
     standard_validation = validation_payload.get("standard_test_validation") or {}
     standard_test_metrics = standard_validation.get("held_out_test_metrics") or {}
     standard_test_similarity = standard_validation.get("held_out_similarity_summary") or {}
+    candidate_selection = validation_payload.get("candidate_selection_summary") or {}
     return {
         "arm_name": str(arm_name),
         "target_label": discovery_payload.get("decoder_summary", {}).get("target_label"),
@@ -1571,6 +1575,8 @@ def build_notebook_discovery_comparison_summary_row(
         "failure_reason": validation_payload.get("failure_reason"),
         "candidate_count": validation_payload.get("candidate_count"),
         "cluster_count": validation_payload.get("cluster_count"),
+        "candidate_selection_fallback_used": candidate_selection.get("fallback_used"),
+        "candidate_selection_effective_min_score": candidate_selection.get("effective_min_score"),
         "discovery_probe_accuracy": discovery_fit.get("probe_accuracy"),
         "discovery_probe_bce": discovery_fit.get("probe_bce"),
         "shuffled_probe_accuracy": shuffled_fit.get("probe_accuracy"),

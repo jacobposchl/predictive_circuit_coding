@@ -524,6 +524,26 @@ def run_representation_comparison_from_encoded(
             min_score=experiment_config.discovery.min_candidate_score,
             candidate_session_balance_fraction=experiment_config.discovery.candidate_session_balance_fraction,
         )
+        candidate_selection_summary = {
+            "configured_min_score": float(experiment_config.discovery.min_candidate_score),
+            "effective_min_score": float(experiment_config.discovery.min_candidate_score),
+            "fallback_used": False,
+            "top_k_candidates": int(experiment_config.discovery.top_k_candidates),
+        }
+        if not candidates:
+            candidates = select_candidate_tokens_from_shards(
+                shard_paths=transformed_shards,
+                probe_state_dict=probe_fit.state_dict,
+                top_k=experiment_config.discovery.top_k_candidates,
+                min_score=float("-inf"),
+                candidate_session_balance_fraction=experiment_config.discovery.candidate_session_balance_fraction,
+            )
+            candidate_selection_summary = {
+                **candidate_selection_summary,
+                "effective_min_score": None,
+                "fallback_used": True,
+                "fallback_reason": "configured_min_score_selected_no_candidates",
+            }
         if transformed_shards:
             shutil.rmtree(arm_shard_dir)
         failure_reason = None
@@ -625,6 +645,7 @@ def run_representation_comparison_from_encoded(
             "candidate_count": len(clustered_candidates),
             "cluster_count": int(cluster_stats.get("cluster_count", 0)),
             "cluster_quality_summary": cluster_quality_summary,
+            "candidate_selection_summary": candidate_selection_summary,
             "comparison_status": "ok" if failure_reason is None else "degraded",
             "failure_reason": failure_reason,
             "standard_test_validation": standard_validation_summary,
