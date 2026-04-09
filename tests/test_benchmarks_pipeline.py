@@ -26,10 +26,13 @@ from predictive_circuit_coding.data import (
 from predictive_circuit_coding.training import load_experiment_config
 from predictive_circuit_coding.training.loop import train_model
 from predictive_circuit_coding.utils.notebook import (
+    build_pipeline_summary_figure,
+    build_synthetic_pipeline_summary_tables,
     NotebookDatasetConfig,
     NotebookProgressConfig,
     NotebookProgressUI,
     NotebookTrainingConfig,
+    write_synthetic_pipeline_summary_preview,
 )
 from tests.test_stage5_stage6_workflow import _create_prepared_workspace
 
@@ -367,6 +370,34 @@ def test_benchmark_matrices_emit_progress_events(tmp_path: Path) -> None:
         for event in motif_events
         if event.event_type == "arm_step"
     )
+
+
+def test_build_pipeline_summary_figure_renders_synthetic_dashboard() -> None:
+    import matplotlib.pyplot as plt
+
+    tables = build_synthetic_pipeline_summary_tables()
+
+    figure = build_pipeline_summary_figure(
+        representation_df=tables["representation"],
+        motif_df=tables["motif"],
+        final_df=tables["final"],
+    )
+
+    assert len(figure.axes) >= 4
+    titles = [axis.get_title() for axis in figure.axes[:4]]
+    assert "Representation Benchmark" in titles
+    assert "Motif Benchmark" in titles
+    assert "Generalization Gap" in titles
+    assert "Run Summary" in titles
+    plt.close(figure)
+
+
+def test_write_synthetic_pipeline_summary_preview_writes_png(tmp_path: Path) -> None:
+    output_path = write_synthetic_pipeline_summary_preview(tmp_path / "synthetic_pipeline_summary.png")
+
+    assert output_path.is_file()
+    assert output_path.suffix == ".png"
+    assert output_path.stat().st_size > 0
 
 
 def test_run_notebook_pipeline_from_config_uses_repo_config_surface(tmp_path: Path) -> None:

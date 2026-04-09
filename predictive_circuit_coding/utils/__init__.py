@@ -35,6 +35,8 @@ from predictive_circuit_coding.utils.notebook import (
     build_notebook_diagnostics_local_root,
     build_notebook_training_export_path,
     build_notebook_diagnostics_summary_row,
+    build_pipeline_summary_figure,
+    build_synthetic_pipeline_summary_tables,
     build_notebook_preflight_rows,
     build_notebook_discovery_comparison_summary_row,
     build_notebook_alignment_summary_row,
@@ -63,6 +65,7 @@ from predictive_circuit_coding.utils.notebook import (
     run_streaming_command,
     TrainingProgressEvent,
     verify_paths_exist,
+    write_synthetic_pipeline_summary_preview,
     write_notebook_diagnostics_summary,
 )
 
@@ -102,6 +105,8 @@ __all__ = [
     "build_notebook_diagnostics_local_root",
     "build_notebook_training_export_path",
     "build_notebook_diagnostics_summary_row",
+    "build_pipeline_summary_figure",
+    "build_synthetic_pipeline_summary_tables",
     "build_notebook_preflight_rows",
     "build_notebook_discovery_comparison_summary_row",
     "build_notebook_alignment_summary_row",
@@ -130,5 +135,6 @@ __all__ = [
     "run_streaming_command",
     "TrainingProgressEvent",
     "verify_paths_exist",
+    "write_synthetic_pipeline_summary_preview",
     "write_notebook_diagnostics_summary",
 ]

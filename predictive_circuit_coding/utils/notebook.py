@@ -587,6 +587,322 @@ def load_pipeline_display_tables(
     }
 
 
+def build_pipeline_summary_figure(
+    *,
+    representation_df,
+    motif_df,
+    final_df,
+    alignment_df=None,
+    title: str = "Predictive Circuit Coding Summary",
+):
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    def _truncate(label: str, n: int = 30) -> str:
+        return label if len(label) <= n else label[:n - 1] + "\u2026"
+
+    def _empty_axis(axis, heading: str, message: str) -> None:
+        axis.set_title(heading, fontsize=12, fontweight="bold")
+        axis.axis("off")
+        axis.text(0.5, 0.5, message, ha="center", va="center", fontsize=11)
+
+    def _series(values_df, column: str):
+        if values_df is None or getattr(values_df, "empty", True) or column not in values_df.columns:
+            return None
+        numeric = values_df[column]
+        try:
+            return numeric.astype(float)
+        except Exception:
+            return numeric
+
+    n_rep = len(representation_df) if representation_df is not None and not getattr(representation_df, "empty", True) else 0
+    n_motif = len(motif_df) if motif_df is not None and not getattr(motif_df, "empty", True) else 0
+    fig_height = max(11, max(n_rep, n_motif, 4) * 1.2)
+
+    with plt.style.context("seaborn-v0_8-whitegrid"):
+        figure, axes = plt.subplots(2, 2, figsize=(16, fig_height), constrained_layout=True)
+        figure.suptitle(title, fontsize=16, fontweight="bold", y=1.01)
+
+        rep_axis = axes[0, 0]
+        if representation_df is None or getattr(representation_df, "empty", True):
+            _empty_axis(rep_axis, "Representation Benchmark", "No representation rows available.")
+        else:
+            rep_plot_df = representation_df.copy()
+            rep_plot_df["label"] = (
+                rep_plot_df["task_name"].astype(str) + " | " + rep_plot_df["arm_name"].astype(str)
+            ).apply(_truncate)
+            rep_plot_df = rep_plot_df.head(8)
+            x = np.arange(len(rep_plot_df))
+            width = 0.35
+            cross_session = _series(rep_plot_df, "test_probe_pr_auc")
+            within_session = _series(rep_plot_df, "within_session_probe_pr_auc")
+            rep_axis.bar(x, cross_session if cross_session is not None else 0.0, width=width, color="#3b7ddd", alpha=0.85, label="Cross-session PR-AUC")
+            if within_session is not None:
+                rep_axis.scatter(x, within_session, color="#e07a1f", s=60, zorder=3, label="Within-session PR-AUC")
+            rep_axis.set_xticks(x)
+            rep_axis.set_xticklabels(rep_plot_df["label"].tolist(), rotation=40, ha="right", fontsize=8)
+            rep_axis.set_ylim(0.0, 1.05)
+            rep_axis.set_ylabel("Score", fontsize=10)
+            rep_axis.set_title("Representation Benchmark", fontsize=12, fontweight="bold")
+            rep_axis.grid(axis="y", alpha=0.4)
+            rep_axis.legend(loc="upper right", frameon=False, fontsize=9)
+
+        motif_axis = axes[0, 1]
+        if motif_df is None or getattr(motif_df, "empty", True):
+            _empty_axis(motif_axis, "Motif Benchmark", "No motif rows available.")
+        else:
+            motif_plot_df = motif_df.copy()
+            motif_plot_df["label"] = (
+                motif_plot_df["task_name"].astype(str) + " | " + motif_plot_df["arm_name"].astype(str)
+            ).apply(_truncate)
+            motif_plot_df = motif_plot_df.head(8)
+            x = np.arange(len(motif_plot_df))
+            width = 0.5
+            motif_scores = _series(motif_plot_df, "held_out_similarity_pr_auc")
+            cluster_counts = _series(motif_plot_df, "cluster_count")
+            candidate_counts = _series(motif_plot_df, "candidate_count")
+            scores = motif_scores if motif_scores is not None else np.zeros(len(motif_plot_df))
+            motif_axis.bar(x, scores, width=width, color="#2a9d8f", alpha=0.85)
+            if cluster_counts is not None:
+                for index, value in enumerate(cluster_counts.tolist()):
+                    motif_axis.text(
+                        x[index],
+                        float(scores.iloc[index]) * 0.95,
+                        f"k={int(value)}",
+                        va="top",
+                        ha="center",
+                        fontsize=8,
+                        color="white",
+                        fontweight="bold",
+                    )
+            if candidate_counts is not None:
+                for index, value in enumerate(candidate_counts.tolist()):
+                    motif_axis.text(
+                        x[index],
+                        float(scores.iloc[index]) * 0.05,
+                        f"n={int(value)}",
+                        va="bottom",
+                        ha="center",
+                        fontsize=8,
+                        color="white",
+                        fontweight="bold",
+                    )
+            motif_axis.set_xticks(x)
+            motif_axis.set_xticklabels(motif_plot_df["label"].tolist(), rotation=40, ha="right", fontsize=8)
+            motif_axis.set_ylim(0.0, 1.05)
+            motif_axis.set_ylabel("Held-out Motif PR-AUC", fontsize=10)
+            motif_axis.set_title("Motif Benchmark", fontsize=12, fontweight="bold")
+            motif_axis.grid(axis="y", alpha=0.4)
+
+        geometry_axis = axes[1, 0]
+        if representation_df is None or getattr(representation_df, "empty", True):
+            _empty_axis(geometry_axis, "Generalization Gap", "No representation rows available.")
+        else:
+            geo_df = representation_df.copy()
+            geo_df = geo_df.head(8)
+            x_labels = [_truncate(f"{row.task_name}\n{row.arm_name}", n=24) for row in geo_df.itertuples()]
+            x = np.arange(len(geo_df))
+            width = 0.35
+            test_roc = _series(geo_df, "test_probe_roc_auc")
+            within_roc = _series(geo_df, "within_session_probe_roc_auc")
+            geometry_axis.bar(x - width / 2, test_roc if test_roc is not None else 0.0, width=width, color="#577590", label="Cross-session ROC-AUC")
+            if within_roc is not None:
+                geometry_axis.bar(x + width / 2, within_roc, width=width, color="#f4a261", label="Within-session ROC-AUC")
+            geometry_axis.set_xticks(x)
+            geometry_axis.set_xticklabels(x_labels, rotation=40, ha="right", fontsize=8)
+            geometry_axis.set_ylim(0.0, 1.05)
+            geometry_axis.set_ylabel("ROC-AUC", fontsize=10)
+            geometry_axis.set_title("Generalization Gap", fontsize=12, fontweight="bold")
+            geometry_axis.grid(axis="y", alpha=0.4)
+            geometry_axis.legend(loc="upper left", frameon=False, fontsize=9)
+
+        summary_axis = axes[1, 1]
+        summary_axis.axis("off")
+        summary_axis.set_title("Run Summary", fontsize=12, fontweight="bold")
+        summary_lines: list[str] = []
+        if final_df is not None and not getattr(final_df, "empty", True):
+            row = final_df.iloc[0]
+            summary_lines.append(f"Representation rows: {row.get('representation_row_count', 'n/a')}")
+            summary_lines.append(f"Motif rows: {row.get('motif_row_count', 'n/a')}")
+            summary_lines.append(
+                f"Mean representation test PR-AUC: {row.get('representation_mean_test_probe_pr_auc', 'n/a')}"
+            )
+            summary_lines.append(
+                f"Mean motif held-out PR-AUC: {row.get('motif_mean_held_out_similarity_pr_auc', 'n/a')}"
+            )
+            claims = row.get("claims")
+            if isinstance(claims, str):
+                try:
+                    import ast
+
+                    parsed_claims = ast.literal_eval(claims)
+                    if isinstance(parsed_claims, list):
+                        claims = parsed_claims
+                except Exception:
+                    claims = [claims]
+            if isinstance(claims, list):
+                summary_lines.append("")
+                summary_lines.append("Claims:")
+                summary_lines.extend(f"  \u2022 {claim}" for claim in claims[:4])
+        else:
+            summary_lines.append("No final summary rows available.")
+
+        if alignment_df is not None and not getattr(alignment_df, "empty", True):
+            summary_lines.append("")
+            summary_lines.append("Alignment diagnostic present.")
+
+        summary_axis.text(
+            0.05,
+            0.95,
+            "\n".join(summary_lines),
+            ha="left",
+            va="top",
+            fontsize=10,
+            family="monospace",
+            linespacing=1.6,
+        )
+
+    return figure
+
+
+def build_synthetic_pipeline_summary_tables() -> dict[str, Any]:
+    import pandas as pd
+
+    representation_df = pd.DataFrame(
+        [
+            {
+                "task_name": "stimulus_change",
+                "arm_name": "encoder_whitened",
+                "status": "ok",
+                "feature_family": "encoder",
+                "geometry_mode": "whitened",
+                "test_probe_accuracy": 0.78,
+                "test_probe_bce": 0.54,
+                "test_probe_pr_auc": 0.81,
+                "test_probe_roc_auc": 0.79,
+                "within_session_probe_pr_auc": 0.87,
+                "within_session_probe_roc_auc": 0.84,
+            },
+            {
+                "task_name": "trials_go",
+                "arm_name": "encoder_raw",
+                "status": "ok",
+                "feature_family": "encoder",
+                "geometry_mode": "raw",
+                "test_probe_accuracy": 0.71,
+                "test_probe_bce": 0.62,
+                "test_probe_pr_auc": 0.72,
+                "test_probe_roc_auc": 0.71,
+                "within_session_probe_pr_auc": 0.75,
+                "within_session_probe_roc_auc": 0.73,
+            },
+            {
+                "task_name": "stimulus_omitted",
+                "arm_name": "count_patch_mean_pca_whitened",
+                "status": "ok",
+                "feature_family": "count_patch_mean",
+                "geometry_mode": "whitened",
+                "test_probe_accuracy": 0.69,
+                "test_probe_bce": 0.64,
+                "test_probe_pr_auc": 0.68,
+                "test_probe_roc_auc": 0.7,
+                "within_session_probe_pr_auc": 0.74,
+                "within_session_probe_roc_auc": 0.72,
+            },
+        ]
+    )
+    motif_df = pd.DataFrame(
+        [
+            {
+                "task_name": "stimulus_change",
+                "arm_name": "encoder_whitened",
+                "status": "ok",
+                "feature_family": "encoder",
+                "geometry_mode": "whitened",
+                "candidate_count": 32,
+                "cluster_count": 4,
+                "held_out_test_probe_pr_auc": 0.66,
+                "held_out_test_probe_roc_auc": 0.68,
+                "held_out_similarity_pr_auc": 0.61,
+                "held_out_similarity_roc_auc": 0.63,
+                "cluster_persistence_mean": 0.58,
+                "silhouette_score": 0.42,
+            },
+            {
+                "task_name": "trials_go",
+                "arm_name": "encoder_raw",
+                "status": "ok",
+                "feature_family": "encoder",
+                "geometry_mode": "raw",
+                "candidate_count": 24,
+                "cluster_count": 2,
+                "held_out_test_probe_pr_auc": 0.58,
+                "held_out_test_probe_roc_auc": 0.6,
+                "held_out_similarity_pr_auc": 0.54,
+                "held_out_similarity_roc_auc": 0.56,
+                "cluster_persistence_mean": 0.41,
+                "silhouette_score": 0.38,
+            },
+            {
+                "task_name": "stimulus_omitted",
+                "arm_name": "count_patch_mean_pca_whitened",
+                "status": "ok",
+                "feature_family": "count_patch_mean",
+                "geometry_mode": "whitened",
+                "candidate_count": 18,
+                "cluster_count": 3,
+                "held_out_test_probe_pr_auc": 0.52,
+                "held_out_test_probe_roc_auc": 0.57,
+                "held_out_similarity_pr_auc": 0.49,
+                "held_out_similarity_roc_auc": 0.52,
+                "cluster_persistence_mean": 0.36,
+                "silhouette_score": 0.31,
+            },
+        ]
+    )
+    final_df = pd.DataFrame(
+        [
+            {
+                "representation_row_count": len(representation_df),
+                "motif_row_count": len(motif_df),
+                "representation_mean_test_probe_pr_auc": float(representation_df["test_probe_pr_auc"].mean()),
+                "motif_mean_held_out_similarity_pr_auc": float(motif_df["held_out_similarity_pr_auc"].mean()),
+                "claims": [
+                    "representation: encoder_whitened performed best on stimulus_change",
+                    "geometry: whitening improved the top representation row",
+                    "motifs: encoder_whitened produced the strongest held-out motif row",
+                ],
+            }
+        ]
+    )
+    return {
+        "representation": representation_df,
+        "motif": motif_df,
+        "final": final_df,
+    }
+
+
+def write_synthetic_pipeline_summary_preview(
+    output_path: str | Path,
+    *,
+    dpi: int = 160,
+) -> Path:
+    import matplotlib.pyplot as plt
+
+    tables = build_synthetic_pipeline_summary_tables()
+    figure = build_pipeline_summary_figure(
+        representation_df=tables["representation"],
+        motif_df=tables["motif"],
+        final_df=tables["final"],
+        title="Predictive Circuit Coding Summary Preview",
+    )
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(target, dpi=int(dpi), bbox_inches="tight")
+    plt.close(figure)
+    return target
+
+
 @dataclass(frozen=True)
 class NotebookDatasetConfig:
     use_full_dataset: bool = False
