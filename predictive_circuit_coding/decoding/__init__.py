@@ -1,8 +1,11 @@
 from predictive_circuit_coding.decoding.geometry import (
+    summarize_session_alignment_geometry,
     summarize_candidate_neighbor_geometry,
     summarize_neighbor_geometry,
     write_neighbor_geometry_csv,
     write_neighbor_geometry_json,
+    write_session_alignment_csv,
+    write_session_alignment_json,
 )
 from predictive_circuit_coding.decoding.extract import FrozenTokenCollection, extract_frozen_tokens
 from predictive_circuit_coding.decoding.labels import (
@@ -30,6 +33,9 @@ __all__ = [
     "score_token_records",
     "summarize_candidate_neighbor_geometry",
     "summarize_neighbor_geometry",
+    "summarize_session_alignment_geometry",
     "write_neighbor_geometry_csv",
     "write_neighbor_geometry_json",
+    "write_session_alignment_csv",
+    "write_session_alignment_json",
 ]

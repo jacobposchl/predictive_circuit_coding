@@ -145,6 +145,7 @@ Every token and every discovered candidate must remain traceable back to:
 - thin Colab orchestration notebooks
 - no core logic should live here
 - includes training, discovery/validation, and multi-experiment diagnostics notebooks
+  the diagnostics notebook now starts with a session-alignment / alignability experiment and leaves the slower discovery comparisons as explicit opt-in toggles
 
 `documents/`
 

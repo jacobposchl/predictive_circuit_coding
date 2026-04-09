@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import torch
 
-from predictive_circuit_coding.decoding.geometry import summarize_candidate_neighbor_geometry, summarize_neighbor_geometry
+from predictive_circuit_coding.decoding.geometry import (
+    summarize_candidate_neighbor_geometry,
+    summarize_neighbor_geometry,
+    summarize_session_alignment_geometry,
+)
 from predictive_circuit_coding.training.contracts import CandidateTokenRecord
 
 
@@ -114,3 +118,57 @@ def test_summarize_candidate_neighbor_geometry_detects_region_enrichment() -> No
     assert summary["neighbor_k"] == 1
     assert summary["metrics"]["unit_region"]["mean_neighbor_match_fraction"] == 1.0
     assert summary["metrics"]["unit_region"]["enrichment_over_base"] == 3.0
+
+
+def test_summarize_session_alignment_geometry_improves_rotated_label_axes() -> None:
+    features = torch.tensor(
+        [
+            [2.0, 0.0],
+            [1.5, 0.1],
+            [-2.0, 0.0],
+            [-1.5, -0.1],
+            [0.0, 2.0],
+            [-0.1, 1.5],
+            [0.0, -2.0],
+            [0.1, -1.5],
+        ],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([1, 1, 0, 0, 1, 1, 0, 0], dtype=torch.float32)
+    session_ids = (
+        "session_a",
+        "session_a",
+        "session_a",
+        "session_a",
+        "session_b",
+        "session_b",
+        "session_b",
+        "session_b",
+    )
+    subject_ids = (
+        "subject_a",
+        "subject_a",
+        "subject_a",
+        "subject_a",
+        "subject_b",
+        "subject_b",
+        "subject_b",
+        "subject_b",
+    )
+
+    summary = summarize_session_alignment_geometry(
+        features=features,
+        labels=labels,
+        session_ids=session_ids,
+        subject_ids=subject_ids,
+        neighbor_k=1,
+        reference_session_id="session_a",
+    )
+
+    aggregate = summary["aggregate_metrics"]
+    assert summary["reference_session_id"] == "session_a"
+    assert summary["session_count"] == 2
+    assert aggregate["mean_label_axis_cosine_before"] is not None
+    assert aggregate["mean_label_axis_cosine_after"] is not None
+    assert aggregate["mean_label_axis_cosine_after"] > aggregate["mean_label_axis_cosine_before"]
+    assert summary["geometry_aligned"]["metrics"]["session_id"]["mean_neighbor_match_fraction"] < 1.0

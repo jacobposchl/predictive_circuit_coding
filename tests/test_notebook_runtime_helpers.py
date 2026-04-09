@@ -9,10 +9,12 @@ from predictive_circuit_coding.utils import (
     NotebookCommandStreamFormatter,
     NotebookDatasetConfig,
     NotebookDiscoveryRunResult,
+    NotebookAlignmentDiagnosticsRunResult,
     NotebookDiagnosticsExperimentPaths,
     NotebookLocalDatasetStageResult,
     NotebookTrainingConfig,
     NotebookValidationRunResult,
+    build_notebook_alignment_summary_row,
     build_notebook_discovery_runtime_config,
     build_notebook_discovery_export_path,
     build_notebook_diagnostics_experiment_paths,
@@ -678,6 +680,63 @@ def test_build_notebook_diagnostics_experiment_paths_avoids_name_collisions(tmp_
     assert first_paths.runtime_experiment_config_path != second_paths.runtime_experiment_config_path
     assert first_paths.experiment_root.name == "baseline_stimulus_change"
     assert second_paths.experiment_root.name == "image_identity_im111"
+    assert first_paths.alignment_summary_json_path.name == "session_alignment_summary.json"
+    assert second_paths.alignment_summary_csv_path.name == "session_alignment_summary.csv"
+
+
+def test_build_notebook_alignment_summary_row_reads_alignment_metrics(tmp_path: Path) -> None:
+    alignment_summary_path = tmp_path / "alignment_summary.json"
+    alignment_summary_path.write_text(
+        json.dumps(
+            {
+                "reference_session_id": "session_a",
+                "session_count": 2,
+                "sample_count": 8,
+                "aggregate_metrics": {
+                    "mean_label_axis_cosine_before": 0.1,
+                    "mean_label_axis_cosine_after": 0.9,
+                    "mean_positive_centroid_cosine_before": 0.2,
+                    "mean_positive_centroid_cosine_after": 0.8,
+                    "mean_negative_centroid_cosine_before": 0.3,
+                    "mean_negative_centroid_cosine_after": 0.7,
+                    "mean_anchor_rmse_after_alignment": 0.05,
+                },
+                "geometry_original": {
+                    "metrics": {
+                        "label": {"enrichment_over_base": 1.1},
+                        "session_id": {"enrichment_over_base": 3.0},
+                        "subject_id": {"enrichment_over_base": 3.0},
+                    }
+                },
+                "geometry_whitened": {
+                    "metrics": {
+                        "label": {"enrichment_over_base": 1.2},
+                        "session_id": {"enrichment_over_base": 2.0},
+                        "subject_id": {"enrichment_over_base": 2.0},
+                    }
+                },
+                "geometry_aligned": {
+                    "metrics": {
+                        "label": {"enrichment_over_base": 1.5},
+                        "session_id": {"enrichment_over_base": 1.1},
+                        "subject_id": {"enrichment_over_base": 1.1},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    row = build_notebook_alignment_summary_row(
+        experiment_name="session_alignment",
+        alignment_summary_path=alignment_summary_path,
+    )
+
+    assert row["experiment_type"] == "session_alignment"
+    assert row["reference_session_id"] == "session_a"
+    assert row["label_axis_cosine_before"] == 0.1
+    assert row["label_axis_cosine_after"] == 0.9
+    assert row["aligned_session_neighbor_enrichment"] == 1.1
 
 
 def test_export_notebook_diagnostics_artifacts_uses_run_timestamp_layout(tmp_path: Path) -> None:

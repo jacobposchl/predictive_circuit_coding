@@ -861,6 +861,12 @@ class NotebookGeometryDiagnosticsRunResult:
 
 
 @dataclass(frozen=True)
+class NotebookAlignmentDiagnosticsRunResult:
+    alignment_summary_json_path: Path
+    alignment_summary_csv_path: Path
+
+
+@dataclass(frozen=True)
 class NotebookDiagnosticsExperimentPaths:
     experiment_name: str
     experiment_root: Path
@@ -875,6 +881,8 @@ class NotebookDiagnosticsExperimentPaths:
     window_geometry_summary_csv_path: Path
     candidate_geometry_summary_json_path: Path
     candidate_geometry_summary_csv_path: Path
+    alignment_summary_json_path: Path
+    alignment_summary_csv_path: Path
 
 
 def build_notebook_diagnostics_local_root(*, local_artifact_root: str | Path) -> Path:
@@ -911,6 +919,8 @@ def build_notebook_diagnostics_experiment_paths(
         window_geometry_summary_csv_path=experiment_root / "window_geometry_summary.csv",
         candidate_geometry_summary_json_path=experiment_root / "candidate_geometry_summary.json",
         candidate_geometry_summary_csv_path=experiment_root / "candidate_geometry_summary.csv",
+        alignment_summary_json_path=experiment_root / "session_alignment_summary.json",
+        alignment_summary_csv_path=experiment_root / "session_alignment_summary.csv",
     )
 
 
@@ -1425,6 +1435,98 @@ def inspect_notebook_target_field_availability(
     }
 
 
+def run_notebook_session_alignment_diagnostics(
+    *,
+    experiment_config_path: str | Path,
+    data_config_path: str | Path,
+    checkpoint_path: str | Path,
+    neighbor_k: int,
+    output_json_path: str | Path,
+    output_csv_path: str | Path,
+    split_name: str = "discovery",
+    progress_ui: bool = True,
+) -> NotebookAlignmentDiagnosticsRunResult:
+    from tqdm.auto import tqdm
+
+    from predictive_circuit_coding.cli.common import (
+        require_checkpoint_matches_dataset,
+        require_non_empty_split,
+        require_runtime_view,
+    )
+    from predictive_circuit_coding.decoding.extract import extract_selected_discovery_windows
+    from predictive_circuit_coding.decoding.geometry import (
+        summarize_session_alignment_geometry,
+        write_session_alignment_csv,
+        write_session_alignment_json,
+    )
+    from predictive_circuit_coding.discovery import prepare_discovery_collection
+    from predictive_circuit_coding.training import load_experiment_config
+
+    config = load_experiment_config(experiment_config_path)
+    dataset_view = require_runtime_view(experiment_config=config, data_config_path=data_config_path)
+    require_non_empty_split(dataset_view=dataset_view, split_name=split_name)
+    checkpoint = require_checkpoint_matches_dataset(checkpoint_path=checkpoint_path, dataset_id=config.dataset_id)
+    shard_dir = Path(output_json_path).parent / "_tmp_alignment_token_shards"
+
+    plan_bar = tqdm(total=0, desc="Alignment window scan", unit="window", leave=False, disable=not progress_ui)
+
+    def _plan_progress(current: int, total: int | None) -> None:
+        if total is not None and plan_bar.total != total:
+            plan_bar.total = total
+        plan_bar.n = current
+        plan_bar.refresh()
+
+    window_plan = prepare_discovery_collection(
+        experiment_config=config,
+        data_config_path=data_config_path,
+        split_name=split_name,
+        dataset_view=dataset_view,
+        progress_callback=_plan_progress if progress_ui else None,
+    )
+    plan_bar.close()
+
+    encode_bar = tqdm(
+        total=int(window_plan.selected_indices.numel()),
+        desc="Alignment encoding",
+        unit="window",
+        leave=False,
+        disable=not progress_ui,
+    )
+
+    def _encode_progress(current: int, total: int | None) -> None:
+        if total is not None and encode_bar.total != total:
+            encode_bar.total = total
+        encode_bar.n = current
+        encode_bar.refresh()
+
+    encoded = extract_selected_discovery_windows(
+        experiment_config=config,
+        data_config_path=data_config_path,
+        checkpoint_path=checkpoint,
+        window_plan=window_plan,
+        dataset_view=dataset_view,
+        shard_dir=shard_dir,
+        progress_callback=_encode_progress if progress_ui else None,
+    )
+    encode_bar.close()
+
+    summary = summarize_session_alignment_geometry(
+        features=encoded.pooled_features,
+        labels=encoded.labels,
+        session_ids=encoded.window_session_ids,
+        subject_ids=encoded.window_subject_ids,
+        neighbor_k=neighbor_k,
+    )
+    write_session_alignment_json(summary, output_json_path)
+    write_session_alignment_csv(summary, output_csv_path)
+    if shard_dir.exists():
+        shutil.rmtree(shard_dir)
+    return NotebookAlignmentDiagnosticsRunResult(
+        alignment_summary_json_path=Path(output_json_path),
+        alignment_summary_csv_path=Path(output_csv_path),
+    )
+
+
 def run_notebook_geometry_diagnostics(
     *,
     experiment_config_path: str | Path,
@@ -1584,6 +1686,46 @@ def build_notebook_diagnostics_summary_row(
         "candidate_subject_neighbor_enrichment": (((candidate_geometry_payload.get("metrics") or {}).get("subject_id") or {}).get("enrichment_over_base")),
         "candidate_unit_region_neighbor_enrichment": (((candidate_geometry_payload.get("metrics") or {}).get("unit_region") or {}).get("enrichment_over_base")),
         "cluster_summary_path": str(Path(cluster_summary_path)),
+    }
+
+
+def build_notebook_alignment_summary_row(
+    *,
+    experiment_name: str,
+    alignment_summary_path: str | Path,
+) -> dict[str, object]:
+    payload = json.loads(Path(alignment_summary_path).read_text(encoding="utf-8"))
+    original_geometry = payload.get("geometry_original") or {}
+    whitened_geometry = payload.get("geometry_whitened") or {}
+    aligned_geometry = payload.get("geometry_aligned") or {}
+    aggregate = payload.get("aggregate_metrics") or {}
+
+    def _metric(summary: dict[str, object], attribute: str) -> float | None:
+        return (((summary.get("metrics") or {}).get(attribute) or {}).get("enrichment_over_base"))
+
+    return {
+        "experiment_name": str(experiment_name),
+        "experiment_type": "session_alignment",
+        "reference_session_id": payload.get("reference_session_id"),
+        "session_count": payload.get("session_count"),
+        "sample_count": payload.get("sample_count"),
+        "label_axis_cosine_before": aggregate.get("mean_label_axis_cosine_before"),
+        "label_axis_cosine_after": aggregate.get("mean_label_axis_cosine_after"),
+        "positive_centroid_cosine_before": aggregate.get("mean_positive_centroid_cosine_before"),
+        "positive_centroid_cosine_after": aggregate.get("mean_positive_centroid_cosine_after"),
+        "negative_centroid_cosine_before": aggregate.get("mean_negative_centroid_cosine_before"),
+        "negative_centroid_cosine_after": aggregate.get("mean_negative_centroid_cosine_after"),
+        "anchor_rmse_after_alignment": aggregate.get("mean_anchor_rmse_after_alignment"),
+        "raw_label_neighbor_enrichment": _metric(original_geometry, "label"),
+        "raw_session_neighbor_enrichment": _metric(original_geometry, "session_id"),
+        "raw_subject_neighbor_enrichment": _metric(original_geometry, "subject_id"),
+        "whitened_label_neighbor_enrichment": _metric(whitened_geometry, "label"),
+        "whitened_session_neighbor_enrichment": _metric(whitened_geometry, "session_id"),
+        "whitened_subject_neighbor_enrichment": _metric(whitened_geometry, "subject_id"),
+        "aligned_label_neighbor_enrichment": _metric(aligned_geometry, "label"),
+        "aligned_session_neighbor_enrichment": _metric(aligned_geometry, "session_id"),
+        "aligned_subject_neighbor_enrichment": _metric(aligned_geometry, "subject_id"),
+        "alignment_summary_path": str(Path(alignment_summary_path)),
     }
 
 
