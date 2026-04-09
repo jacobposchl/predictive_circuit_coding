@@ -760,6 +760,12 @@ def test_run_representation_comparison_from_encoded_reuses_shared_selected_windo
         assert arm_result.validation_summary["heldout_window_count"] == 4
         assert arm_result.validation_summary["cluster_count"] >= 1
         assert arm_result.validation_summary["candidate_count"] >= 2
+        debug = arm_result.validation_summary["candidate_selection_summary"]["arm_shard_debug"]
+        assert debug["fit_window_count"] == 4
+        assert debug["fit_positive_window_count"] == 2
+        assert debug["token_row_count"] == 8
+        assert debug["positive_token_row_count"] == 4
+        assert debug["window_row_count"] == 4
 
 
 def test_run_representation_comparison_from_encoded_falls_back_when_threshold_selects_no_candidates(tmp_path: Path):
@@ -908,6 +914,11 @@ def test_run_representation_comparison_from_encoded_falls_back_when_threshold_se
         candidate_selection = arm_result.validation_summary["candidate_selection_summary"]
         assert candidate_selection["fallback_used"] is True
         assert candidate_selection["effective_min_score"] is None
+        debug = candidate_selection["arm_shard_debug"]
+        assert debug["fit_window_count"] == 4
+        assert debug["fit_positive_window_count"] == 2
+        assert debug["token_row_count"] == 8
+        assert debug["positive_token_row_count"] == 4
         assert arm_result.validation_summary["candidate_count"] >= 2
 
 

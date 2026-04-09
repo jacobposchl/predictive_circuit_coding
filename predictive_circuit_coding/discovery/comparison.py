@@ -233,6 +233,58 @@ def _copy_or_transform_selected_shards(
     return tuple(output_paths)
 
 
+def _summarize_selected_shards(
+    *,
+    shard_paths: tuple[Path, ...],
+) -> dict[str, Any]:
+    shard_file_count = 0
+    token_row_count = 0
+    positive_token_row_count = 0
+    negative_token_row_count = 0
+    window_keys: set[tuple[str, str, float, float]] = set()
+    positive_window_keys: set[tuple[str, str, float, float]] = set()
+    session_token_counts: dict[str, int] = {}
+    positive_session_token_counts: dict[str, int] = {}
+
+    for shard_path in shard_paths:
+        payload = torch.load(Path(shard_path), map_location="cpu", weights_only=False)
+        embeddings = payload.get("embeddings")
+        labels = payload.get("labels")
+        if embeddings is None or labels is None:
+            continue
+        row_count = int(embeddings.shape[0])
+        shard_file_count += 1
+        token_row_count += row_count
+        for index in range(row_count):
+            session_id = str(payload["session_ids"][index])
+            label = float(labels[index].item())
+            key = _window_key(
+                recording_id=payload["recording_ids"][index],
+                session_id=session_id,
+                window_start_s=float(payload["window_start_s"][index].item()),
+                window_end_s=float(payload["window_end_s"][index].item()),
+            )
+            window_keys.add(key)
+            session_token_counts[session_id] = session_token_counts.get(session_id, 0) + 1
+            if label > 0.0:
+                positive_token_row_count += 1
+                positive_window_keys.add(key)
+                positive_session_token_counts[session_id] = positive_session_token_counts.get(session_id, 0) + 1
+            else:
+                negative_token_row_count += 1
+
+    return {
+        "shard_file_count": shard_file_count,
+        "token_row_count": token_row_count,
+        "positive_token_row_count": positive_token_row_count,
+        "negative_token_row_count": negative_token_row_count,
+        "window_row_count": len(window_keys),
+        "positive_window_row_count": len(positive_window_keys),
+        "session_token_counts": session_token_counts,
+        "positive_session_token_counts": positive_session_token_counts,
+    }
+
+
 def _fit_shuffled_probe_features(
     *,
     features: torch.Tensor,
@@ -420,6 +472,16 @@ def run_representation_comparison_from_encoded(
     heldout_tokens = encoded.token_tensors.index_select(0, heldout_indices)
     heldout_token_mask = encoded.token_mask.index_select(0, heldout_indices)
     heldout_session_ids = _subset_tuple(encoded.window_session_ids, heldout_indices)
+    fit_positive_window_count = int((fit_labels > 0.0).sum().item())
+    fit_negative_window_count = int((fit_labels <= 0.0).sum().item())
+    heldout_positive_window_count = int((heldout_labels > 0.0).sum().item())
+    heldout_negative_window_count = int((heldout_labels <= 0.0).sum().item())
+    fit_session_window_counts: dict[str, int] = {}
+    fit_positive_session_window_counts: dict[str, int] = {}
+    for session_id, label in zip(fit_session_ids, fit_labels.detach().cpu().tolist(), strict=False):
+        fit_session_window_counts[str(session_id)] = fit_session_window_counts.get(str(session_id), 0) + 1
+        if float(label) > 0.0:
+            fit_positive_session_window_counts[str(session_id)] = fit_positive_session_window_counts.get(str(session_id), 0) + 1
 
     temp_root = Path(temporary_root)
     temp_root.mkdir(parents=True, exist_ok=True)
@@ -517,6 +579,7 @@ def run_representation_comparison_from_encoded(
             allowed_window_keys=fit_window_keys,
             transforms=transforms,
         )
+        shard_debug_summary = _summarize_selected_shards(shard_paths=transformed_shards)
         candidates = select_candidate_tokens_from_shards(
             shard_paths=transformed_shards,
             probe_state_dict=probe_fit.state_dict,
@@ -544,6 +607,22 @@ def run_representation_comparison_from_encoded(
                 "fallback_used": True,
                 "fallback_reason": "configured_min_score_selected_no_candidates",
             }
+        candidate_selection_summary = {
+            **candidate_selection_summary,
+            "precluster_candidate_count": len(candidates),
+            "arm_shard_debug": {
+                "allowed_fit_window_key_count": len(fit_window_keys),
+                "fit_window_count": int(fit_indices.numel()),
+                "fit_positive_window_count": fit_positive_window_count,
+                "fit_negative_window_count": fit_negative_window_count,
+                "heldout_window_count": int(heldout_indices.numel()),
+                "heldout_positive_window_count": heldout_positive_window_count,
+                "heldout_negative_window_count": heldout_negative_window_count,
+                "fit_session_window_counts": fit_session_window_counts,
+                "fit_positive_session_window_counts": fit_positive_session_window_counts,
+                **shard_debug_summary,
+            },
+        }
         if transformed_shards:
             shutil.rmtree(arm_shard_dir)
         failure_reason = None

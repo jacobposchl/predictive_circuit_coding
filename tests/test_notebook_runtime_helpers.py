@@ -739,6 +739,22 @@ def test_build_notebook_discovery_comparison_summary_row_reads_primary_and_stand
                     "cluster_persistence_mean": 0.4,
                     "silhouette_score": 0.2,
                 },
+                "candidate_selection_summary": {
+                    "fallback_used": True,
+                    "effective_min_score": None,
+                    "precluster_candidate_count": 32,
+                    "arm_shard_debug": {
+                        "allowed_fit_window_key_count": 16,
+                        "fit_positive_window_count": 8,
+                        "fit_negative_window_count": 8,
+                        "shard_file_count": 2,
+                        "token_row_count": 96,
+                        "positive_token_row_count": 48,
+                        "negative_token_row_count": 48,
+                        "window_row_count": 16,
+                        "positive_window_row_count": 8,
+                    },
+                },
                 "standard_test_validation": {
                     "held_out_test_metrics": {"probe_accuracy": 0.58, "probe_bce": 0.67},
                     "held_out_similarity_summary": {"window_roc_auc": 0.57, "window_pr_auc": 0.54},
@@ -764,6 +780,9 @@ def test_build_notebook_discovery_comparison_summary_row_reads_primary_and_stand
     assert row["target_label"] == "stimulus_change"
     assert row["comparison_status"] is None
     assert row["candidate_count"] == 32
+    assert row["candidate_selection_fallback_used"] is True
+    assert row["candidate_selection_precluster_candidate_count"] == 32
+    assert row["debug_shard_positive_token_row_count"] == 48
     assert row["primary_within_session_held_out_probe_accuracy"] == 0.7
     assert row["standard_test_probe_accuracy"] == 0.58
     assert row["transform_type"] == "whitening_only"
