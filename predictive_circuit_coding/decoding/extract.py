@@ -295,6 +295,7 @@ def _write_token_shard(
     *,
     shard_dir: Path,
     shard_index: int,
+    window_batch: list[DiscoveryWindowPlanRecord],
     batch,
     tokens: torch.Tensor,
     labels: torch.Tensor,
@@ -320,6 +321,7 @@ def _write_token_shard(
         sample_tokens = flat_tokens[batch_index]
         sample_mask = flat_mask[batch_index]
         sample_label = int(labels[batch_index].item() > 0.0)
+        window = window_batch[batch_index]
         flat_position = 0
         for unit_index, unit_id in enumerate(batch.provenance.unit_ids[batch_index]):
             for patch_idx in range(tokens.shape[2]):
@@ -328,17 +330,20 @@ def _write_token_shard(
                     continue
                 if bool(sample_mask[flat_position].item()):
                     embeddings.append(sample_tokens[flat_position].detach().cpu())
-                    recording_ids.append(batch.provenance.recording_ids[batch_index])
-                    session_ids.append(batch.provenance.session_ids[batch_index])
-                    subject_ids.append(batch.provenance.subject_ids[batch_index])
+                    # Use the planned selected-window metadata directly so compare-mode filtering
+                    # keys match the discovery-window plan even if sample provenance domain times
+                    # differ slightly from the requested fixed window.
+                    recording_ids.append(str(window.recording_id))
+                    session_ids.append(str(window.session_id))
+                    subject_ids.append(str(window.subject_id))
                     unit_ids.append(unit_id)
                     unit_regions.append(batch.provenance.unit_regions[batch_index][unit_index])
                     unit_depth_um.append(float(batch.provenance.unit_depth_um[batch_index, unit_index].item()))
                     patch_index.append(int(patch_idx))
                     patch_start_s.append(float(batch.provenance.patch_start_s[batch_index, patch_idx].item()))
                     patch_end_s.append(float(batch.provenance.patch_end_s[batch_index, patch_idx].item()))
-                    window_start_s.append(float(batch.provenance.window_start_s[batch_index].item()))
-                    window_end_s.append(float(batch.provenance.window_end_s[batch_index].item()))
+                    window_start_s.append(float(window.window_start_s))
+                    window_end_s.append(float(window.window_end_s))
                     window_labels.append(sample_label)
                 flat_position += 1
 
@@ -449,6 +454,7 @@ def extract_selected_discovery_windows(
             shard_path = _write_token_shard(
                 shard_dir=shard_root,
                 shard_index=shard_index,
+                window_batch=window_batch,
                 batch=batch,
                 tokens=output.tokens.detach().cpu(),
                 labels=labels,

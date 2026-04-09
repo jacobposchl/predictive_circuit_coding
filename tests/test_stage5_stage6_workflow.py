@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -28,6 +29,7 @@ from predictive_circuit_coding.decoding.extract import (
     DiscoveryWindowPlan,
     DiscoveryWindowPlanRecord,
     EncodedDiscoverySelection,
+    _write_token_shard,
 )
 from predictive_circuit_coding.discovery import run_representation_comparison_from_encoded
 from predictive_circuit_coding.training import load_experiment_config, train_model
@@ -920,6 +922,54 @@ def test_run_representation_comparison_from_encoded_falls_back_when_threshold_se
         assert debug["token_row_count"] == 8
         assert debug["positive_token_row_count"] == 4
         assert arm_result.validation_summary["candidate_count"] >= 2
+
+
+def test_write_token_shard_uses_planned_window_metadata_for_matching_keys(tmp_path: Path):
+    shard_dir = tmp_path / "token_shards"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    window_batch = [
+        DiscoveryWindowPlanRecord(
+            recording_id="allen_visual_behavior_neuropixels/session_a",
+            session_id="session_a",
+            subject_id="subject_a",
+            window_start_s=10.0,
+            window_end_s=11.0,
+            label=1.0,
+        )
+    ]
+    batch = SimpleNamespace(
+        patch_mask=torch.tensor([[[True, True]]], dtype=torch.bool),
+        provenance=SimpleNamespace(
+            unit_ids=(("unit_a",),),
+            unit_regions=(("VISp",),),
+            unit_depth_um=torch.tensor([[125.0]], dtype=torch.float32),
+            patch_start_s=torch.tensor([[10.0, 10.5]], dtype=torch.float32),
+            patch_end_s=torch.tensor([[10.5, 11.0]], dtype=torch.float32),
+            window_start_s=torch.tensor([0.0], dtype=torch.float32),
+            window_end_s=torch.tensor([99.0], dtype=torch.float32),
+            recording_ids=("mismatched_recording",),
+            session_ids=("mismatched_session",),
+            subject_ids=("mismatched_subject",),
+        ),
+    )
+    tokens = torch.tensor([[[[1.0, 0.0], [0.5, 0.0]]]], dtype=torch.float32)
+    labels = torch.tensor([1.0], dtype=torch.float32)
+
+    shard_path = _write_token_shard(
+        shard_dir=shard_dir,
+        shard_index=0,
+        window_batch=window_batch,
+        batch=batch,
+        tokens=tokens,
+        labels=labels,
+    )
+
+    payload = torch.load(shard_path, map_location="cpu", weights_only=False)
+    assert payload["recording_ids"] == ["allen_visual_behavior_neuropixels/session_a"] * 2
+    assert payload["session_ids"] == ["session_a"] * 2
+    assert payload["subject_ids"] == ["subject_a"] * 2
+    assert torch.equal(payload["window_start_s"], torch.tensor([10.0, 10.0], dtype=torch.float32))
+    assert torch.equal(payload["window_end_s"], torch.tensor([11.0, 11.0], dtype=torch.float32))
 
 
 def test_train_model_writes_fallback_best_checkpoint_when_validation_metric_is_nan(tmp_path: Path, monkeypatch):
