@@ -58,8 +58,13 @@ class DiscoveryWindowPlan:
 class EncodedDiscoverySelection:
     pooled_features: torch.Tensor
     labels: torch.Tensor
+    token_tensors: torch.Tensor
+    token_mask: torch.Tensor
+    window_recording_ids: tuple[str, ...]
     window_session_ids: tuple[str, ...]
     window_subject_ids: tuple[str, ...]
+    window_start_s: tuple[float, ...]
+    window_end_s: tuple[float, ...]
     shard_paths: tuple[Path, ...]
     coverage_summary: DiscoveryCoverageSummary
     encoder_device: str
@@ -402,9 +407,14 @@ def extract_selected_discovery_windows(
     shard_root.mkdir(parents=True, exist_ok=True)
 
     pooled_feature_chunks: list[torch.Tensor] = []
+    token_tensor_chunks: list[torch.Tensor] = []
+    token_mask_chunks: list[torch.Tensor] = []
     label_chunks: list[torch.Tensor] = []
+    window_recording_ids: list[str] = []
     window_session_ids: list[str] = []
     window_subject_ids: list[str] = []
+    window_start_s: list[float] = []
+    window_end_s: list[float] = []
     shard_paths: list[Path] = []
     shard_index = 0
     processed_windows = 0
@@ -428,9 +438,14 @@ def extract_selected_discovery_windows(
             flat_tokens = output.tokens.detach().cpu().reshape(output.tokens.shape[0], -1, output.tokens.shape[-1])
             flat_mask = output.patch_mask.detach().cpu().reshape(output.patch_mask.shape[0], -1)
             pooled_feature_chunks.append(_pooled_features_from_tokens(flat_tokens, flat_mask))
+            token_tensor_chunks.append(flat_tokens)
+            token_mask_chunks.append(flat_mask)
             label_chunks.append(labels)
+            window_recording_ids.extend(window.recording_id for window in window_batch)
             window_session_ids.extend(window.session_id for window in window_batch)
             window_subject_ids.extend(window.subject_id for window in window_batch)
+            window_start_s.extend(float(window.window_start_s) for window in window_batch)
+            window_end_s.extend(float(window.window_end_s) for window in window_batch)
             shard_path = _write_token_shard(
                 shard_dir=shard_root,
                 shard_index=shard_index,
@@ -447,11 +462,33 @@ def extract_selected_discovery_windows(
     if hasattr(bundle.dataset, "_close_open_files"):
         bundle.dataset._close_open_files()
 
+    if token_tensor_chunks:
+        max_seq_len = max(chunk.shape[1] for chunk in token_tensor_chunks)
+        total_windows = sum(chunk.shape[0] for chunk in token_tensor_chunks)
+        token_dim = token_tensor_chunks[0].shape[2]
+        token_tensors = torch.zeros((total_windows, max_seq_len, token_dim), dtype=torch.float32)
+        token_mask = torch.zeros((total_windows, max_seq_len), dtype=torch.bool)
+        offset = 0
+        for token_chunk, mask_chunk in zip(token_tensor_chunks, token_mask_chunks):
+            count = int(token_chunk.shape[0])
+            seq_len = int(token_chunk.shape[1])
+            token_tensors[offset : offset + count, :seq_len] = token_chunk
+            token_mask[offset : offset + count, :seq_len] = mask_chunk
+            offset += count
+    else:
+        token_tensors = torch.empty((0, 0, 0), dtype=torch.float32)
+        token_mask = torch.empty((0, 0), dtype=torch.bool)
+
     return EncodedDiscoverySelection(
         pooled_features=torch.cat(pooled_feature_chunks, dim=0) if pooled_feature_chunks else torch.empty((0, 0), dtype=torch.float32),
         labels=torch.cat(label_chunks, dim=0) if label_chunks else torch.empty((0,), dtype=torch.float32),
+        token_tensors=token_tensors,
+        token_mask=token_mask,
+        window_recording_ids=tuple(window_recording_ids),
         window_session_ids=tuple(window_session_ids),
         window_subject_ids=tuple(window_subject_ids),
+        window_start_s=tuple(window_start_s),
+        window_end_s=tuple(window_end_s),
         shard_paths=tuple(shard_paths),
         coverage_summary=window_plan.coverage_summary,
         encoder_device=str(device),

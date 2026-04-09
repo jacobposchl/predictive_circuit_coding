@@ -9,17 +9,22 @@ from predictive_circuit_coding.utils import (
     NotebookCommandStreamFormatter,
     NotebookDatasetConfig,
     NotebookDiscoveryRunResult,
+    NotebookDiscoveryComparisonPaths,
     NotebookAlignmentDiagnosticsRunResult,
     NotebookDiagnosticsExperimentPaths,
     NotebookLocalDatasetStageResult,
     NotebookTrainingConfig,
     NotebookValidationRunResult,
     build_notebook_alignment_summary_row,
+    build_notebook_discovery_comparison_local_root,
+    build_notebook_discovery_comparison_paths,
+    build_notebook_discovery_comparison_summary_row,
     build_notebook_discovery_runtime_config,
     build_notebook_discovery_export_path,
     build_notebook_diagnostics_experiment_paths,
     build_notebook_diagnostics_export_path,
     describe_notebook_compute_targets,
+    export_notebook_discovery_comparison_artifacts,
     export_notebook_discovery_artifacts,
     export_notebook_diagnostics_artifacts,
     export_notebook_training_artifacts,
@@ -684,6 +689,85 @@ def test_build_notebook_diagnostics_experiment_paths_avoids_name_collisions(tmp_
     assert second_paths.alignment_summary_csv_path.name == "session_alignment_summary.csv"
 
 
+def test_build_notebook_discovery_comparison_paths_groups_three_arms(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_best.pt"
+    paths = build_notebook_discovery_comparison_paths(
+        local_artifact_root=tmp_path / "artifacts",
+        checkpoint_path=checkpoint_path,
+        decode_type="stimulus_change",
+    )
+
+    assert isinstance(paths, NotebookDiscoveryComparisonPaths)
+    assert paths.comparison_root == build_notebook_discovery_comparison_local_root(
+        local_artifact_root=tmp_path / "artifacts",
+        decode_type="stimulus_change",
+    )
+    assert paths.baseline.arm_root.name == "baseline"
+    assert paths.whitening_only.arm_root.name == "whitening_only"
+    assert paths.whitening_plus_held_out_alignment.arm_root.name == "whitening_plus_held_out_alignment"
+    assert paths.comparison_summary_json_path.name == "comparison_summary.json"
+    assert paths.decode_coverage_summary_path.name == "decode_coverage_summary.json"
+
+
+def test_build_notebook_discovery_comparison_summary_row_reads_primary_and_standard_metrics(tmp_path: Path) -> None:
+    discovery_artifact_path = tmp_path / "discovery.json"
+    discovery_artifact_path.write_text(
+        json.dumps({"decoder_summary": {"target_label": "stimulus_change"}}),
+        encoding="utf-8",
+    )
+    validation_summary_path = tmp_path / "validation.json"
+    validation_summary_path.write_text(
+        json.dumps(
+            {
+                "candidate_count": 32,
+                "cluster_count": 2,
+                "reference_session_id": "session_a",
+                "excluded_sessions": [{"session_id": "session_x"}],
+                "discovery_fit_metrics": {"probe_accuracy": 0.8, "probe_bce": 0.5},
+                "shuffled_fit_metrics": {"probe_accuracy": 0.55, "probe_bce": 0.69},
+                "primary_held_out_metrics": {
+                    "probe_accuracy": 0.7,
+                    "probe_bce": 0.6,
+                    "probe_roc_auc": 0.72,
+                    "probe_pr_auc": 0.73,
+                },
+                "primary_held_out_similarity_summary": {
+                    "window_roc_auc": 0.61,
+                    "window_pr_auc": 0.62,
+                },
+                "cluster_quality_summary": {
+                    "cluster_persistence_mean": 0.4,
+                    "silhouette_score": 0.2,
+                },
+                "standard_test_validation": {
+                    "held_out_test_metrics": {"probe_accuracy": 0.58, "probe_bce": 0.67},
+                    "held_out_similarity_summary": {"window_roc_auc": 0.57, "window_pr_auc": 0.54},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    cluster_summary_path = tmp_path / "cluster_summary.json"
+    cluster_summary_path.write_text(json.dumps({"cluster_count": 2}), encoding="utf-8")
+    transform_summary_path = tmp_path / "transform_summary.json"
+    transform_summary_path.write_text(json.dumps({"transform_type": "whitening_only"}), encoding="utf-8")
+
+    row = build_notebook_discovery_comparison_summary_row(
+        arm_name="whitening_only",
+        discovery_artifact_path=discovery_artifact_path,
+        validation_summary_path=validation_summary_path,
+        cluster_summary_path=cluster_summary_path,
+        transform_summary_path=transform_summary_path,
+    )
+
+    assert row["arm_name"] == "whitening_only"
+    assert row["target_label"] == "stimulus_change"
+    assert row["candidate_count"] == 32
+    assert row["primary_within_session_held_out_probe_accuracy"] == 0.7
+    assert row["standard_test_probe_accuracy"] == 0.58
+    assert row["transform_type"] == "whitening_only"
+
+
 def test_build_notebook_alignment_summary_row_reads_alignment_metrics(tmp_path: Path) -> None:
     alignment_summary_path = tmp_path / "alignment_summary.json"
     alignment_summary_path.write_text(
@@ -737,6 +821,41 @@ def test_build_notebook_alignment_summary_row_reads_alignment_metrics(tmp_path: 
     assert row["label_axis_cosine_before"] == 0.1
     assert row["label_axis_cosine_after"] == 0.9
     assert row["aligned_session_neighbor_enrichment"] == 1.1
+
+
+def test_export_notebook_discovery_comparison_artifacts_uses_grouped_attempt_layout(tmp_path: Path) -> None:
+    local_root = build_notebook_discovery_comparison_local_root(
+        local_artifact_root=tmp_path / "artifacts",
+        decode_type="stimulus_change",
+    )
+    (local_root / "baseline").mkdir(parents=True, exist_ok=True)
+    (local_root / "baseline" / "summary.json").write_text("{}", encoding="utf-8")
+    (local_root / "comparison_summary.json").write_text("{}", encoding="utf-8")
+
+    export_path = export_notebook_discovery_comparison_artifacts(
+        drive_export_root=tmp_path / "exports",
+        local_artifact_root=tmp_path / "artifacts",
+        run_id="run_20240102_010101",
+        decode_type="stimulus_change",
+        attempt_timestamp="20240102_030405",
+    )
+
+    expected_path = build_notebook_discovery_export_path(
+        drive_export_root=tmp_path / "exports",
+        run_id="run_20240102_010101",
+        decode_type="stimulus_change",
+        attempt_timestamp="20240102_030405",
+    )
+    assert export_path == expected_path
+    assert (export_path / "baseline" / "summary.json").is_file()
+    assert (export_path / "comparison_summary.json").is_file()
+
+
+def test_discovery_notebook_json_parses() -> None:
+    notebook_path = Path(__file__).resolve().parents[1] / "notebooks" / "discover_validate_inspect_colab.ipynb"
+    payload = json.loads(notebook_path.read_text(encoding="utf-8"))
+    assert isinstance(payload.get("cells"), list)
+    assert len(payload["cells"]) >= 10
 
 
 def test_export_notebook_diagnostics_artifacts_uses_run_timestamp_layout(tmp_path: Path) -> None:

@@ -24,8 +24,14 @@ from predictive_circuit_coding.data import (
     write_temporaldata_session,
 )
 from predictive_circuit_coding.decoding import fit_additive_probe
+from predictive_circuit_coding.decoding.extract import (
+    DiscoveryWindowPlan,
+    DiscoveryWindowPlanRecord,
+    EncodedDiscoverySelection,
+)
+from predictive_circuit_coding.discovery import run_representation_comparison_from_encoded
 from predictive_circuit_coding.training import load_experiment_config, train_model
-from predictive_circuit_coding.training.contracts import EvaluationSummary
+from predictive_circuit_coding.training.contracts import DiscoveryCoverageSummary, EvaluationSummary
 from predictive_circuit_coding.utils import collect_notebook_target_value_counts
 from predictive_circuit_coding.utils import inspect_notebook_target_field_availability
 
@@ -601,6 +607,159 @@ def test_inspect_notebook_target_field_availability_reports_session_level_image_
     assert session_row["has_namespace"] is True
     assert session_row["has_field"] is True
     assert session_row["preview_values"] == ("im0", "im1", "im2", "im3")
+
+
+def test_run_representation_comparison_from_encoded_reuses_shared_selected_windows(tmp_path: Path):
+    experiment_config_path = _write_experiment_config(tmp_path)
+    experiment_config = load_experiment_config(experiment_config_path)
+    checkpoint_path = tmp_path / "artifacts" / "checkpoints" / "pcc_test_best.pt"
+
+    def _embed(x: float, y: float) -> tuple[float, ...]:
+        values = [0.0] * int(experiment_config.model.d_model)
+        values[0] = x
+        values[1] = y
+        return tuple(values)
+
+    windows = (
+        ("session_a", "subject_a", 0.0, 1.0, 1.0, _embed(2.0, 0.0), (_embed(2.1, 0.0), _embed(1.9, 0.1))),
+        ("session_a", "subject_a", 1.0, 2.0, 1.0, _embed(1.8, 0.2), (_embed(1.9, 0.1), _embed(1.7, 0.2))),
+        ("session_a", "subject_a", 2.0, 3.0, 0.0, _embed(-2.0, 0.0), (_embed(-2.1, 0.0), _embed(-1.9, -0.1))),
+        ("session_a", "subject_a", 3.0, 4.0, 0.0, _embed(-1.8, -0.2), (_embed(-1.9, -0.1), _embed(-1.7, -0.2))),
+        ("session_b", "subject_b", 0.0, 1.0, 1.0, _embed(0.0, 2.0), (_embed(0.0, 2.1), _embed(0.1, 1.9))),
+        ("session_b", "subject_b", 1.0, 2.0, 1.0, _embed(-0.2, 1.8), (_embed(-0.1, 1.9), _embed(-0.2, 1.7))),
+        ("session_b", "subject_b", 2.0, 3.0, 0.0, _embed(0.0, -2.0), (_embed(0.0, -2.1), _embed(-0.1, -1.9))),
+        ("session_b", "subject_b", 3.0, 4.0, 0.0, _embed(0.2, -1.8), (_embed(0.1, -1.9), _embed(0.2, -1.7))),
+    )
+    recording_ids = tuple(f"allen_visual_behavior_neuropixels/{session_id}" for session_id, *_ in windows)
+    session_ids = tuple(row[0] for row in windows)
+    subject_ids = tuple(row[1] for row in windows)
+    labels = torch.tensor([row[4] for row in windows], dtype=torch.float32)
+    pooled_features = torch.tensor([row[5] for row in windows], dtype=torch.float32)
+    token_tensors = torch.tensor([[list(token) for token in row[6]] for row in windows], dtype=torch.float32)
+    token_mask = torch.ones((len(windows), 2), dtype=torch.bool)
+    shard_dir = tmp_path / "shards"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    shard_path = shard_dir / "token_shard_00000.pt"
+    shard_embeddings: list[tuple[float, ...]] = []
+    shard_recording_ids: list[str] = []
+    shard_session_ids: list[str] = []
+    shard_subject_ids: list[str] = []
+    shard_unit_ids: list[str] = []
+    shard_regions: list[str] = []
+    shard_depths: list[float] = []
+    shard_patch_index: list[int] = []
+    shard_patch_start_s: list[float] = []
+    shard_patch_end_s: list[float] = []
+    shard_window_start_s: list[float] = []
+    shard_window_end_s: list[float] = []
+    shard_labels: list[int] = []
+    for window_index, (session_id, subject_id, start_s, end_s, label, _, tokens) in enumerate(windows):
+        recording_id = f"allen_visual_behavior_neuropixels/{session_id}"
+        for patch_index, token in enumerate(tokens):
+            shard_embeddings.append(token)
+            shard_recording_ids.append(recording_id)
+            shard_session_ids.append(session_id)
+            shard_subject_ids.append(subject_id)
+            shard_unit_ids.append(f"{session_id}_unit_{patch_index}")
+            shard_regions.append("VISp")
+            shard_depths.append(100.0 + float(window_index))
+            shard_patch_index.append(patch_index)
+            shard_patch_start_s.append(float(start_s + (0.5 * patch_index)))
+            shard_patch_end_s.append(float(start_s + (0.5 * (patch_index + 1))))
+            shard_window_start_s.append(float(start_s))
+            shard_window_end_s.append(float(end_s))
+            shard_labels.append(int(label > 0.5))
+    torch.save(
+        {
+            "embeddings": torch.tensor(shard_embeddings, dtype=torch.float32),
+            "recording_ids": shard_recording_ids,
+            "session_ids": shard_session_ids,
+            "subject_ids": shard_subject_ids,
+            "unit_ids": shard_unit_ids,
+            "unit_regions": shard_regions,
+            "unit_depth_um": torch.tensor(shard_depths, dtype=torch.float32),
+            "patch_index": torch.tensor(shard_patch_index, dtype=torch.long),
+            "patch_start_s": torch.tensor(shard_patch_start_s, dtype=torch.float32),
+            "patch_end_s": torch.tensor(shard_patch_end_s, dtype=torch.float32),
+            "window_start_s": torch.tensor(shard_window_start_s, dtype=torch.float32),
+            "window_end_s": torch.tensor(shard_window_end_s, dtype=torch.float32),
+            "labels": torch.tensor(shard_labels, dtype=torch.long),
+        },
+        shard_path,
+    )
+
+    coverage_summary = DiscoveryCoverageSummary(
+        split_name="discovery",
+        target_label="stimulus_change",
+        total_scanned_windows=len(windows),
+        positive_window_count=4,
+        negative_window_count=4,
+        selected_positive_count=4,
+        selected_negative_count=4,
+        sessions_with_positive_windows=("session_a", "session_b"),
+        sampling_strategy="label_balanced",
+        scan_max_batches=4,
+        selected_window_count=len(windows),
+    )
+    window_plan = DiscoveryWindowPlan(
+        split_name="discovery",
+        target_label="stimulus_change",
+        windows=tuple(
+            DiscoveryWindowPlanRecord(
+                recording_id=f"allen_visual_behavior_neuropixels/{session_id}",
+                session_id=session_id,
+                subject_id=subject_id,
+                window_start_s=float(start_s),
+                window_end_s=float(end_s),
+                label=float(label),
+            )
+            for session_id, subject_id, start_s, end_s, label, _, _ in windows
+        ),
+        selected_indices=torch.arange(len(windows), dtype=torch.long),
+        coverage_summary=coverage_summary,
+    )
+    encoded = EncodedDiscoverySelection(
+        pooled_features=pooled_features,
+        labels=labels,
+        token_tensors=token_tensors,
+        token_mask=token_mask,
+        window_recording_ids=recording_ids,
+        window_session_ids=session_ids,
+        window_subject_ids=subject_ids,
+        window_start_s=tuple(float(row[2]) for row in windows),
+        window_end_s=tuple(float(row[3]) for row in windows),
+        shard_paths=(shard_path,),
+        coverage_summary=coverage_summary,
+        encoder_device="cpu",
+    )
+
+    comparison = run_representation_comparison_from_encoded(
+        experiment_config=experiment_config,
+        data_config_path=tmp_path / "unused.yaml",
+        checkpoint_path=checkpoint_path,
+        split_name="discovery",
+        window_plan=window_plan,
+        encoded=encoded,
+        session_holdout_fraction=0.5,
+        session_holdout_seed=23,
+        run_standard_test_validation=False,
+        temporary_root=tmp_path / "comparison_tmp",
+    )
+
+    assert comparison.coverage_summary.selected_window_count == len(windows)
+    assert comparison.split_summary["fit_window_count"] == 4
+    assert comparison.split_summary["heldout_window_count"] == 4
+    assert comparison.split_summary["excluded_sessions"] == []
+    assert {result.arm_name for result in comparison.arm_results} == {
+        "baseline",
+        "whitening_only",
+        "whitening_plus_held_out_alignment",
+    }
+    for arm_result in comparison.arm_results:
+        assert arm_result.validation_summary["fit_window_count"] == 4
+        assert arm_result.validation_summary["heldout_window_count"] == 4
+        assert arm_result.validation_summary["cluster_count"] >= 1
+        assert arm_result.validation_summary["candidate_count"] >= 2
 
 
 def test_train_model_writes_fallback_best_checkpoint_when_validation_metric_is_nan(tmp_path: Path, monkeypatch):

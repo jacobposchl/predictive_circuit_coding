@@ -42,7 +42,7 @@ The canonical local dataset can contain the full processed Allen session store. 
 
 - the training notebook defines the subset with simple scalars like `EXPERIENCE_LEVEL`, `MAX_SESSIONS`, and split fractions
 - the notebook writes an artifact-local runtime subset bundle under `artifacts/runtime_subset/`
-- the discovery notebook restores a selected training `run_id`, reuses that exact saved subset, and exposes `DECODE_TYPE` plus focused discovery/validation overrides in one config cell
+- the discovery notebook restores a selected training `run_id`, reuses that exact saved subset, and now runs a comparison-first three-arm experiment on one `DECODE_TYPE`: `baseline`, `whitening_only`, and `whitening_plus_held_out_alignment`
 
 You can:
 
@@ -63,7 +63,7 @@ They are intentionally thin and call the same CLI surface listed above.
 
 - the training notebook owns subset choice and split fractions
 - the training notebook creates a fresh `run_id` and exports to `pcc_colab_outputs/<run_id>/run_1/train/`
-- the discovery notebook restores `TRAINING_RUN_ID` or the latest exported training run, then writes task-specific attempts under `pcc_colab_outputs/<run_id>/run_1/discovery/<decode_type>__<timestamp>/`
+- the discovery notebook restores `TRAINING_RUN_ID` or the latest exported training run, then writes grouped comparison attempts under `pcc_colab_outputs/<run_id>/run_1/discovery/<decode_type>__<timestamp>/` with per-arm `baseline/`, `whitening_only/`, and `whitening_plus_held_out_alignment/` artifacts plus a shared comparison summary
 - the diagnostics notebook restores the same training run, runs a session-alignment diagnostic first by default, and writes grouped outputs under `pcc_colab_outputs/<run_id>/run_1/diagnostics/<timestamp>/`
 - discovery supports both capped `sequential` planning and `label_balanced` planning with explicit `max_batches`, `search_max_batches`, `min_positive_windows`, and `negative_to_positive_ratio` controls
 - major Allen decode targets default to event-local onset labeling rather than broad overlap labeling

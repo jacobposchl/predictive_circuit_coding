@@ -1,5 +1,10 @@
 from predictive_circuit_coding.discovery.candidates import select_candidate_tokens
 from predictive_circuit_coding.discovery.clustering import cluster_candidate_tokens
+from predictive_circuit_coding.discovery.comparison import (
+    RepresentationComparisonArmResult,
+    RepresentationComparisonRunResult,
+    run_representation_comparison_from_encoded,
+)
 from predictive_circuit_coding.discovery.reporting import (
     build_discovery_cluster_report,
     write_discovery_cluster_report_csv,
@@ -17,12 +22,15 @@ from predictive_circuit_coding.discovery.stability import estimate_clustering_st
 
 __all__ = [
     "DiscoveryRunResult",
+    "RepresentationComparisonArmResult",
+    "RepresentationComparisonRunResult",
     "build_discovery_cluster_report",
     "cluster_candidate_tokens",
     "discover_motifs",
     "discover_motifs_from_plan",
     "estimate_clustering_stability",
     "prepare_discovery_collection",
+    "run_representation_comparison_from_encoded",
     "select_candidate_tokens",
     "write_discovery_cluster_report_csv",
     "write_discovery_cluster_report_json",

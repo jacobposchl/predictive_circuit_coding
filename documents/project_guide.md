@@ -364,7 +364,7 @@ The repo now treats the full processed session store as canonical. The normal Co
 
 - the training notebook defines the subset with simple scalars such as `EXPERIENCE_LEVEL`, `MAX_SESSIONS`, and split fractions
 - the notebook writes an artifact-local runtime subset bundle under `artifacts/runtime_subset/`
-- the discovery notebook restores a selected training `run_id`, reuses that saved runtime config and exact subset, then applies a decode-task-first config cell with focused discovery/validation overrides
+- the discovery notebook restores a selected training `run_id`, reuses that saved runtime config and exact subset, then applies a decode-task-first config cell with focused discovery budgets plus comparison controls for `baseline`, `whitening_only`, and `whitening_plus_held_out_alignment`
 
 The runtime subset bundle includes:
 
@@ -509,11 +509,12 @@ Responsibilities:
 
 - reuse the saved training runtime config and subset
 - select `TRAINING_RUN_ID` or default to the latest exported training run
-- select a decode target first, then optional focused discovery/validation overrides in the same config cell
-- run discovery
-- run validation
+- select a decode target first, then shared discovery budgets plus comparison controls such as `SESSION_HOLDOUT_FRACTION`, `SESSION_HOLDOUT_SEED`, and `INSPECT_ARM`
+- run one grouped three-arm comparison on the same selected discovery windows
+- treat the within-session held-out benchmark as the primary comparison across arms
+- keep standard cross-session test validation as a secondary metric for `baseline` and `whitening_only`
 - export each notebook attempt to `pcc_colab_outputs/<run_id>/run_1/discovery/<decode_type>__<timestamp>/`
-- inspect decode coverage, cluster summaries, held-out probe transfer, and held-out motif-similarity outputs directly in notebook tables
+- inspect shared decode coverage, combined comparison summaries, and one selected arm's cluster / validation / transform summaries directly in notebook tables
 
 ### Notebook rules
 
