@@ -4,6 +4,7 @@ from importlib import import_module
 
 _CONFIG_EXPORTS = {
     "ArtifactConfig",
+    "CrossSessionAugConfig",
     "DataRuntimeConfig",
     "DatasetSelectionConfig",
     "DiscoveryConfig",

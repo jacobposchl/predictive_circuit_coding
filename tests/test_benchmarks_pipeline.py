@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import textwrap
 
+import yaml
+
 from predictive_circuit_coding.benchmarks import (
     load_notebook_pipeline_config,
     run_notebook_pipeline,
@@ -23,11 +25,12 @@ from predictive_circuit_coding.data import (
     write_session_catalog,
     write_session_catalog_csv,
 )
-from predictive_circuit_coding.training import load_experiment_config
+from predictive_circuit_coding.training import load_experiment_config, load_training_checkpoint
 from predictive_circuit_coding.training.loop import train_model
 from predictive_circuit_coding.utils.notebook import (
     build_pipeline_summary_figure,
     build_synthetic_pipeline_summary_tables,
+    load_pipeline_display_tables,
     NotebookDatasetConfig,
     NotebookProgressConfig,
     NotebookProgressUI,
@@ -35,6 +38,36 @@ from predictive_circuit_coding.utils.notebook import (
     write_synthetic_pipeline_summary_preview,
 )
 from tests.test_stage5_stage6_workflow import _create_prepared_workspace
+
+
+def _write_augmented_experiment_config(base_config_path: Path, *, output_path: Path) -> Path:
+    payload = yaml.safe_load(base_config_path.read_text(encoding="utf-8"))
+    objective = dict(payload.get("objective") or {})
+    objective["cross_session_aug"] = {
+        "enabled": True,
+        "training_variant_name": "test_cross_session_aug",
+        "target_label": "stimulus_change",
+        "target_label_mode": "auto",
+        "target_label_match_value": None,
+        "aug_prob_start": 0.5,
+        "aug_prob_end": 0.5,
+        "region_loss_weight_start": 0.2,
+        "region_loss_weight_end": 0.2,
+        "warmup_epochs": 0,
+        "canonical_regions": [],
+        "donor_cache_size_per_label_session": 4,
+        "min_shared_regions": 1,
+        "geometry_monitor_every_epochs": 1,
+        "geometry_monitor_split": "discovery",
+        "geometry_monitor_max_batches": 2,
+        "geometry_monitor_neighbor_k": 3,
+    }
+    artifacts = dict(payload.get("artifacts") or {})
+    artifacts["checkpoint_prefix"] = "pcc_aug_test"
+    payload["objective"] = objective
+    payload["artifacts"] = artifacts
+    output_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    return output_path
 
 
 def test_unified_pipeline_notebook_parses_and_has_stage_runner_cell() -> None:
@@ -183,6 +216,93 @@ def test_benchmark_matrices_write_summary_artifacts(tmp_path: Path) -> None:
     assert motif_results[0].cluster_summary_json_path.is_file()
     assert motif_results[0].discovery_artifact_path.is_file()
     assert "status" in motif_results[0].summary
+
+
+def test_augmented_training_writes_geometry_monitor_and_auxiliary_state(tmp_path: Path) -> None:
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    augmented_config_path = _write_augmented_experiment_config(
+        experiment_config_path,
+        output_path=experiment_config_path.with_name("experiment_cross_session_aug.yaml"),
+    )
+    experiment_config = load_experiment_config(augmented_config_path)
+
+    first = train_model(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        train_split="train",
+        valid_split="valid",
+    )
+    assert first.geometry_monitor_json_path is not None and first.geometry_monitor_json_path.is_file()
+    assert first.geometry_monitor_csv_path is not None and first.geometry_monitor_csv_path.is_file()
+    checkpoint_payload = load_training_checkpoint(first.checkpoint_path, map_location="cpu")
+    assert checkpoint_payload.get("auxiliary_state") is not None
+    assert checkpoint_payload["auxiliary_state"].get("region_head_state") is not None
+    assert checkpoint_payload["auxiliary_state"].get("donor_cache_state") is not None
+
+    resumed_payload = yaml.safe_load(augmented_config_path.read_text(encoding="utf-8"))
+    resumed_payload["training"]["num_epochs"] = 3
+    resumed_payload["training"]["resume_checkpoint"] = str(first.checkpoint_path)
+    resumed_path = augmented_config_path.with_name("experiment_cross_session_aug_resume.yaml")
+    resumed_path.write_text(yaml.safe_dump(resumed_payload, sort_keys=False), encoding="utf-8")
+    resumed_config = load_experiment_config(resumed_path)
+    second = train_model(
+        experiment_config=resumed_config,
+        data_config_path=prep_config_path,
+        train_split="train",
+        valid_split="valid",
+    )
+    assert second.checkpoint_path.is_file()
+    assert second.geometry_monitor_json_path is not None and second.geometry_monitor_json_path.is_file()
+
+
+def test_augmented_pipeline_run_surfaces_training_variant_and_geometry(tmp_path: Path) -> None:
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    augmented_config_path = _write_augmented_experiment_config(
+        experiment_config_path,
+        output_path=experiment_config_path.with_name("experiment_cross_session_aug.yaml"),
+    )
+    drive_export_root = tmp_path / "drive" / "pcc_colab_outputs"
+    local_artifact_root = tmp_path / "local_artifacts"
+
+    result = run_notebook_pipeline(
+        base_experiment_config=augmented_config_path,
+        data_config_path=prep_config_path,
+        drive_export_root=drive_export_root,
+        local_artifact_root=local_artifact_root,
+        pipeline_run_id="run_augmented_pipeline",
+        dataset_config=NotebookDatasetConfig(use_full_dataset=True),
+        training_config=NotebookTrainingConfig(num_epochs=2, train_steps_per_epoch=2, validation_steps=1),
+        step_log_every=1,
+        run_stage_train=True,
+        run_stage_evaluate=True,
+        run_stage_representation_benchmark=True,
+        run_stage_motif_benchmark=True,
+        run_stage_alignment_diagnostic=False,
+        run_stage_image_identity_appendix=False,
+        image_target_name=None,
+        representation_task_names=("stimulus_change",),
+        motif_task_names=("stimulus_change",),
+        representation_arm_names=("encoder_raw",),
+        motif_arm_names=("encoder_raw",),
+        pca_components=8,
+        session_holdout_fraction=0.5,
+        session_holdout_seed=5,
+        neighbor_k=3,
+        debug_retain_intermediates=False,
+        output_stream=io.StringIO(),
+    )
+
+    assert result.training_geometry_monitor_json_path is not None
+    assert result.training_geometry_monitor_csv_path is not None
+    tables = load_pipeline_display_tables(
+        representation_summary_csv_path=result.representation_summary_csv_path,
+        motif_summary_csv_path=result.motif_summary_csv_path,
+        final_summary_csv_path=result.final_summary_csv_path,
+        training_geometry_monitor_csv_path=result.training_geometry_monitor_csv_path,
+    )
+    assert "training_variant_name" in tables["representation"].columns
+    assert not tables["training_geometry"].empty
+    assert "training_variant_names" in json.loads(result.final_summary_json_path.read_text(encoding="utf-8"))["final_project_summary"][0]
 
 
 def test_run_notebook_pipeline_writes_resume_state(tmp_path: Path) -> None:

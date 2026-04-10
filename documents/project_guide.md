@@ -92,6 +92,7 @@ Every token and every discovered candidate must remain traceable back to:
 - predictive target builders
 - continuation baselines
 - predictive and reconstruction losses
+- optional cross-session region-rate auxiliary targets and donor-cache logic for the parallel augmented-training experiment
 
 `predictive_circuit_coding/training/`
 
@@ -268,6 +269,13 @@ Use this config when running:
 - `pcc-discover`
 - `pcc-validate`
 
+Parallel experiment configs also exist for the auxiliary-loss variant:
+
+- `configs/pcc/predictive_circuit_coding_cross_session_aug_debug.yaml`
+- `configs/pcc/predictive_circuit_coding_cross_session_aug_full.yaml`
+
+Those configs keep the baseline encoder objective intact and add a cross-session region-rate auxiliary loss with donor-cache matching plus periodic geometry monitoring.
+
 ### Preparation config vs experiment config
 
 Preparation config answers:
@@ -403,9 +411,17 @@ Outputs:
 
 - checkpoint `.pt`
 - training summary JSON
+- optional `cross_session_geometry_monitor.json` and `cross_session_geometry_monitor.csv` when the auxiliary-loss training variant is enabled
 - training run-manifest sidecar
 - if a notebook runtime subset is active, the run-manifest records the artifact-local split manifest and session catalog paths
 - the unified notebook also saves the realized runtime experiment config inside the run root so downstream stages can reuse the exact subset later
+
+For the auxiliary-loss experiment, the train stage also records:
+
+- `training_variant_name`
+- `cross_session_aug_enabled`
+- aggregated auxiliary-loss metrics in `training_summary.json`
+- periodic raw-latent geometry diagnostics under the geometry-monitor artifact
 
 ### 5. Colab evaluation
 
@@ -544,6 +560,7 @@ Responsibilities:
 - install the repo and notebook extras
 - run preflight checks
 - choose a repo-native pipeline config such as `configs/pcc/pipeline_debug.yaml` or `configs/pcc/pipeline_full.yaml`
+- auxiliary-loss runs use the parallel configs `configs/pcc/pipeline_cross_session_aug_debug.yaml` or `configs/pcc/pipeline_cross_session_aug_full.yaml`
 - use the referenced experiment config as the source of truth for subset filters, split behavior, and budgets
 - restore or create one `run_id`
 - run training, evaluation, representation benchmarks, motif benchmarks, and optional appendix diagnostics as explicit stages
@@ -569,6 +586,9 @@ The main artifact sequence is:
 2. training summary  
    produced by training, summarizes epoch-level performance
 
+2b. cross-session geometry monitor  
+   produced by augmented training, tracks label/session/subject neighbor enrichment in raw encoder space during training
+
 3. evaluation summary  
    produced by held-out evaluation
 
@@ -576,7 +596,7 @@ The main artifact sequence is:
    produced by discovery, records how many positive and negative windows were found and selected for the chosen decode target
 
 5. representation benchmark summaries  
-   produced by the benchmark stage, compare feature family x geometry mode across the task panel
+   produced by the benchmark stage, compare feature family x geometry mode across the task panel and retain `training_variant_name` so baseline and augmented runs can be merged cleanly
 
 6. motif benchmark summaries  
    produced by the benchmark stage, compare motif quality for the selected arm subset

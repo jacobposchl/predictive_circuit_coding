@@ -66,8 +66,12 @@ It is intentionally thin and calls the same CLI/library surface listed above.
 - it writes compact stage state and manifest files under `pipeline/` so interrupted runs can resume without wasting storage
 - repo-native config presets now include:
   `configs/pcc/pipeline_debug.yaml`, `configs/pcc/pipeline_full.yaml`,
-  `configs/pcc/predictive_circuit_coding_debug.yaml`, and `configs/pcc/predictive_circuit_coding_full.yaml`
+  `configs/pcc/pipeline_cross_session_aug_debug.yaml`, `configs/pcc/pipeline_cross_session_aug_full.yaml`,
+  `configs/pcc/predictive_circuit_coding_debug.yaml`, `configs/pcc/predictive_circuit_coding_full.yaml`,
+  `configs/pcc/predictive_circuit_coding_cross_session_aug_debug.yaml`, and
+  `configs/pcc/predictive_circuit_coding_cross_session_aug_full.yaml`
 - representation benchmarks are now crossed by feature family x geometry mode, with raw versus whitened comparisons made explicit across count-based, PCA, and frozen-encoder feature families
+- the cross-session auxiliary-loss experiment ships as a parallel config family rather than replacing the baseline full run; compare baseline and augmented runs across separate `run_id`s using the exported `training_variant_name` column in benchmark summaries
 - discovery supports both capped `sequential` planning and `label_balanced` planning with explicit `max_batches`, `search_max_batches`, `min_positive_windows`, and `negative_to_positive_ratio` controls
 - major Allen decode targets default to event-local onset labeling rather than broad overlap labeling
 - discovery candidate selection is session-balanced by default via `discovery.candidate_session_balance_fraction` so one session does not dominate the top-k motif pool; set it to `1.0` to restore pure global top-k scoring for comparisons
@@ -113,6 +117,7 @@ Training problems:
 - if a resume checkpoint is missing, clear `training.resume_checkpoint` or point it at a real checkpoint
 - if a checkpoint dataset mismatch is reported, use a checkpoint produced from the same dataset/config family
 - if `training_summary.json` looks inconsistent with the latest epoch, remember it now intentionally describes the selected best checkpoint, not the latest completed epoch
+- if you are running the cross-session auxiliary-loss variant, check `cross_session_geometry_monitor.json/csv` next to the training summary before spending time on a full benchmark run; the debug acceptance gate is a nonzero realized augmentation fraction plus a meaningful drop in raw session-neighbor enrichment without collapsing label enrichment
 
 Discovery problems:
 

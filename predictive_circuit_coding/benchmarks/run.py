@@ -253,6 +253,7 @@ def _held_out_similarity_summary(
 
 def _transform_summary_row(
     *,
+    experiment_config: ExperimentConfig,
     task: BenchmarkTaskSpec,
     arm: BenchmarkArmSpec,
     pca_summary: dict[str, Any] | None,
@@ -268,6 +269,8 @@ def _transform_summary_row(
         "feature_family": arm.feature_family,
         "geometry_mode": arm.geometry_mode,
         "use_pca": arm.use_pca,
+        "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
+        "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
         "pca_applied": (pca_summary or {}).get("applied"),
         "pca_components": (pca_summary or {}).get("components"),
         "pca_explained_variance_ratio_sum": (pca_summary or {}).get("explained_variance_ratio_sum"),
@@ -316,6 +319,7 @@ def _apply_session_whitening_to_collection(
 
 def _representation_row(
     *,
+    experiment_config: ExperimentConfig,
     task: BenchmarkTaskSpec,
     arm: BenchmarkArmSpec,
     status: str,
@@ -340,6 +344,8 @@ def _representation_row(
         "feature_family": arm.feature_family,
         "geometry_mode": arm.geometry_mode,
         "use_pca": arm.use_pca,
+        "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
+        "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
         "status": status,
         "failure_reason": failure_reason,
         "discovery_fit_probe_accuracy": (discovery_fit_metrics or {}).get("probe_accuracy"),
@@ -364,6 +370,7 @@ def _representation_row(
 
 def _motif_row(
     *,
+    experiment_config: ExperimentConfig,
     task: BenchmarkTaskSpec,
     arm: BenchmarkArmSpec,
     status: str,
@@ -394,6 +401,8 @@ def _motif_row(
         "feature_family": arm.feature_family,
         "geometry_mode": arm.geometry_mode,
         "use_pca": arm.use_pca,
+        "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
+        "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
         "status": status,
         "failure_reason": failure_reason,
         "candidate_count": candidate_count,
@@ -666,6 +675,7 @@ def run_representation_benchmark_matrix(
 
             if skip_status is not None:
                 row = _representation_row(
+                    experiment_config=experiment_config,
                     task=task,
                     arm=arm,
                     status=skip_status,
@@ -687,6 +697,8 @@ def run_representation_benchmark_matrix(
                 transform_payload = {
                     "task_name": task.name,
                     "arm_name": arm.name,
+                    "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
+                    "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
                     "status": skip_status,
                     "failure_reason": skip_reason,
                 }
@@ -1023,6 +1035,7 @@ def run_representation_benchmark_matrix(
                 test_whitening_summary = None
 
             row = _representation_row(
+                experiment_config=experiment_config,
                 task=task,
                 arm=arm,
                 status=status,
@@ -1044,12 +1057,15 @@ def run_representation_benchmark_matrix(
             transform_payload = {
                 "task_name": task.name,
                 "arm_name": arm.name,
+                "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
+                "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
                 "status": status,
                 "failure_reason": failure_reason,
                 "pca_summary": pca_summary,
                 "whitening_summary": whitening_summary,
                 "test_whitening_summary": test_whitening_summary,
                 "row": _transform_summary_row(
+                    experiment_config=experiment_config,
                     task=task,
                     arm=arm,
                     pca_summary=pca_summary,
@@ -1209,6 +1225,7 @@ def run_motif_benchmark_matrix(
 
             if skip_status is not None:
                 row = _motif_row(
+                    experiment_config=experiment_config,
                     task=task,
                     arm=arm,
                     status=skip_status,
@@ -1239,6 +1256,8 @@ def run_motif_benchmark_matrix(
                 transform_payload = {
                     "task_name": task.name,
                     "arm_name": arm.name,
+                    "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
+                    "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
                     "status": skip_status,
                     "failure_reason": skip_reason,
                 }
@@ -1790,12 +1809,15 @@ def run_motif_benchmark_matrix(
                     transform_payload = {
                         "task_name": task.name,
                         "arm_name": arm.name,
+                        "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
+                        "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
                         "status": status,
                         "failure_reason": failure_reason,
                         "pca_summary": pca_summary,
                         "whitening_summary": whitening_summary,
                         "test_whitening_summary": test_whitening_summary,
                         "row": _transform_summary_row(
+                            experiment_config=experiment_config,
                             task=task,
                             arm=arm,
                             pca_summary=pca_summary,
@@ -1838,11 +1860,14 @@ def run_motif_benchmark_matrix(
                     transform_payload = {
                         "task_name": task.name,
                         "arm_name": arm.name,
+                        "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
+                        "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
                         "status": status,
                         "failure_reason": failure_reason,
                     }
 
             row = _motif_row(
+                experiment_config=experiment_config,
                 task=task,
                 arm=arm,
                 status=status,

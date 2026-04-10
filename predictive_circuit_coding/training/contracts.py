@@ -118,6 +118,8 @@ class CheckpointMetadata:
     config_snapshot: dict[str, Any]
     model_hparams: dict[str, Any]
     continuation_baseline_type: str
+    training_variant_name: str = "baseline"
+    cross_session_aug_enabled: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -134,6 +136,7 @@ class TrainingCheckpoint:
     scheduler_state: dict[str, Any] | None
     best_epoch: int = 0
     best_validation_metrics: dict[str, float] | None = None
+    auxiliary_state: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -142,6 +145,7 @@ class TrainingCheckpoint:
             "best_metric": self.best_metric,
             "best_epoch": self.best_epoch,
             "best_validation_metrics": self.best_validation_metrics,
+            "auxiliary_state": self.auxiliary_state,
             "metadata": self.metadata.to_dict(),
             "model_state": self.model_state,
             "optimizer_state": self.optimizer_state,
@@ -158,6 +162,8 @@ class TrainingSummary:
     metrics: dict[str, float]
     losses: dict[str, float]
     checkpoint_path: str
+    training_variant_name: str = "baseline"
+    cross_session_aug_enabled: bool = False
     selection_reason: str = "validated_best"
 
     def to_dict(self) -> dict[str, Any]:

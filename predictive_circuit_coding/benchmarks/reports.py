@@ -75,12 +75,14 @@ def build_final_project_summary(
     if best_representation is not None:
         claims.append(
             "representation: best held-out cross-session probe PR-AUC came from "
-            f"{best_representation['arm_name']} on {best_representation['task_name']}"
+            f"{best_representation['arm_name']} on {best_representation['task_name']} "
+            f"({best_representation.get('training_variant_name', 'baseline')})"
         )
     if best_motif is not None:
         claims.append(
             "motifs: best held-out motif PR-AUC came from "
-            f"{best_motif['arm_name']} on {best_motif['task_name']}"
+            f"{best_motif['arm_name']} on {best_motif['task_name']} "
+            f"({best_motif.get('training_variant_name', 'baseline')})"
         )
     if representation_ok:
         claims.append(
@@ -94,6 +96,13 @@ def build_final_project_summary(
         "motif_completed_row_count": len(motif_ok),
         "representation_mean_test_probe_pr_auc": _mean_metric(representation_ok, "test_probe_pr_auc"),
         "motif_mean_held_out_similarity_pr_auc": _mean_metric(motif_ok, "held_out_similarity_pr_auc"),
+        "training_variant_names": sorted(
+            {
+                str(row.get("training_variant_name", "baseline"))
+                for row in (representation_rows + motif_rows)
+                if row.get("training_variant_name") is not None
+            }
+        ),
         "best_representation_row": best_representation,
         "best_motif_row": best_motif,
         "claims": claims,

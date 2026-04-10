@@ -45,6 +45,27 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class CrossSessionAugConfig:
+    enabled: bool = False
+    training_variant_name: str = "baseline"
+    target_label: str = "stimulus_change"
+    target_label_mode: str = "auto"
+    target_label_match_value: str | None = None
+    aug_prob_start: float = 0.0
+    aug_prob_end: float = 0.0
+    region_loss_weight_start: float = 0.0
+    region_loss_weight_end: float = 0.0
+    warmup_epochs: int = 0
+    canonical_regions: tuple[str, ...] = ()
+    donor_cache_size_per_label_session: int = 8
+    min_shared_regions: int = 1
+    geometry_monitor_every_epochs: int = 0
+    geometry_monitor_split: str = "discovery"
+    geometry_monitor_max_batches: int = 4
+    geometry_monitor_neighbor_k: int = 5
+
+
+@dataclass(frozen=True)
 class ObjectiveConfig:
     predictive_target_type: str
     continuation_baseline_type: str
@@ -52,6 +73,7 @@ class ObjectiveConfig:
     reconstruction_loss: str
     reconstruction_weight: float
     exclude_final_prediction_patch: bool
+    cross_session_aug: CrossSessionAugConfig = field(default_factory=CrossSessionAugConfig)
 
 
 @dataclass(frozen=True)
@@ -268,6 +290,8 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     evaluation_raw = raw.get("evaluation", {})
     discovery_raw = raw.get("discovery", {})
 
+    cross_session_aug_raw = dict(objective.get("cross_session_aug") or {})
+
     cfg = ExperimentConfig(
         dataset_id=str(raw["dataset_id"]),
         split_name=str(raw.get("split_name", "train")),
@@ -300,6 +324,31 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
             reconstruction_loss=str(objective.get("reconstruction_loss", "mse")),
             reconstruction_weight=float(objective.get("reconstruction_weight", 0.2)),
             exclude_final_prediction_patch=bool(objective.get("exclude_final_prediction_patch", True)),
+            cross_session_aug=CrossSessionAugConfig(
+                enabled=bool(cross_session_aug_raw.get("enabled", False)),
+                training_variant_name=str(cross_session_aug_raw.get("training_variant_name", "baseline")),
+                target_label=str(cross_session_aug_raw.get("target_label", "stimulus_change")),
+                target_label_mode=str(cross_session_aug_raw.get("target_label_mode", "auto")),
+                target_label_match_value=(
+                    str(cross_session_aug_raw["target_label_match_value"])
+                    if cross_session_aug_raw.get("target_label_match_value") is not None
+                    else None
+                ),
+                aug_prob_start=float(cross_session_aug_raw.get("aug_prob_start", 0.0)),
+                aug_prob_end=float(cross_session_aug_raw.get("aug_prob_end", 0.0)),
+                region_loss_weight_start=float(cross_session_aug_raw.get("region_loss_weight_start", 0.0)),
+                region_loss_weight_end=float(cross_session_aug_raw.get("region_loss_weight_end", 0.0)),
+                warmup_epochs=int(cross_session_aug_raw.get("warmup_epochs", 0)),
+                canonical_regions=tuple(str(value) for value in cross_session_aug_raw.get("canonical_regions", []) or ()),
+                donor_cache_size_per_label_session=int(
+                    cross_session_aug_raw.get("donor_cache_size_per_label_session", 8)
+                ),
+                min_shared_regions=int(cross_session_aug_raw.get("min_shared_regions", 1)),
+                geometry_monitor_every_epochs=int(cross_session_aug_raw.get("geometry_monitor_every_epochs", 0)),
+                geometry_monitor_split=str(cross_session_aug_raw.get("geometry_monitor_split", "discovery")),
+                geometry_monitor_max_batches=int(cross_session_aug_raw.get("geometry_monitor_max_batches", 4)),
+                geometry_monitor_neighbor_k=int(cross_session_aug_raw.get("geometry_monitor_neighbor_k", 5)),
+            ),
         ),
         optimization=OptimizationConfig(
             learning_rate=float(optimization.get("learning_rate", 1.0e-4)),
@@ -472,6 +521,44 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("Only mse reconstruction_loss is currently supported")
     if config.objective.reconstruction_weight < 0:
         raise ValueError("objective.reconstruction_weight must be >= 0")
+    aug = config.objective.cross_session_aug
+    if aug.enabled and not aug.target_label.strip():
+        raise ValueError("objective.cross_session_aug.target_label must not be empty when enabled")
+    if aug.target_label_match_value is not None and not aug.target_label_match_value.strip():
+        raise ValueError("objective.cross_session_aug.target_label_match_value must not be blank when provided")
+    if aug.target_label_mode not in {"auto", "overlap", "onset_within_window", "centered_onset"}:
+        raise ValueError(
+            "objective.cross_session_aug.target_label_mode must be one of 'auto', 'overlap', "
+            "'onset_within_window', or 'centered_onset'"
+        )
+    if not aug.training_variant_name.strip():
+        raise ValueError("objective.cross_session_aug.training_variant_name must not be blank")
+    for name, value in (
+        ("objective.cross_session_aug.aug_prob_start", aug.aug_prob_start),
+        ("objective.cross_session_aug.aug_prob_end", aug.aug_prob_end),
+    ):
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"{name} must be in [0, 1]")
+    for name, value in (
+        ("objective.cross_session_aug.region_loss_weight_start", aug.region_loss_weight_start),
+        ("objective.cross_session_aug.region_loss_weight_end", aug.region_loss_weight_end),
+    ):
+        if value < 0.0:
+            raise ValueError(f"{name} must be >= 0")
+    if aug.warmup_epochs < 0:
+        raise ValueError("objective.cross_session_aug.warmup_epochs must be >= 0")
+    if aug.donor_cache_size_per_label_session < 1:
+        raise ValueError("objective.cross_session_aug.donor_cache_size_per_label_session must be >= 1")
+    if aug.min_shared_regions < 1:
+        raise ValueError("objective.cross_session_aug.min_shared_regions must be >= 1")
+    if aug.geometry_monitor_every_epochs < 0:
+        raise ValueError("objective.cross_session_aug.geometry_monitor_every_epochs must be >= 0")
+    if aug.geometry_monitor_split not in {"train", "valid", "discovery", "test"}:
+        raise ValueError("objective.cross_session_aug.geometry_monitor_split must be one of train/valid/discovery/test")
+    if aug.geometry_monitor_max_batches < 1:
+        raise ValueError("objective.cross_session_aug.geometry_monitor_max_batches must be >= 1")
+    if aug.geometry_monitor_neighbor_k < 1:
+        raise ValueError("objective.cross_session_aug.geometry_monitor_neighbor_k must be >= 1")
     if config.optimization.learning_rate <= 0:
         raise ValueError("optimization.learning_rate must be > 0")
     if config.optimization.weight_decay < 0:

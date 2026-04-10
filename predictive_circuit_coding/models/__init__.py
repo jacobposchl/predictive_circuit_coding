@@ -4,7 +4,7 @@ from predictive_circuit_coding.models.encoder import (
     PredictiveCircuitEncoder,
     PredictiveCircuitModel,
 )
-from predictive_circuit_coding.models.heads import PredictiveHead, ReconstructionHead
+from predictive_circuit_coding.models.heads import PredictiveHead, ReconstructionHead, RegionRatePredictiveHead
 
 __all__ = [
     "EncoderOutput",
@@ -13,4 +13,5 @@ __all__ = [
     "PredictiveCircuitModel",
     "PredictiveHead",
     "ReconstructionHead",
+    "RegionRatePredictiveHead",
 ]

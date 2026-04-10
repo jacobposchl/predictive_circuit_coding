@@ -514,6 +514,7 @@ def load_pipeline_display_tables(
     representation_summary_csv_path: str | Path,
     motif_summary_csv_path: str | Path,
     final_summary_csv_path: str | Path,
+    training_geometry_monitor_csv_path: str | Path = "",
 ) -> dict[str, Any]:
     try:
         import pandas as pd
@@ -533,6 +534,7 @@ def load_pipeline_display_tables(
     representation = _load(representation_summary_csv_path)
     motif = _load(motif_summary_csv_path)
     final = _load(final_summary_csv_path)
+    training_geometry = _load(training_geometry_monitor_csv_path)
 
     if not representation.empty:
         sort_column = (
@@ -544,6 +546,7 @@ def load_pipeline_display_tables(
         preferred = [
             "task_name",
             "arm_name",
+            "training_variant_name",
             "status",
             "feature_family",
             "geometry_mode",
@@ -566,6 +569,7 @@ def load_pipeline_display_tables(
         preferred = [
             "task_name",
             "arm_name",
+            "training_variant_name",
             "status",
             "feature_family",
             "geometry_mode",
@@ -580,10 +584,26 @@ def load_pipeline_display_tables(
         ]
         motif = motif[[column for column in preferred if column in motif.columns]]
 
+    if not training_geometry.empty:
+        preferred = [
+            "epoch",
+            "training_variant_name",
+            "split_name",
+            "cross_session_aug_prob",
+            "cross_session_region_loss_weight",
+            "label_neighbor_enrichment",
+            "session_neighbor_enrichment",
+            "subject_neighbor_enrichment",
+            "sample_count",
+            "neighbor_k",
+        ]
+        training_geometry = training_geometry[[column for column in preferred if column in training_geometry.columns]]
+
     return {
         "representation": representation,
         "motif": motif,
         "final": final,
+        "training_geometry": training_geometry,
     }
 
 

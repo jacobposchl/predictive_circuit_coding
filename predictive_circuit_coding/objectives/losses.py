@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 from torch.nn import functional as F
 
+from predictive_circuit_coding.objectives.region_targets import RegionRateTargets
 from predictive_circuit_coding.objectives.targets import CountTargetBuilder, PredictiveTargets
 from predictive_circuit_coding.training.config import ObjectiveConfig
 from predictive_circuit_coding.training.contracts import ModelForwardOutput, PopulationWindowBatch
@@ -70,6 +71,47 @@ class ReconstructionObjective:
             batch.patch_mask,
         )
         return reconstruction_loss, {"reconstruction_loss": float(reconstruction_loss.detach().item())}
+
+
+class CrossSessionRegionLoss:
+    def evaluate(
+        self,
+        *,
+        predicted_region_rates: torch.Tensor,
+        region_targets: RegionRateTargets,
+        region_loss_weight: float,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        target = region_targets.region_rate_future.to(device=predicted_region_rates.device, dtype=predicted_region_rates.dtype)
+        valid_mask = (
+            region_targets.valid_patch_mask.to(device=predicted_region_rates.device)
+            & region_targets.is_augmented.to(device=predicted_region_rates.device).unsqueeze(-1).unsqueeze(-1)
+        )
+        if not bool(valid_mask.any().item()):
+            zero = predicted_region_rates.sum() * 0.0
+            metrics = dict(region_targets.diagnostics)
+            metrics.update(
+                {
+                    "cross_session_region_loss": 0.0,
+                    "cross_session_region_loss_weighted": 0.0,
+                    "cross_session_region_loss_weight": float(region_loss_weight),
+                }
+            )
+            return zero, metrics
+
+        expanded_mask = valid_mask.to(dtype=predicted_region_rates.dtype)
+        squared_error = ((predicted_region_rates - target) ** 2) * expanded_mask
+        denominator = expanded_mask.sum().clamp_min(1.0)
+        raw_loss = squared_error.sum() / denominator
+        weighted_loss = raw_loss * float(region_loss_weight)
+        metrics = dict(region_targets.diagnostics)
+        metrics.update(
+            {
+                "cross_session_region_loss": float(raw_loss.detach().item()),
+                "cross_session_region_loss_weighted": float(weighted_loss.detach().item()),
+                "cross_session_region_loss_weight": float(region_loss_weight),
+            }
+        )
+        return weighted_loss, metrics
 
 
 class CombinedObjective:

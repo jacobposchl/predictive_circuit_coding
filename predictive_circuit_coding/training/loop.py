@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,8 +12,12 @@ import numpy as np
 import torch
 
 from predictive_circuit_coding.data import resolve_runtime_dataset_view
+from predictive_circuit_coding.decoding import summarize_neighbor_geometry
+from predictive_circuit_coding.decoding.labels import extract_binary_labels
 from predictive_circuit_coding.evaluation.metrics import aggregate_metric_dicts
 from predictive_circuit_coding.evaluation.run import evaluate_checkpoint_on_split
+from predictive_circuit_coding.models import RegionRatePredictiveHead
+from predictive_circuit_coding.objectives import CrossSessionRegionLoss, RegionRateDonorCache, RegionRateTargetBuilder
 from predictive_circuit_coding.training.artifacts import (
     load_training_checkpoint,
     save_training_checkpoint,
@@ -23,6 +28,7 @@ from predictive_circuit_coding.training.contracts import (
     CheckpointMetadata,
     TrainingCheckpoint,
     TrainingSummary,
+    TrainingStepOutput,
     write_json_payload,
 )
 from predictive_circuit_coding.training.factories import (
@@ -38,11 +44,13 @@ from predictive_circuit_coding.windowing import (
     FixedWindowConfig,
     build_dataset_bundle,
     build_random_fixed_window_sampler,
+    build_sequential_fixed_window_sampler,
 )
+from predictive_circuit_coding.windowing.dataset import split_session_ids
 
-def build_optimizer(config: ExperimentConfig, model: torch.nn.Module) -> torch.optim.Optimizer:
+def build_optimizer(config: ExperimentConfig, parameters) -> torch.optim.Optimizer:
     return torch.optim.AdamW(
-        model.parameters(),
+        parameters,
         lr=config.optimization.learning_rate,
         weight_decay=config.optimization.weight_decay,
     )
@@ -86,13 +94,19 @@ def build_checkpoint_metadata(config: ExperimentConfig, *, split_name: str) -> C
             "dropout": config.model.dropout,
         },
         continuation_baseline_type=config.objective.continuation_baseline_type,
+        training_variant_name=config.objective.cross_session_aug.training_variant_name,
+        cross_session_aug_enabled=bool(config.objective.cross_session_aug.enabled),
     )
+
+
 @dataclass(frozen=True)
 class TrainingRunResult:
     checkpoint_path: Path
     summary_path: Path
     best_epoch: int
     best_metric: float
+    geometry_monitor_json_path: Path | None = None
+    geometry_monitor_csv_path: Path | None = None
 
 
 TrainingProgressCallback = Callable[[TrainingProgressEvent], None]
@@ -114,6 +128,150 @@ def _set_training_seed(seed: int, *, device: torch.device) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _scheduled_value(*, start: float, end: float, epoch: int, warmup_epochs: int) -> float:
+    if warmup_epochs <= 0:
+        return float(end)
+    progress = min(max(epoch - 1, 0), warmup_epochs) / float(warmup_epochs)
+    return float(start) + (float(end) - float(start)) * float(progress)
+
+
+def _derive_canonical_regions(*, dataset_view, split_name: str, explicit_regions: tuple[str, ...]) -> tuple[str, ...]:
+    if explicit_regions:
+        return tuple(str(region) for region in explicit_regions)
+    train_session_ids = set(split_session_ids(dataset_view.split_manifest, split_name))
+    regions = {
+        str(region)
+        for record in dataset_view.session_catalog.records
+        if str(record.session_id) in train_session_ids
+        for region in record.brain_regions
+        if str(region).strip()
+    }
+    return tuple(sorted(regions))
+
+
+def _pooled_window_features(tokens: torch.Tensor, patch_mask: torch.Tensor) -> torch.Tensor:
+    flat_tokens = tokens.detach().cpu().reshape(tokens.shape[0], -1, tokens.shape[-1]).to(dtype=torch.float32)
+    flat_mask = patch_mask.detach().cpu().reshape(patch_mask.shape[0], -1)
+    expanded_mask = flat_mask.unsqueeze(-1).to(dtype=flat_tokens.dtype)
+    counts = expanded_mask.sum(dim=1).clamp_min(1.0)
+    return (flat_tokens * expanded_mask).sum(dim=1) / counts
+
+
+def _write_geometry_monitor_rows(
+    rows: list[dict[str, float | int | str | bool | None]],
+    *,
+    output_json_path: Path,
+    output_csv_path: Path,
+) -> tuple[Path, Path]:
+    write_json_payload({"cross_session_geometry_monitor": rows}, output_json_path)
+    output_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = sorted({key for row in rows for key in row.keys()}) if rows else []
+    with output_csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return output_json_path, output_csv_path
+
+
+def _run_cross_session_geometry_monitor(
+    *,
+    experiment_config: ExperimentConfig,
+    data_config_path: str | Path,
+    dataset_view,
+    model: torch.nn.Module,
+    device: torch.device,
+    split_name: str,
+    max_batches: int,
+    neighbor_k: int,
+    target_label: str,
+    target_label_mode: str,
+    target_label_match_value: str | None,
+) -> dict[str, float | int | None]:
+    tokenizer = build_tokenizer_from_config(experiment_config)
+    bundle = build_dataset_bundle(
+        workspace=dataset_view.workspace,
+        split_manifest=dataset_view.split_manifest,
+        split=split_name,
+        config_dir=dataset_view.config_dir,
+        config_name_prefix=dataset_view.config_name_prefix,
+        dataset_split=dataset_view.dataset_split,
+    )
+    sampler = build_sequential_fixed_window_sampler(
+        bundle.dataset,
+        window=FixedWindowConfig(
+            window_length_s=experiment_config.data_runtime.context_duration_s,
+            step_s=experiment_config.evaluation.sequential_step_s,
+        ),
+    )
+
+    features: list[torch.Tensor] = []
+    labels: list[str] = []
+    session_ids: list[str] = []
+    subject_ids: list[str] = []
+    scaler_enabled = bool(experiment_config.execution.mixed_precision and device.type == "cuda")
+
+    model_was_training = bool(model.training)
+    model.eval()
+    with torch.no_grad():
+        for batch in iter_sampler_batches(
+            dataset=bundle.dataset,
+            sampler=sampler,
+            collator=tokenizer,
+            batch_size=experiment_config.optimization.batch_size,
+            max_batches=max_batches,
+        ):
+            label_tensor = extract_binary_labels(
+                batch,
+                target_label=target_label,
+                target_label_mode=target_label_mode,
+                target_label_match_value=target_label_match_value,
+            )
+            device_batch = batch.to(device)
+            autocast_context = (
+                torch.autocast(device_type=device.type, dtype=torch.float16) if scaler_enabled else nullcontext()
+            )
+            with autocast_context:
+                forward_output = model(device_batch)
+            features.append(_pooled_window_features(forward_output.tokens, forward_output.patch_mask))
+            labels.extend(str(int(float(value.item()) > 0.5)) for value in label_tensor)
+            session_ids.extend(str(value) for value in batch.provenance.session_ids)
+            subject_ids.extend(str(value) for value in batch.provenance.subject_ids)
+
+    if hasattr(bundle.dataset, "_close_open_files"):
+        bundle.dataset._close_open_files()
+    if model_was_training:
+        model.train()
+
+    if not features:
+        return {
+            "sample_count": 0,
+            "neighbor_k": 0,
+            "label_neighbor_enrichment": None,
+            "session_neighbor_enrichment": None,
+            "subject_neighbor_enrichment": None,
+        }
+
+    feature_tensor = torch.cat(features, dim=0)
+    geometry_summary = summarize_neighbor_geometry(
+        features=feature_tensor,
+        attributes={
+            "label": tuple(labels),
+            "session_id": tuple(session_ids),
+            "subject_id": tuple(subject_ids),
+        },
+        neighbor_k=neighbor_k,
+    )
+    metrics = geometry_summary.get("metrics") or {}
+    return {
+        "sample_count": int(geometry_summary.get("sample_count", 0)),
+        "neighbor_k": int(geometry_summary.get("neighbor_k", 0)),
+        "label_neighbor_enrichment": ((metrics.get("label") or {}).get("enrichment_over_base")),
+        "session_neighbor_enrichment": ((metrics.get("session_id") or {}).get("enrichment_over_base")),
+        "subject_neighbor_enrichment": ((metrics.get("subject_id") or {}).get("enrichment_over_base")),
+    }
+
+
 def _build_training_summary(
     *,
     experiment_config: ExperimentConfig,
@@ -133,6 +291,8 @@ def _build_training_summary(
         metrics=dict(metrics),
         losses=dict(losses),
         checkpoint_path=str(checkpoint_path),
+        training_variant_name=experiment_config.objective.cross_session_aug.training_variant_name,
+        cross_session_aug_enabled=bool(experiment_config.objective.cross_session_aug.enabled),
         selection_reason=selection_reason,
     )
 
@@ -160,9 +320,49 @@ def train_model(
     _set_training_seed(experiment_config.seed, device=device)
     model = build_model_from_config(experiment_config)
     objective = build_objective_from_config(experiment_config)
-    optimizer = build_optimizer(experiment_config, model)
+    aug_config = experiment_config.objective.cross_session_aug
+    canonical_regions = _derive_canonical_regions(
+        dataset_view=dataset_view,
+        split_name=train_split,
+        explicit_regions=aug_config.canonical_regions,
+    )
+    region_head: RegionRatePredictiveHead | None = None
+    donor_cache: RegionRateDonorCache | None = None
+    region_target_builder: RegionRateTargetBuilder | None = None
+    region_loss = CrossSessionRegionLoss() if aug_config.enabled else None
+    geometry_monitor_rows: list[dict[str, float | int | str | bool | None]] = []
+    geometry_monitor_json_path: Path | None = None
+    geometry_monitor_csv_path: Path | None = None
+    if aug_config.enabled:
+        if not canonical_regions:
+            raise ValueError(
+                "objective.cross_session_aug.enabled requires at least one canonical region in the training split."
+            )
+        region_head = RegionRatePredictiveHead(
+            model.encoder.config.d_model,
+            num_regions=len(canonical_regions),
+        )
+        donor_cache = RegionRateDonorCache(
+            max_size_per_label_session=aug_config.donor_cache_size_per_label_session
+        )
+        region_target_builder = RegionRateTargetBuilder(
+            canonical_regions=canonical_regions,
+            donor_cache=donor_cache,
+            min_shared_regions=aug_config.min_shared_regions,
+            exclude_final_prediction_patch=experiment_config.objective.exclude_final_prediction_patch,
+            rng=random.Random(experiment_config.seed + 137),
+        )
+    modules_for_optimization = [model]
+    if region_head is not None:
+        modules_for_optimization.append(region_head)
+    optimizer = build_optimizer(
+        experiment_config,
+        [parameter for module in modules_for_optimization for parameter in module.parameters()],
+    )
     scheduler = build_scheduler(experiment_config, optimizer)
     model = model.to(device)
+    if region_head is not None:
+        region_head = region_head.to(device)
     scaler_enabled = bool(experiment_config.execution.mixed_precision and device.type == "cuda")
     grad_scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
     logger = StageLogger(name="train", emit_console=emit_logs, log_sink=log_sink)
@@ -173,6 +373,15 @@ def train_model(
         )
         write_json_payload(experiment_config.to_dict(), snapshot_path)
         logger.log_artifact(label="config snapshot", path=snapshot_path)
+
+    def _auxiliary_checkpoint_state() -> dict[str, object] | None:
+        if not aug_config.enabled or region_head is None or donor_cache is None:
+            return None
+        return {
+            "region_head_state": region_head.state_dict(),
+            "donor_cache_state": donor_cache.state_dict(),
+            "canonical_regions": list(canonical_regions),
+        }
 
     start_epoch = 1
     global_step = 0
@@ -190,6 +399,24 @@ def train_model(
     if experiment_config.training.resume_checkpoint is not None:
         state = load_training_checkpoint(experiment_config.training.resume_checkpoint, map_location=device)
         model.load_state_dict(state["model_state"])
+        auxiliary_state = state.get("auxiliary_state")
+        if aug_config.enabled:
+            if region_head is None or donor_cache is None:
+                raise RuntimeError("auxiliary modules were not initialized for an augmented resume")
+            if auxiliary_state is None:
+                raise ValueError(
+                    "Resume checkpoint is missing auxiliary_state, but objective.cross_session_aug.enabled is true."
+                )
+            region_head_state = auxiliary_state.get("region_head_state")
+            if region_head_state is None:
+                raise ValueError("Resume checkpoint auxiliary_state is missing region_head_state.")
+            region_head.load_state_dict(region_head_state)
+            donor_cache.load_state_dict(auxiliary_state.get("donor_cache_state"))
+        elif auxiliary_state is not None:
+            raise ValueError(
+                "Resume checkpoint contains auxiliary_state, but objective.cross_session_aug.enabled is false. "
+                "Use a matching augmented config to resume this run."
+            )
         optimizer.load_state_dict(state["optimizer_state"])
         if scheduler is not None and state.get("scheduler_state") is not None:
             scheduler.load_state_dict(state["scheduler_state"])
@@ -258,11 +485,64 @@ def train_model(
         ):
             batch = batch.to(device)
             optimizer.zero_grad(set_to_none=True)
-            autocast_context = (
-                torch.autocast(device_type=device.type, dtype=torch.float16) if scaler_enabled else nullcontext()
-            )
-            with autocast_context:
-                step_output = run_training_step(model, objective, batch)
+            if not aug_config.enabled:
+                autocast_context = (
+                    torch.autocast(device_type=device.type, dtype=torch.float16) if scaler_enabled else nullcontext()
+                )
+                with autocast_context:
+                    step_output = run_training_step(model, objective, batch)
+            else:
+                if region_head is None or region_target_builder is None or region_loss is None:
+                    raise RuntimeError("Augmented training is enabled, but auxiliary modules were not initialized.")
+                current_aug_prob = _scheduled_value(
+                    start=aug_config.aug_prob_start,
+                    end=aug_config.aug_prob_end,
+                    epoch=epoch,
+                    warmup_epochs=aug_config.warmup_epochs,
+                )
+                current_region_loss_weight = _scheduled_value(
+                    start=aug_config.region_loss_weight_start,
+                    end=aug_config.region_loss_weight_end,
+                    epoch=epoch,
+                    warmup_epochs=aug_config.warmup_epochs,
+                )
+                label_tensor = extract_binary_labels(
+                    batch,
+                    target_label=aug_config.target_label,
+                    target_label_mode=aug_config.target_label_mode,
+                    target_label_match_value=aug_config.target_label_match_value,
+                )
+                region_targets = region_target_builder(
+                    batch,
+                    labels=label_tensor,
+                    aug_prob=current_aug_prob,
+                )
+                autocast_context = (
+                    torch.autocast(device_type=device.type, dtype=torch.float16) if scaler_enabled else nullcontext()
+                )
+                with autocast_context:
+                    forward_output = model(batch)
+                    objective_output = objective(batch, forward_output)
+                    predicted_region_rates = region_head(forward_output.tokens, batch.unit_mask)
+                    auxiliary_loss, auxiliary_metrics = region_loss.evaluate(
+                        predicted_region_rates=predicted_region_rates,
+                        region_targets=region_targets,
+                        region_loss_weight=current_region_loss_weight,
+                    )
+                    total_loss = objective_output.loss + auxiliary_loss
+                losses = dict(objective_output.losses)
+                losses["total_loss"] = float(total_loss.detach().item())
+                metrics = dict(objective_output.metrics)
+                metrics.update(auxiliary_metrics)
+                metrics["cross_session_aug_prob"] = float(current_aug_prob)
+                metrics["cross_session_region_loss_weight"] = float(current_region_loss_weight)
+                step_output = TrainingStepOutput(
+                    loss=total_loss,
+                    losses=losses,
+                    metrics=metrics,
+                    batch_size=batch.batch_size,
+                    token_count=batch.token_count,
+                )
             if scaler_enabled:
                 grad_scaler.scale(step_output.loss).backward()
                 if experiment_config.optimization.grad_clip_norm is not None:
@@ -350,6 +630,7 @@ def train_model(
                     scheduler_state=scheduler.state_dict() if scheduler is not None else None,
                     best_epoch=best_epoch,
                     best_validation_metrics=best_validation_metrics,
+                    auxiliary_state=_auxiliary_checkpoint_state(),
                 )
                 save_training_checkpoint(checkpoint, best_checkpoint_path)
                 logger.log_artifact(label="best checkpoint", path=best_checkpoint_path)
@@ -363,6 +644,69 @@ def train_model(
                         message="best checkpoint",
                     ),
                 )
+
+            if aug_config.enabled and aug_config.geometry_monitor_every_epochs > 0:
+                if epoch % aug_config.geometry_monitor_every_epochs == 0:
+                    geometry_metrics = _run_cross_session_geometry_monitor(
+                        experiment_config=experiment_config,
+                        data_config_path=data_config_path,
+                        dataset_view=dataset_view,
+                        model=model,
+                        device=device,
+                        split_name=aug_config.geometry_monitor_split,
+                        max_batches=aug_config.geometry_monitor_max_batches,
+                        neighbor_k=aug_config.geometry_monitor_neighbor_k,
+                        target_label=aug_config.target_label,
+                        target_label_mode=aug_config.target_label_mode,
+                        target_label_match_value=aug_config.target_label_match_value,
+                    )
+                    geometry_monitor_rows.append(
+                        {
+                            "epoch": int(epoch),
+                            "training_variant_name": aug_config.training_variant_name,
+                            "cross_session_aug_enabled": True,
+                            "cross_session_aug_prob": _scheduled_value(
+                                start=aug_config.aug_prob_start,
+                                end=aug_config.aug_prob_end,
+                                epoch=epoch,
+                                warmup_epochs=aug_config.warmup_epochs,
+                            ),
+                            "cross_session_region_loss_weight": _scheduled_value(
+                                start=aug_config.region_loss_weight_start,
+                                end=aug_config.region_loss_weight_end,
+                                epoch=epoch,
+                                warmup_epochs=aug_config.warmup_epochs,
+                            ),
+                            "split_name": aug_config.geometry_monitor_split,
+                            **geometry_metrics,
+                        }
+                    )
+                    geometry_monitor_json_path = experiment_config.artifacts.summary_path.with_name(
+                        "cross_session_geometry_monitor.json"
+                    )
+                    geometry_monitor_csv_path = experiment_config.artifacts.summary_path.with_name(
+                        "cross_session_geometry_monitor.csv"
+                    )
+                    _write_geometry_monitor_rows(
+                        geometry_monitor_rows,
+                        output_json_path=geometry_monitor_json_path,
+                        output_csv_path=geometry_monitor_csv_path,
+                    )
+                    logger.log_artifact(label="cross-session geometry monitor", path=geometry_monitor_json_path)
+                    _maybe_emit_training_progress(
+                        progress_callback,
+                        TrainingProgressEvent(
+                            event_type="geometry_monitor",
+                            epoch=epoch,
+                            epoch_total=experiment_config.training.num_epochs,
+                            metrics={
+                                key: value
+                                for key, value in geometry_monitor_rows[-1].items()
+                                if isinstance(value, (int, float))
+                            },
+                            message="cross-session geometry monitor",
+                        ),
+                    )
 
             if best_epoch > 0 and best_validation_metrics is not None and best_training_losses is not None:
                 summary = _build_training_summary(
@@ -389,6 +733,7 @@ def train_model(
                 scheduler_state=scheduler.state_dict() if scheduler is not None else None,
                 best_epoch=best_epoch,
                 best_validation_metrics=best_validation_metrics,
+                auxiliary_state=_auxiliary_checkpoint_state(),
             )
             epoch_path = experiment_config.artifacts.checkpoint_dir / f"{experiment_config.artifacts.checkpoint_prefix}_latest.pt"
             save_training_checkpoint(checkpoint, epoch_path)
@@ -464,4 +809,6 @@ def train_model(
         summary_path=experiment_config.artifacts.summary_path,
         best_epoch=best_epoch,
         best_metric=best_metric,
+        geometry_monitor_json_path=geometry_monitor_json_path,
+        geometry_monitor_csv_path=geometry_monitor_csv_path,
     )

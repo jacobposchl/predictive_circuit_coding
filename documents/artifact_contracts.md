@@ -74,6 +74,7 @@ Required payload:
 - `model_state`
 - `optimizer_state`
 - `scheduler_state`
+- `auxiliary_state` when the cross-session auxiliary-loss variant is enabled
 
 Required metadata keys:
 
@@ -83,6 +84,8 @@ Required metadata keys:
 - `config_snapshot`
 - `model_hparams`
 - `continuation_baseline_type`
+- `training_variant_name`
+- `cross_session_aug_enabled`
 
 ## Training Summary JSON
 
@@ -95,6 +98,8 @@ Required keys:
 - `metrics`
 - `losses`
 - `checkpoint_path`
+- `training_variant_name`
+- `cross_session_aug_enabled`
 - `selection_reason`
 
 Semantics:
@@ -106,6 +111,32 @@ Storage policy:
 
 - notebook-driven final runs retain only the selected `best` and `latest` checkpoints by default
 - verbose per-epoch checkpoints are not first-class artifacts in the compact final workflow
+
+## Cross-Session Geometry Monitor JSON And CSV
+
+Augmented training runs may emit a compact geometry-monitor artifact next to `training_summary.json`:
+
+- `train/cross_session_geometry_monitor.json`
+- `train/cross_session_geometry_monitor.csv`
+
+Required row fields:
+
+- `epoch`
+- `training_variant_name`
+- `cross_session_aug_enabled`
+- `cross_session_aug_prob`
+- `cross_session_region_loss_weight`
+- `split_name`
+- `sample_count`
+- `neighbor_k`
+- `label_neighbor_enrichment`
+- `session_neighbor_enrichment`
+- `subject_neighbor_enrichment`
+
+Semantics:
+
+- these rows are periodic diagnostics collected during training on raw encoder features
+- the geometry monitor is the primary acceptance gate for the auxiliary-loss experiment before spending a full benchmark run
 
 ## Evaluation Summary JSON
 
@@ -139,6 +170,8 @@ Each row must retain:
 - `target_label`
 - `target_label_match_value`
 - `arm_name`
+- `training_variant_name`
+- `cross_session_aug_enabled`
 - `feature_family`
 - `geometry_mode`
 - `status`
@@ -174,6 +207,8 @@ Each row must retain:
 - `target_label`
 - `target_label_match_value`
 - `arm_name`
+- `training_variant_name`
+- `cross_session_aug_enabled`
 - `feature_family`
 - `geometry_mode`
 - `status`
@@ -347,13 +382,21 @@ Unified runs also emit a compact final project report under:
 
 Each row must retain:
 
-- `stage_name`
-- `status`
-- `summary_json_path`
-- `summary_csv_path`
-- `notes`
+- `representation_row_count`
+- `motif_row_count`
+- `representation_completed_row_count`
+- `motif_completed_row_count`
+- `representation_mean_test_probe_pr_auc`
+- `motif_mean_held_out_similarity_pr_auc`
+- `training_variant_names`
+- `best_representation_row`
+- `best_motif_row`
+- `claims`
 
-The final project summary is a run-level report artifact, not a replacement for the benchmark and validation detail artifacts.
+Semantics:
+
+- the final project summary is a compact run-level synthesis artifact, not a replacement for the benchmark and validation detail artifacts
+- `training_variant_names` is the run-level bridge for comparing baseline and auxiliary-loss runs across separate `run_id`s
 
 ## Pipeline Manifest And State
 
