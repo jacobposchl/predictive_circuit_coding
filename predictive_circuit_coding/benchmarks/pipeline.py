@@ -644,16 +644,27 @@ def _select_task_specs(
     *,
     include_image_identity: bool,
     image_target_name: str | None,
+    image_target_names: tuple[str, ...] | None = None,
     requested_names: tuple[str, ...] | None,
 ) -> tuple[BenchmarkTaskSpec, ...]:
     default_specs = default_benchmark_task_specs(
         include_image_identity=include_image_identity,
         image_target_name=image_target_name,
+        image_target_names=image_target_names,
     )
     if not requested_names:
         return default_specs
     requested = {str(name) for name in requested_names}
-    return tuple(spec for spec in default_specs if spec.name in requested)
+    return tuple(
+        spec
+        for spec in default_specs
+        if spec.name in requested
+        or (
+            include_image_identity
+            and spec.target_label == "stimulus_presentations.image_name"
+            and spec.target_label_match_value is not None
+        )
+    )
 
 
 def _select_arm_specs(
@@ -1588,6 +1599,8 @@ def run_notebook_pipeline(
     run_stage_alignment_diagnostic: bool,
     run_stage_image_identity_appendix: bool,
     image_target_name: str | None,
+    image_target_names: tuple[str, ...] | None = None,
+    image_target_names_auto: bool = False,
     representation_task_names: tuple[str, ...] | None = None,
     motif_task_names: tuple[str, ...] | None = None,
     representation_arm_names: tuple[str, ...] | None = None,
@@ -1638,6 +1651,8 @@ def run_notebook_pipeline(
         "run_stage_alignment_diagnostic": bool(run_stage_alignment_diagnostic),
         "run_stage_image_identity_appendix": bool(run_stage_image_identity_appendix),
         "image_target_name": image_target_name,
+        "image_target_names": list(image_target_names or ()),
+        "image_target_names_auto": bool(image_target_names_auto),
         "representation_task_names": list(representation_task_names or ()),
         "motif_task_names": list(motif_task_names or ()),
         "representation_arm_names": list(representation_arm_names or ()),
@@ -1720,6 +1735,18 @@ def run_notebook_pipeline(
     checkpoint_path = Path(train_outputs["checkpoint_path"])
     training_summary_path = Path(train_outputs["training_summary_path"])
 
+    resolved_image_target_names = tuple(image_target_names or ())
+    if run_stage_image_identity_appendix and image_target_names_auto:
+        from predictive_circuit_coding.utils.notebook import collect_notebook_target_value_counts
+
+        value_rows = collect_notebook_target_value_counts(
+            experiment_config_path=runtime_experiment_config_path,
+            data_config_path=data_config_path,
+            split_name=load_experiment_config(runtime_experiment_config_path).splits.discovery,
+            target_label="stimulus_presentations.image_name",
+        )
+        resolved_image_target_names = tuple(str(row["value"]) for row in value_rows)
+
     evaluation_outputs = run_standard_evaluation_stage(
         paths=paths,
         states=states,
@@ -1734,11 +1761,13 @@ def run_notebook_pipeline(
     representation_task_specs = _select_task_specs(
         include_image_identity=run_stage_image_identity_appendix,
         image_target_name=image_target_name,
+        image_target_names=resolved_image_target_names,
         requested_names=representation_task_names,
     )
     motif_task_specs = _select_task_specs(
         include_image_identity=run_stage_image_identity_appendix,
         image_target_name=image_target_name,
+        image_target_names=resolved_image_target_names,
         requested_names=motif_task_names,
     )
     representation_task_specs = tuple(spec for spec in representation_task_specs if spec.include_in_representation)
@@ -1859,6 +1888,8 @@ def run_notebook_pipeline_from_config(
         run_stage_alignment_diagnostic=config.run_stage_alignment_diagnostic,
         run_stage_image_identity_appendix=config.run_stage_image_identity_appendix,
         image_target_name=config.image_target_name,
+        image_target_names=config.image_target_names,
+        image_target_names_auto=config.image_target_names_auto,
         representation_task_names=config.representation_task_names,
         motif_task_names=config.motif_task_names,
         representation_arm_names=config.representation_arm_names,

@@ -17,6 +17,7 @@ from predictive_circuit_coding.data import resolve_runtime_dataset_view
 from predictive_circuit_coding.discovery.run import prepare_discovery_collection
 from predictive_circuit_coding.training import ExperimentConfig, load_experiment_config
 from predictive_circuit_coding.windowing.dataset import split_session_ids
+from predictive_circuit_coding.utils.notebook import collect_notebook_target_value_counts
 
 
 _FULL_REPRESENTATION_ARMS = {
@@ -136,6 +137,14 @@ def _check_full_config(
         _add_issue(issues, "full_config", f"Required full-run stages are disabled: {disabled}.")
     if pipeline_config.debug_retain_intermediates:
         _add_issue(issues, "full_config", "debug_retain_intermediates must be false for the full run.")
+    if pipeline_config.run_stage_image_identity_appendix:
+        has_image_targets = bool(pipeline_config.image_target_name) or bool(pipeline_config.image_target_names)
+        if not has_image_targets and not pipeline_config.image_target_names_auto:
+            _add_issue(
+                issues,
+                "full_config",
+                "image_identity_appendix is enabled but neither tasks.image_target_names nor tasks.image_target_name is configured.",
+            )
 
     representation_arms = set(pipeline_config.representation_arm_names or ())
     motif_arms = set(pipeline_config.motif_arm_names or ())
@@ -231,16 +240,11 @@ def _run_task_coverage_gate(
     experiment_config: ExperimentConfig,
     data_config_path: str | Path,
     dataset_view,
-    task_names: tuple[str, ...],
+    task_specs: tuple,
     issues: list[VerificationIssue],
 ) -> tuple[TaskCoverageRow, ...]:
-    task_specs = {task.name: task for task in default_benchmark_task_specs()}
     rows: list[TaskCoverageRow] = []
-    for task_name in task_names:
-        task = task_specs.get(task_name)
-        if task is None:
-            _add_issue(issues, "task_coverage", f"Unknown benchmark task configured: {task_name}.")
-            continue
+    for task in task_specs:
         task_config = _task_config(experiment_config, task)
         for split_name in (experiment_config.splits.discovery, experiment_config.splits.test):
             try:
@@ -318,14 +322,45 @@ def verify_full_run_readiness(
         if counts.get(split_name, 0) <= 0:
             _add_issue(issues, "task_coverage", f"Runtime split '{split_name}' has no sessions.")
 
-    configured_task_names = tuple(
-        sorted(set(pipeline_config.representation_task_names or ()) | set(pipeline_config.motif_task_names or ()))
+    image_target_names = tuple(pipeline_config.image_target_names or ())
+    if pipeline_config.run_stage_image_identity_appendix and pipeline_config.image_target_names_auto:
+        image_rows = collect_notebook_target_value_counts(
+            experiment_config_path=pipeline_config.experiment_config_path,
+            data_config_path=pipeline_config.data_config_path,
+            split_name=experiment_config.splits.discovery,
+            target_label="stimulus_presentations.image_name",
+        )
+        image_target_names = tuple(str(row["value"]) for row in image_rows)
+        if not image_target_names:
+            _add_issue(
+                issues,
+                "image_identity",
+                "image_identity_appendix is enabled with image_target_names=auto, but no stimulus_presentations.image_name values were found in the discovery split.",
+            )
+    if pipeline_config.image_target_name:
+        image_target_names = tuple(dict.fromkeys((pipeline_config.image_target_name, *image_target_names)))
+
+    default_specs = default_benchmark_task_specs(
+        include_image_identity=pipeline_config.run_stage_image_identity_appendix,
+        image_target_name=pipeline_config.image_target_name,
+        image_target_names=image_target_names,
+    )
+    requested_names = set(pipeline_config.representation_task_names or ()) | set(pipeline_config.motif_task_names or ())
+    configured_task_specs = tuple(
+        spec
+        for spec in default_specs
+        if spec.name in requested_names
+        or (
+            pipeline_config.run_stage_image_identity_appendix
+            and spec.target_label == "stimulus_presentations.image_name"
+            and spec.target_label_match_value is not None
+        )
     )
     coverage_rows = _run_task_coverage_gate(
         experiment_config=experiment_config,
         data_config_path=pipeline_config.data_config_path,
         dataset_view=dataset_view,
-        task_names=configured_task_names,
+        task_specs=configured_task_specs,
         issues=issues,
     )
 

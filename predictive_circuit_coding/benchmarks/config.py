@@ -49,6 +49,8 @@ class NotebookPipelineConfig:
     neighbor_k: int
     debug_retain_intermediates: bool
     image_target_name: str | None
+    image_target_names: tuple[str, ...] | None
+    image_target_names_auto: bool
     representation_task_names: tuple[str, ...] | None
     motif_task_names: tuple[str, ...] | None
     representation_arm_names: tuple[str, ...] | None
@@ -124,6 +126,12 @@ def load_notebook_pipeline_config(path: str | Path) -> NotebookPipelineConfig:
             if tasks.get("image_target_name") not in (None, "")
             else None
         ),
+        image_target_names=(
+            None
+            if tasks.get("image_target_names") in (None, "", "auto")
+            else _resolve_names(tasks.get("image_target_names"))
+        ),
+        image_target_names_auto=(str(tasks.get("image_target_names", "")).strip().lower() == "auto"),
         representation_task_names=_resolve_names(tasks.get("representation")),
         motif_task_names=_resolve_names(tasks.get("motifs")),
         representation_arm_names=_resolve_names(arms.get("representation")),

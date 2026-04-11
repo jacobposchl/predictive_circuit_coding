@@ -69,13 +69,41 @@ def default_benchmark_task_specs(
     *,
     include_image_identity: bool = False,
     image_target_name: str | None = None,
+    image_target_names: tuple[str, ...] | None = None,
 ) -> tuple[BenchmarkTaskSpec, ...]:
     tasks = [
         BenchmarkTaskSpec(name="stimulus_change", target_label="stimulus_change"),
         BenchmarkTaskSpec(name="trials_go", target_label="trials.go"),
         BenchmarkTaskSpec(name="stimulus_omitted", target_label="stimulus_presentations.omitted"),
     ]
+    resolved_image_names: list[str] = []
+    if image_target_name not in (None, ""):
+        resolved_image_names.append(str(image_target_name))
+    for value in image_target_names or ():
+        if str(value) and str(value) not in resolved_image_names:
+            resolved_image_names.append(str(value))
     if include_image_identity:
+        if not resolved_image_names:
+            tasks.append(
+                BenchmarkTaskSpec(
+                    name="image_identity_one_vs_rest",
+                    target_label="stimulus_presentations.image_name",
+                    target_label_match_value=None,
+                    optional=True,
+                )
+            )
+        for image_name in resolved_image_names:
+            safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(image_name)).strip("_")
+            safe_name = safe_name or "image"
+            tasks.append(
+                BenchmarkTaskSpec(
+                    name=f"image_identity_{safe_name}",
+                    target_label="stimulus_presentations.image_name",
+                    target_label_match_value=str(image_name),
+                    optional=True,
+                )
+            )
+    elif image_target_name not in (None, ""):
         tasks.append(
             BenchmarkTaskSpec(
                 name="image_identity_one_vs_rest",

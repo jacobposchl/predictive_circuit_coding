@@ -480,7 +480,7 @@ Primary task panel:
 
 Optional appendix task:
 
-- image identity one-vs-rest, only when `stimulus_presentations.image_name` exists in the prepared dataset
+- image identity one-vs-rest, generated from `tasks.image_target_names`. Use `image_target_names: auto` to decode every discovered `stimulus_presentations.image_name` value. This requires prepared sessions that actually contain the `stimulus_presentations` interval.
 
 Blocked / separate task:
 

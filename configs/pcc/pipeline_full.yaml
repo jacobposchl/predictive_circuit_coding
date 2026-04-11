@@ -11,7 +11,7 @@ stages:
   representation_benchmark: true
   motif_benchmark: true
   alignment_diagnostic: false
-  image_identity_appendix: false
+  image_identity_appendix: true
 
 pipeline:
   stage_prepared_sessions_locally: true
@@ -35,6 +35,7 @@ notebook_ui:
 
 tasks:
   image_target_name:
+  image_target_names: auto
   representation: [stimulus_change, trials_go]
   motifs: [stimulus_change, trials_go]
 

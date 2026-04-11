@@ -31,7 +31,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--skip-representation", action="store_true", help="Skip the representation benchmark stage.")
     parser.add_argument("--skip-motifs", action="store_true", help="Skip the motif benchmark stage.")
     parser.add_argument("--include-image-identity", action="store_true", help="Include the optional image identity one-vs-rest task.")
-    parser.add_argument("--image-target-name", default=None, help="Optional image_name value for one-vs-rest image identity.")
+    parser.add_argument(
+        "--image-target-name",
+        dest="image_target_names",
+        action="append",
+        default=None,
+        help="Repeatable image_name value for one-vs-rest image identity.",
+    )
     parser.add_argument("--pca-components", type=int, default=64, help="PCA component cap for PCA benchmark arms.")
     parser.add_argument("--session-holdout-fraction", type=float, default=0.5, help="Within-session held-out fraction for discovery windows.")
     parser.add_argument("--session-holdout-seed", type=int, default=None, help="Optional held-out split seed.")
@@ -56,7 +62,8 @@ def _run(args: argparse.Namespace) -> int:
 
     task_specs = default_benchmark_task_specs(
         include_image_identity=bool(args.include_image_identity),
-        image_target_name=args.image_target_name,
+        image_target_name=None,
+        image_target_names=tuple(args.image_target_names or ()),
     )
     representation_rows: list[dict[str, object]] = []
     motif_rows: list[dict[str, object]] = []
@@ -124,7 +131,7 @@ def _run(args: argparse.Namespace) -> int:
             "checkpoint_path": str(checkpoint_path),
             "output_root": str(output_root.resolve()),
             "include_image_identity": bool(args.include_image_identity),
-            "image_target_name": args.image_target_name,
+            "image_target_names": tuple(args.image_target_names or ()),
             "pca_components": int(args.pca_components),
             "session_holdout_fraction": float(args.session_holdout_fraction),
             "session_holdout_seed": args.session_holdout_seed,
