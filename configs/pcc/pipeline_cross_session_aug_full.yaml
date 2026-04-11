@@ -35,8 +35,8 @@ notebook_ui:
 
 tasks:
   image_target_name:
-  representation: [stimulus_change, trials_go, stimulus_omitted]
-  motifs: [stimulus_change, trials_go, stimulus_omitted]
+  representation: [stimulus_change, trials_go]
+  motifs: [stimulus_change, trials_go]
 
 arms:
   representation:

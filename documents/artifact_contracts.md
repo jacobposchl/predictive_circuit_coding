@@ -438,6 +438,45 @@ Semantics:
 - stage reuse is valid only when `status == complete`, the config hash matches, upstream inputs still match, and declared outputs still exist
 - interrupted or failed stages must remain visible in the state file instead of being silently discarded
 
+## Full-Run Verification Summary
+
+`pcc-verify-full-run` writes a no-training readiness report before a claim-facing Colab run:
+
+- `full_run_verification_summary.json`
+- `full_run_task_coverage.csv`
+
+Required summary keys:
+
+- `status`
+- `pipeline_config_path`
+- `experiment_config_path`
+- `data_config_path`
+- `training_num_epochs`
+- `training_variant_name`
+- `split_counts`
+- `issues`
+- `coverage_rows`
+
+Required coverage CSV columns:
+
+- `task_name`
+- `target_label`
+- `split_name`
+- `status`
+- `total_scanned_windows`
+- `positive_window_count`
+- `negative_window_count`
+- `selected_positive_count`
+- `selected_negative_count`
+- `selected_window_count`
+- `positive_session_count`
+- `failure_reason`
+
+Semantics:
+
+- `status = ok` is required before launching the corresponding full notebook run
+- task coverage must include both classes and at least two positive-window sessions for every configured claim-facing task/split
+
 ## Run-Manifest Sidecars
 
 Stage 5-7 commands also emit sidecars next to their main output artifacts.

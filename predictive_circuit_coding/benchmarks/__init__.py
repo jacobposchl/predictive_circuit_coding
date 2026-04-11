@@ -27,6 +27,12 @@ from predictive_circuit_coding.benchmarks.run import (
     run_motif_benchmark_matrix,
     run_representation_benchmark_matrix,
 )
+from predictive_circuit_coding.benchmarks.verification import (
+    FullRunVerificationResult,
+    TaskCoverageRow,
+    VerificationIssue,
+    verify_full_run_readiness,
+)
 
 __all__ = [
     "BenchmarkArmSpec",
@@ -53,4 +59,8 @@ __all__ = [
     "run_representation_benchmark_stage",
     "run_standard_evaluation_stage",
     "write_final_project_reports",
+    "FullRunVerificationResult",
+    "TaskCoverageRow",
+    "VerificationIssue",
+    "verify_full_run_readiness",
 ]

@@ -448,11 +448,13 @@ Purpose:
 - run the final crossed experiment surface for the project claims
 - compare feature family and geometry mode separately instead of collapsing them into one choice
 - write compact benchmark summaries and per-arm artifacts under one run root
+- verify full-run readiness locally before spending Colab time
 
 CLI:
 
 ```bash
 pcc-benchmark --config configs/pcc/predictive_circuit_coding_full.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_full_best.pt --output-root artifacts/benchmarks
+pcc-verify-full-run --pipeline-config configs/pcc/pipeline_cross_session_aug_full.yaml --output-root artifacts/full_run_verification/cross_session_aug_full
 ```
 
 Primary representation benchmark arms:
@@ -475,11 +477,14 @@ Primary task panel:
 
 - `stimulus_change`
 - `trials.go`
-- `stimulus_presentations.omitted`
 
 Optional appendix task:
 
 - image identity one-vs-rest, only when `stimulus_presentations.image_name` exists in the prepared dataset
+
+Blocked / separate task:
+
+- `stimulus_presentations.omitted` is not part of the current claim-facing full configs because the local verification gate found no positive omitted windows in the current Familiar G discovery/test coverage scan. It should only be reintroduced through a separate rare-event config that passes `pcc-verify-full-run`.
 
 Outputs:
 
@@ -487,6 +492,7 @@ Outputs:
 - motif benchmark summary JSON and CSV
 - final project summary JSON and CSV
 - per-task/per-arm artifact folders under `benchmarks/representation/` and `benchmarks/motifs/`
+- full-run verification summary JSON and task-coverage CSV when `pcc-verify-full-run` is used
 
 ### 6. Colab discovery
 

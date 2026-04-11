@@ -29,6 +29,7 @@ pcc-discover --config configs/pcc/predictive_circuit_coding_full.yaml --data-con
 pcc-validate --config configs/pcc/predictive_circuit_coding_full.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_full_best.pt --discovery-artifact artifacts/checkpoints/pcc_full_best_discovery_discovery.json
 pcc-benchmark --config configs/pcc/predictive_circuit_coding_full.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_full_best.pt --output-root artifacts/benchmarks
 pcc-preview-notebook-ui --output-root artifacts/notebook_ui_preview --force
+pcc-verify-full-run --pipeline-config configs/pcc/pipeline_cross_session_aug_full.yaml --output-root artifacts/full_run_verification/cross_session_aug_full
 ```
 
 Each Stage 5-7 command writes:
@@ -72,6 +73,8 @@ It is intentionally thin and calls the same CLI/library surface listed above.
   `configs/pcc/predictive_circuit_coding_cross_session_aug_full.yaml`
 - representation benchmarks are now crossed by feature family x geometry mode, with raw versus whitened comparisons made explicit across count-based, PCA, and frozen-encoder feature families
 - the cross-session auxiliary-loss experiment ships as a parallel config family rather than replacing the baseline full run; compare baseline and augmented runs across separate `run_id`s using the exported `training_variant_name` column in benchmark summaries
+- run `pcc-verify-full-run` before launching a claim-facing Colab run; it validates the full config, checks local real-data label coverage, and blocks tasks that would otherwise degrade into NaN summaries
+- the current claim-facing full task panel is `stimulus_change` plus `trials_go`; `stimulus_omitted` is excluded from the full configs because the current Familiar G split has no positive omitted windows in the benchmark coverage scan
 - discovery supports both capped `sequential` planning and `label_balanced` planning with explicit `max_batches`, `search_max_batches`, `min_positive_windows`, and `negative_to_positive_ratio` controls
 - major Allen decode targets default to event-local onset labeling rather than broad overlap labeling
 - discovery candidate selection is session-balanced by default via `discovery.candidate_session_balance_fraction` so one session does not dominate the top-k motif pool; set it to `1.0` to restore pure global top-k scoring for comparisons
@@ -118,6 +121,7 @@ Training problems:
 - if a checkpoint dataset mismatch is reported, use a checkpoint produced from the same dataset/config family
 - if `training_summary.json` looks inconsistent with the latest epoch, remember it now intentionally describes the selected best checkpoint, not the latest completed epoch
 - if you are running the cross-session auxiliary-loss variant, check `cross_session_geometry_monitor.json/csv` next to the training summary before spending time on a full benchmark run; the debug acceptance gate is a nonzero realized augmentation fraction plus a meaningful drop in raw session-neighbor enrichment without collapsing label enrichment
+- if `pcc-verify-full-run` blocks a task, do not launch the full notebook with that task still enabled; either remove it from the claim-facing pipeline config or make a separate rare-event config that passes coverage
 
 Discovery problems:
 

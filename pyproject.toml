@@ -38,6 +38,7 @@ pcc-discover = "predictive_circuit_coding.cli.discover:main"
 pcc-validate = "predictive_circuit_coding.cli.validate:main"
 pcc-benchmark = "predictive_circuit_coding.cli.benchmark:main"
 pcc-preview-notebook-ui = "predictive_circuit_coding.cli.preview_notebook:main"
+pcc-verify-full-run = "predictive_circuit_coding.cli.verify_full_run:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

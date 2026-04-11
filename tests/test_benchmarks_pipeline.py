@@ -11,6 +11,7 @@ from predictive_circuit_coding.benchmarks import (
     load_notebook_pipeline_config,
     run_notebook_pipeline,
     run_notebook_pipeline_from_config,
+    verify_full_run_readiness,
 )
 from predictive_circuit_coding.benchmarks.contracts import BenchmarkArmSpec, BenchmarkTaskSpec
 from predictive_circuit_coding.benchmarks.run import (
@@ -67,6 +68,73 @@ def _write_augmented_experiment_config(base_config_path: Path, *, output_path: P
     payload["objective"] = objective
     payload["artifacts"] = artifacts
     output_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    return output_path
+
+
+def _write_full_verification_pipeline_config(
+    *,
+    output_path: Path,
+    experiment_config_path: Path,
+    data_config_path: Path,
+    local_artifact_root: Path,
+    include_stimulus_omitted: bool = True,
+) -> Path:
+    task_names = ["stimulus_change", "trials_go"]
+    if include_stimulus_omitted:
+        task_names.append("stimulus_omitted")
+    output_path.write_text(
+        yaml.safe_dump(
+            {
+                "paths": {
+                    "experiment_config_path": experiment_config_path.name,
+                    "data_config_path": data_config_path.name,
+                    "local_artifact_root": str(local_artifact_root),
+                    "drive_export_root": "",
+                    "source_dataset_root": "",
+                },
+                "stages": {
+                    "train": True,
+                    "evaluate": True,
+                    "representation_benchmark": True,
+                    "motif_benchmark": True,
+                    "alignment_diagnostic": False,
+                    "image_identity_appendix": False,
+                },
+                "pipeline": {
+                    "stage_prepared_sessions_locally": False,
+                    "step_log_every": 10,
+                    "pca_components": 64,
+                    "session_holdout_fraction": 0.5,
+                    "session_holdout_seed": 7,
+                    "neighbor_k": 5,
+                    "debug_retain_intermediates": False,
+                },
+                "tasks": {
+                    "image_target_name": None,
+                    "representation": task_names,
+                    "motifs": task_names,
+                },
+                "arms": {
+                    "representation": [
+                        "count_patch_mean_raw",
+                        "count_patch_mean_whitened",
+                        "count_patch_mean_pca_raw",
+                        "count_patch_mean_pca_whitened",
+                        "encoder_raw",
+                        "encoder_whitened",
+                    ],
+                    "motifs": [
+                        "count_patch_mean_pca_raw",
+                        "count_patch_mean_pca_whitened",
+                        "encoder_raw",
+                        "encoder_whitened",
+                    ],
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
     return output_path
 
 
@@ -303,6 +371,95 @@ def test_augmented_pipeline_run_surfaces_training_variant_and_geometry(tmp_path:
     assert "training_variant_name" in tables["representation"].columns
     assert not tables["training_geometry"].empty
     assert "training_variant_names" in json.loads(result.final_summary_json_path.read_text(encoding="utf-8"))["final_project_summary"][0]
+
+
+def test_full_run_verification_blocks_known_degraded_task_panel(tmp_path: Path) -> None:
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    full_config_path = _write_augmented_experiment_config(
+        experiment_config_path,
+        output_path=experiment_config_path.with_name("predictive_circuit_coding_cross_session_aug_full.yaml"),
+    )
+    payload = yaml.safe_load(full_config_path.read_text(encoding="utf-8"))
+    payload["training"]["num_epochs"] = 50
+    payload["objective"]["cross_session_aug"]["training_variant_name"] = "cross_session_aug_full"
+    payload["discovery"]["max_batches"] = 2
+    payload["evaluation"]["max_batches"] = 2
+    full_config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    pipeline_config_path = _write_full_verification_pipeline_config(
+        output_path=full_config_path.with_name("pipeline_cross_session_aug_full.yaml"),
+        experiment_config_path=full_config_path,
+        data_config_path=prep_config_path,
+        local_artifact_root=tmp_path / "artifacts",
+    )
+
+    result = verify_full_run_readiness(
+        pipeline_config_path=pipeline_config_path,
+        output_root=tmp_path / "verification",
+    )
+
+    assert result.status == "blocked"
+    assert result.training_num_epochs == 50
+    assert result.coverage_csv_path.is_file()
+    assert result.summary_json_path.is_file()
+    assert any(row.task_name == "stimulus_omitted" and row.status != "ok" for row in result.coverage_rows)
+    assert any(issue.gate == "task_coverage" for issue in result.issues)
+
+
+def test_full_run_verification_blocks_not_full_epoch_config(tmp_path: Path) -> None:
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    full_config_path = _write_augmented_experiment_config(
+        experiment_config_path,
+        output_path=experiment_config_path.with_name("predictive_circuit_coding_cross_session_aug_full.yaml"),
+    )
+    payload = yaml.safe_load(full_config_path.read_text(encoding="utf-8"))
+    payload["training"]["num_epochs"] = 49
+    payload["objective"]["cross_session_aug"]["training_variant_name"] = "cross_session_aug_full"
+    full_config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    pipeline_config_path = _write_full_verification_pipeline_config(
+        output_path=full_config_path.with_name("pipeline_cross_session_aug_full.yaml"),
+        experiment_config_path=full_config_path,
+        data_config_path=prep_config_path,
+        local_artifact_root=tmp_path / "artifacts",
+    )
+
+    result = verify_full_run_readiness(
+        pipeline_config_path=pipeline_config_path,
+        output_root=tmp_path / "verification",
+    )
+
+    assert result.status == "blocked"
+    assert any("num_epochs" in issue.message for issue in result.issues)
+
+
+def test_full_run_verification_blocks_single_positive_session_panel(tmp_path: Path) -> None:
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    full_config_path = _write_augmented_experiment_config(
+        experiment_config_path,
+        output_path=experiment_config_path.with_name("predictive_circuit_coding_cross_session_aug_full.yaml"),
+    )
+    payload = yaml.safe_load(full_config_path.read_text(encoding="utf-8"))
+    payload["training"]["num_epochs"] = 50
+    payload["objective"]["cross_session_aug"]["training_variant_name"] = "cross_session_aug_full"
+    payload["discovery"]["max_batches"] = 2
+    payload["evaluation"]["max_batches"] = 2
+    full_config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    pipeline_config_path = _write_full_verification_pipeline_config(
+        output_path=full_config_path.with_name("pipeline_cross_session_aug_full.yaml"),
+        experiment_config_path=full_config_path,
+        data_config_path=prep_config_path,
+        local_artifact_root=tmp_path / "artifacts",
+        include_stimulus_omitted=False,
+    )
+
+    result = verify_full_run_readiness(
+        pipeline_config_path=pipeline_config_path,
+        output_root=tmp_path / "verification",
+    )
+
+    assert result.status == "blocked"
+    assert {row.task_name for row in result.coverage_rows} == {"stimulus_change", "trials_go"}
+    assert any(row.status == "blocked_insufficient_positive_sessions" for row in result.coverage_rows)
+    assert any("too few sessions" in (issue.message or "") for issue in result.issues)
 
 
 def test_run_notebook_pipeline_writes_resume_state(tmp_path: Path) -> None:
