@@ -257,7 +257,17 @@ def _build_encoder_tokens(
     use_checkpoint: bool,
 ):
     device = resolve_device(experiment_config.execution.device)
-    model = build_model_from_config(experiment_config).to(device)
+    if use_checkpoint:
+        model = build_model_from_config(experiment_config).to(device)
+    else:
+        cuda_devices: list[int] = []
+        if device.type == "cuda" and torch.cuda.is_available():
+            cuda_devices = [torch.cuda.current_device() if device.index is None else int(device.index)]
+        with torch.random.fork_rng(devices=cuda_devices, enabled=True):
+            torch.manual_seed(int(experiment_config.seed))
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(int(experiment_config.seed))
+            model = build_model_from_config(experiment_config).to(device)
     if use_checkpoint:
         if checkpoint_path is None:
             raise ValueError("checkpoint_path is required when use_checkpoint=True")

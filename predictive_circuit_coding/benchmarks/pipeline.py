@@ -1605,7 +1605,6 @@ def run_notebook_pipeline(
     motif_task_names: tuple[str, ...] | None = None,
     representation_arm_names: tuple[str, ...] | None = None,
     motif_arm_names: tuple[str, ...] | None = None,
-    pca_components: int = 64,
     session_holdout_fraction: float = 0.5,
     session_holdout_seed: int | None = None,
     neighbor_k: int = 5,
@@ -1657,7 +1656,6 @@ def run_notebook_pipeline(
         "motif_task_names": list(motif_task_names or ()),
         "representation_arm_names": list(representation_arm_names or ()),
         "motif_arm_names": list(motif_arm_names or ()),
-        "pca_components": int(pca_components),
         "session_holdout_fraction": float(session_holdout_fraction),
         "session_holdout_seed": session_holdout_seed,
         "neighbor_k": int(neighbor_k),
@@ -1773,11 +1771,11 @@ def run_notebook_pipeline(
     representation_task_specs = tuple(spec for spec in representation_task_specs if spec.include_in_representation)
     motif_task_specs = tuple(spec for spec in motif_task_specs if spec.include_in_motifs)
     representation_arm_specs = _select_arm_specs(
-        default_representation_arm_specs(pca_components=pca_components),
+        default_representation_arm_specs(),
         representation_arm_names,
     )
     motif_arm_specs = _select_arm_specs(
-        default_motif_arm_specs(pca_components=pca_components),
+        default_motif_arm_specs(),
         motif_arm_names,
     )
 
@@ -1894,7 +1892,6 @@ def run_notebook_pipeline_from_config(
         motif_task_names=config.motif_task_names,
         representation_arm_names=config.representation_arm_names,
         motif_arm_names=config.motif_arm_names,
-        pca_components=config.pca_components,
         session_holdout_fraction=config.session_holdout_fraction,
         session_holdout_seed=config.session_holdout_seed,
         neighbor_k=config.neighbor_k,

@@ -38,7 +38,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Repeatable image_name value for one-vs-rest image identity.",
     )
-    parser.add_argument("--pca-components", type=int, default=64, help="PCA component cap for PCA benchmark arms.")
     parser.add_argument("--session-holdout-fraction", type=float, default=0.5, help="Within-session held-out fraction for discovery windows.")
     parser.add_argument("--session-holdout-seed", type=int, default=None, help="Optional held-out split seed.")
     parser.add_argument("--neighbor-k", type=int, default=5, help="k for geometry neighbor enrichment metrics.")
@@ -75,7 +74,7 @@ def _run(args: argparse.Namespace) -> int:
             checkpoint_path=checkpoint_path,
             output_root=representation_root,
             task_specs=task_specs,
-            arm_specs=default_representation_arm_specs(pca_components=int(args.pca_components)),
+            arm_specs=default_representation_arm_specs(),
             session_holdout_fraction=float(args.session_holdout_fraction),
             session_holdout_seed=args.session_holdout_seed,
             neighbor_k=int(args.neighbor_k),
@@ -95,7 +94,7 @@ def _run(args: argparse.Namespace) -> int:
             checkpoint_path=checkpoint_path,
             output_root=motif_root,
             task_specs=task_specs,
-            arm_specs=default_motif_arm_specs(pca_components=int(args.pca_components)),
+            arm_specs=default_motif_arm_specs(),
             session_holdout_fraction=float(args.session_holdout_fraction),
             session_holdout_seed=args.session_holdout_seed,
             debug_retain_intermediates=bool(args.retain_debug_intermediates),
@@ -132,7 +131,6 @@ def _run(args: argparse.Namespace) -> int:
             "output_root": str(output_root.resolve()),
             "include_image_identity": bool(args.include_image_identity),
             "image_target_names": tuple(args.image_target_names or ()),
-            "pca_components": int(args.pca_components),
             "session_holdout_fraction": float(args.session_holdout_fraction),
             "session_holdout_seed": args.session_holdout_seed,
             "neighbor_k": int(args.neighbor_k),

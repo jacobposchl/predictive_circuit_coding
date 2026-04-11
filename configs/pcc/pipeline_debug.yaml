@@ -16,7 +16,6 @@ stages:
 pipeline:
   stage_prepared_sessions_locally: true
   step_log_every: 1
-  pca_components: 16
   session_holdout_fraction: 0.5
   session_holdout_seed: 7
   neighbor_k: 3
@@ -39,5 +38,5 @@ tasks:
   motifs: [stimulus_change]
 
 arms:
-  representation: [count_patch_mean_raw, encoder_raw, encoder_whitened]
-  motifs: [encoder_raw, encoder_whitened]
+  representation: [count_patch_mean_raw, untrained_encoder_raw, encoder_raw, encoder_whitened]
+  motifs: [untrained_encoder_raw, encoder_raw, encoder_whitened]

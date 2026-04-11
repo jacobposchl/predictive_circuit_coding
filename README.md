@@ -71,7 +71,7 @@ It is intentionally thin and calls the same CLI/library surface listed above.
   `configs/pcc/predictive_circuit_coding_debug.yaml`, `configs/pcc/predictive_circuit_coding_full.yaml`,
   `configs/pcc/predictive_circuit_coding_cross_session_aug_debug.yaml`, and
   `configs/pcc/predictive_circuit_coding_cross_session_aug_full.yaml`
-- representation benchmarks are now crossed by feature family x geometry mode, with raw versus whitened comparisons made explicit across count-based, PCA, and frozen-encoder feature families
+- representation benchmarks compare a simple count-feature floor, an untrained encoder architecture baseline, the trained encoder, and trained encoder whitening
 - the cross-session auxiliary-loss experiment ships as a parallel config family rather than replacing the baseline full run; compare baseline and augmented runs across separate `run_id`s using the exported `training_variant_name` column in benchmark summaries
 - run `pcc-verify-full-run` before launching a claim-facing Colab run; it validates the full config, checks local real-data label coverage, and blocks tasks that would otherwise degrade into NaN summaries
 - the current claim-facing full task panel is `stimulus_change` plus `trials_go`; `stimulus_omitted` is excluded from the full configs because the current Familiar G split has no positive omitted windows in the benchmark coverage scan

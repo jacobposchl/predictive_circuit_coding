@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import textwrap
 
+import torch
 import yaml
 
 from predictive_circuit_coding.benchmarks import (
@@ -14,7 +15,10 @@ from predictive_circuit_coding.benchmarks import (
     verify_full_run_readiness,
 )
 from predictive_circuit_coding.benchmarks.contracts import BenchmarkArmSpec, BenchmarkTaskSpec
+from predictive_circuit_coding.benchmarks.features import extract_benchmark_selected_windows
 from predictive_circuit_coding.benchmarks.run import (
+    default_motif_arm_specs,
+    default_representation_arm_specs,
     run_motif_benchmark_matrix,
     run_representation_benchmark_matrix,
 )
@@ -26,6 +30,7 @@ from predictive_circuit_coding.data import (
     write_session_catalog,
     write_session_catalog_csv,
 )
+from predictive_circuit_coding.discovery.run import prepare_discovery_collection
 from predictive_circuit_coding.training import load_experiment_config, load_training_checkpoint
 from predictive_circuit_coding.training.loop import train_model
 from predictive_circuit_coding.utils.notebook import (
@@ -103,7 +108,6 @@ def _write_full_verification_pipeline_config(
                 "pipeline": {
                     "stage_prepared_sessions_locally": False,
                     "step_log_every": 10,
-                    "pca_components": 64,
                     "session_holdout_fraction": 0.5,
                     "session_holdout_seed": 7,
                     "neighbor_k": 5,
@@ -117,15 +121,12 @@ def _write_full_verification_pipeline_config(
                 "arms": {
                     "representation": [
                         "count_patch_mean_raw",
-                        "count_patch_mean_whitened",
-                        "count_patch_mean_pca_raw",
-                        "count_patch_mean_pca_whitened",
+                        "untrained_encoder_raw",
                         "encoder_raw",
                         "encoder_whitened",
                     ],
                     "motifs": [
-                        "count_patch_mean_pca_raw",
-                        "count_patch_mean_pca_whitened",
+                        "untrained_encoder_raw",
                         "encoder_raw",
                         "encoder_whitened",
                     ],
@@ -148,6 +149,23 @@ def test_unified_pipeline_notebook_parses_and_has_stage_runner_cell() -> None:
     sources = ["".join(cell.get("source", [])) for cell in cells]
     assert any("run_notebook_pipeline_from_config" in source for source in sources)
     assert any("PIPELINE_CONFIG_PATH" in source for source in sources)
+
+
+def test_default_benchmark_arms_use_untrained_encoder_baseline_without_pca() -> None:
+    representation_arms = default_representation_arm_specs()
+    motif_arms = default_motif_arm_specs()
+    assert tuple(arm.name for arm in representation_arms) == (
+        "count_patch_mean_raw",
+        "untrained_encoder_raw",
+        "encoder_raw",
+        "encoder_whitened",
+    )
+    assert tuple(arm.name for arm in motif_arms) == (
+        "untrained_encoder_raw",
+        "encoder_raw",
+        "encoder_whitened",
+    )
+    assert not any(arm.use_pca for arm in representation_arms + motif_arms)
 
 
 def test_load_notebook_pipeline_config_resolves_relative_paths(tmp_path: Path) -> None:
@@ -174,7 +192,6 @@ def test_load_notebook_pipeline_config_resolves_relative_paths(tmp_path: Path) -
             pipeline:
               stage_prepared_sessions_locally: true
               step_log_every: 3
-              pca_components: 16
               session_holdout_fraction: 0.5
               session_holdout_seed: 7
               neighbor_k: 4
@@ -286,6 +303,47 @@ def test_benchmark_matrices_write_summary_artifacts(tmp_path: Path) -> None:
     assert "status" in motif_results[0].summary
 
 
+def test_untrained_encoder_features_are_deterministic_and_checkpoint_free(tmp_path: Path) -> None:
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    experiment_config = load_experiment_config(experiment_config_path)
+    training_result = train_model(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        train_split="train",
+        valid_split="valid",
+    )
+    window_plan = prepare_discovery_collection(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        split_name="discovery",
+    )
+
+    untrained_a = extract_benchmark_selected_windows(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        feature_family="untrained_encoder",
+        window_plan=window_plan,
+    )
+    untrained_b = extract_benchmark_selected_windows(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        feature_family="untrained_encoder",
+        window_plan=window_plan,
+    )
+    trained = extract_benchmark_selected_windows(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        feature_family="encoder",
+        window_plan=window_plan,
+        checkpoint_path=training_result.checkpoint_path,
+    )
+
+    assert untrained_a.feature_family == "untrained_encoder"
+    assert untrained_a.pooled_features.shape == trained.pooled_features.shape
+    assert untrained_a.token_tensors.shape == trained.token_tensors.shape
+    assert torch.allclose(untrained_a.pooled_features, untrained_b.pooled_features)
+
+
 def test_augmented_training_writes_geometry_monitor_and_auxiliary_state(tmp_path: Path) -> None:
     prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
     augmented_config_path = _write_augmented_experiment_config(
@@ -352,7 +410,6 @@ def test_augmented_pipeline_run_surfaces_training_variant_and_geometry(tmp_path:
         motif_task_names=("stimulus_change",),
         representation_arm_names=("encoder_raw",),
         motif_arm_names=("encoder_raw",),
-        pca_components=8,
         session_holdout_fraction=0.5,
         session_holdout_seed=5,
         neighbor_k=3,
@@ -488,7 +545,6 @@ def test_run_notebook_pipeline_writes_resume_state(tmp_path: Path) -> None:
         motif_task_names=("stimulus_change",),
         representation_arm_names=("encoder_raw",),
         motif_arm_names=("encoder_raw",),
-        pca_components=8,
         session_holdout_fraction=0.5,
         session_holdout_seed=5,
         neighbor_k=3,
@@ -524,7 +580,6 @@ def test_run_notebook_pipeline_writes_resume_state(tmp_path: Path) -> None:
         motif_task_names=("stimulus_change",),
         representation_arm_names=("encoder_raw",),
         motif_arm_names=("encoder_raw",),
-        pca_components=8,
         session_holdout_fraction=0.5,
         session_holdout_seed=5,
         neighbor_k=3,
@@ -700,7 +755,6 @@ def test_run_notebook_pipeline_from_config_uses_repo_config_surface(tmp_path: Pa
 
             pipeline:
               step_log_every: 1
-              pca_components: 8
               session_holdout_fraction: 0.5
               session_holdout_seed: 5
               neighbor_k: 3
@@ -772,7 +826,6 @@ def test_run_notebook_pipeline_from_config_stages_source_dataset_root(tmp_path: 
             pipeline:
               stage_prepared_sessions_locally: true
               step_log_every: 1
-              pca_components: 8
               session_holdout_fraction: 0.5
               session_holdout_seed: 5
               neighbor_k: 3

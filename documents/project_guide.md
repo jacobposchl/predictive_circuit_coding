@@ -445,8 +445,9 @@ Outputs:
 
 Purpose:
 
-- run the final crossed experiment surface for the project claims
-- compare feature family and geometry mode separately instead of collapsing them into one choice
+- run the final benchmark surface for the project claims
+- compare the trained encoder against a simple count-feature floor and an untrained same-architecture encoder baseline
+- compare raw trained encoder features against whitened trained encoder features for the geometry claim
 - write compact benchmark summaries and per-arm artifacts under one run root
 - verify full-run readiness locally before spending Colab time
 
@@ -460,16 +461,13 @@ pcc-verify-full-run --pipeline-config configs/pcc/pipeline_cross_session_aug_ful
 Primary representation benchmark arms:
 
 - `count_patch_mean_raw`
-- `count_patch_mean_whitened`
-- `count_patch_mean_pca_raw`
-- `count_patch_mean_pca_whitened`
+- `untrained_encoder_raw`
 - `encoder_raw`
 - `encoder_whitened`
 
 Primary motif benchmark arms:
 
-- `count_patch_mean_pca_raw`
-- `count_patch_mean_pca_whitened`
+- `untrained_encoder_raw`
 - `encoder_raw`
 - `encoder_whitened`
 

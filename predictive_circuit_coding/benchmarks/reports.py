@@ -86,7 +86,14 @@ def build_final_project_summary(
         )
     if representation_ok:
         claims.append(
-            "geometry: whitening benefit can be assessed by comparing paired raw/whitened rows in the representation summary"
+            "representation learning: compare encoder_raw against untrained_encoder_raw to isolate training from architecture/tokenization"
+        )
+        claims.append(
+            "geometry: compare encoder_raw against encoder_whitened to isolate the effect of whitening on the trained representation"
+        )
+    if motif_ok:
+        claims.append(
+            "motif specificity: compare trained encoder motif rows against untrained_encoder_raw to test whether motifs depend on learned weights"
         )
 
     return {

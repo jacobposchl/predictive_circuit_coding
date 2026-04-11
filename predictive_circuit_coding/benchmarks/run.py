@@ -115,33 +115,18 @@ def default_benchmark_task_specs(
     return tuple(tasks)
 
 
-def default_representation_arm_specs(*, pca_components: int) -> tuple[BenchmarkArmSpec, ...]:
+def default_representation_arm_specs() -> tuple[BenchmarkArmSpec, ...]:
     return (
         BenchmarkArmSpec("count_patch_mean_raw", "count_patch_mean", "raw", use_pca=False),
-        BenchmarkArmSpec("count_patch_mean_whitened", "count_patch_mean", "whitened", use_pca=False),
-        BenchmarkArmSpec("count_patch_mean_pca_raw", "count_patch_mean", "raw", use_pca=True, pca_components=pca_components),
-        BenchmarkArmSpec(
-            "count_patch_mean_pca_whitened",
-            "count_patch_mean",
-            "whitened",
-            use_pca=True,
-            pca_components=pca_components,
-        ),
+        BenchmarkArmSpec("untrained_encoder_raw", "untrained_encoder", "raw", use_pca=False),
         BenchmarkArmSpec("encoder_raw", "encoder", "raw", use_pca=False),
         BenchmarkArmSpec("encoder_whitened", "encoder", "whitened", use_pca=False),
     )
 
 
-def default_motif_arm_specs(*, pca_components: int) -> tuple[BenchmarkArmSpec, ...]:
+def default_motif_arm_specs() -> tuple[BenchmarkArmSpec, ...]:
     return (
-        BenchmarkArmSpec("count_patch_mean_pca_raw", "count_patch_mean", "raw", use_pca=True, pca_components=pca_components),
-        BenchmarkArmSpec(
-            "count_patch_mean_pca_whitened",
-            "count_patch_mean",
-            "whitened",
-            use_pca=True,
-            pca_components=pca_components,
-        ),
+        BenchmarkArmSpec("untrained_encoder_raw", "untrained_encoder", "raw", use_pca=False),
         BenchmarkArmSpec("encoder_raw", "encoder", "raw", use_pca=False),
         BenchmarkArmSpec("encoder_whitened", "encoder", "whitened", use_pca=False),
     )
@@ -279,6 +264,14 @@ def _held_out_similarity_summary(
     }
 
 
+def _encoder_arm_metadata(arm: BenchmarkArmSpec) -> dict[str, str | bool]:
+    if arm.feature_family == "encoder":
+        return {"encoder_training_status": "trained", "encoder_checkpoint_loaded": True}
+    if arm.feature_family == "untrained_encoder":
+        return {"encoder_training_status": "untrained", "encoder_checkpoint_loaded": False}
+    return {"encoder_training_status": "not_encoder", "encoder_checkpoint_loaded": False}
+
+
 def _transform_summary_row(
     *,
     experiment_config: ExperimentConfig,
@@ -289,19 +282,17 @@ def _transform_summary_row(
     test_whitening_summary: dict[str, Any] | None,
 ) -> dict[str, Any]:
     aggregate = (whitening_summary or {}).get("aggregate_metrics") or {}
+    encoder_metadata = _encoder_arm_metadata(arm)
     return {
         "task_name": task.name,
         "target_label": task.target_label,
         "target_label_match_value": task.target_label_match_value,
         "arm_name": arm.name,
         "feature_family": arm.feature_family,
+        **encoder_metadata,
         "geometry_mode": arm.geometry_mode,
-        "use_pca": arm.use_pca,
         "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
         "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
-        "pca_applied": (pca_summary or {}).get("applied"),
-        "pca_components": (pca_summary or {}).get("components"),
-        "pca_explained_variance_ratio_sum": (pca_summary or {}).get("explained_variance_ratio_sum"),
         "whitening_session_count": (whitening_summary or {}).get("session_count"),
         "whitening_reference_session_id": (whitening_summary or {}).get("reference_session_id"),
         "whitening_mean_label_axis_cosine_before": aggregate.get("mean_label_axis_cosine_before"),
@@ -364,14 +355,15 @@ def _representation_row(
     label_geometry = geometry_metrics.get("label") or {}
     session_geometry = geometry_metrics.get("session_id") or {}
     subject_geometry = geometry_metrics.get("subject_id") or {}
+    encoder_metadata = _encoder_arm_metadata(arm)
     return {
         "task_name": task.name,
         "target_label": task.target_label,
         "target_label_match_value": task.target_label_match_value,
         "arm_name": arm.name,
         "feature_family": arm.feature_family,
+        **encoder_metadata,
         "geometry_mode": arm.geometry_mode,
-        "use_pca": arm.use_pca,
         "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
         "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
         "status": status,
@@ -421,14 +413,15 @@ def _motif_row(
     clusters = cluster_report.get("clusters", []) if isinstance(cluster_report, dict) else []
     max_session_spread = max((int(cluster.get("session_count", 0)) for cluster in clusters), default=0)
     max_subject_spread = max((int(cluster.get("subject_count", 0)) for cluster in clusters), default=0)
+    encoder_metadata = _encoder_arm_metadata(arm)
     return {
         "task_name": task.name,
         "target_label": task.target_label,
         "target_label_match_value": task.target_label_match_value,
         "arm_name": arm.name,
         "feature_family": arm.feature_family,
+        **encoder_metadata,
         "geometry_mode": arm.geometry_mode,
-        "use_pca": arm.use_pca,
         "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
         "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
         "status": status,
@@ -639,7 +632,7 @@ def run_representation_benchmark_matrix(
         data_config_path=data_config_path,
     )
     tasks = task_specs or default_benchmark_task_specs()
-    arms = arm_specs or default_representation_arm_specs(pca_components=64)
+    arms = arm_specs or default_representation_arm_specs()
     output_root_path = Path(output_root)
     output_root_path.mkdir(parents=True, exist_ok=True)
     resolved_discovery_split = discovery_split_name or experiment_config.splits.discovery
@@ -874,38 +867,43 @@ def run_representation_benchmark_matrix(
                     )
 
                 discovery_collection, test_collection, split = cached
-                _maybe_emit_benchmark_progress(
-                    progress_callback,
-                    BenchmarkProgressEvent(
-                        benchmark_name="representation",
-                        event_type="arm_step",
-                        task_name=task.name,
-                        arm_name=arm.name,
-                        step_name="pca",
-                        current=0,
-                        total=1,
-                        message="fit/apply PCA",
-                    ),
-                )
-                transformed_discovery, transformed_test, _, pca_summary = _fit_optional_pca(
-                    arm=arm,
-                    discovery_collection=discovery_collection,
-                    test_collection=test_collection,
-                    fit_indices=split.fit_indices,
-                )
-                _maybe_emit_benchmark_progress(
-                    progress_callback,
-                    BenchmarkProgressEvent(
-                        benchmark_name="representation",
-                        event_type="arm_step",
-                        task_name=task.name,
-                        arm_name=arm.name,
-                        step_name="pca",
-                        current=1,
-                        total=1,
-                        message="fit/apply PCA",
-                    ),
-                )
+                if arm.use_pca:
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="representation",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="pca",
+                            current=0,
+                            total=1,
+                            message="fit/apply PCA",
+                        ),
+                    )
+                    transformed_discovery, transformed_test, _, pca_summary = _fit_optional_pca(
+                        arm=arm,
+                        discovery_collection=discovery_collection,
+                        test_collection=test_collection,
+                        fit_indices=split.fit_indices,
+                    )
+                    _maybe_emit_benchmark_progress(
+                        progress_callback,
+                        BenchmarkProgressEvent(
+                            benchmark_name="representation",
+                            event_type="arm_step",
+                            task_name=task.name,
+                            arm_name=arm.name,
+                            step_name="pca",
+                            current=1,
+                            total=1,
+                            message="fit/apply PCA",
+                        ),
+                    )
+                else:
+                    transformed_discovery = discovery_collection
+                    transformed_test = test_collection
+                    pca_summary = None
 
                 whitening_summary = None
                 test_whitening_summary = None
@@ -1173,7 +1171,7 @@ def run_motif_benchmark_matrix(
         data_config_path=data_config_path,
     )
     tasks = task_specs or default_benchmark_task_specs()
-    arms = arm_specs or default_motif_arm_specs(pca_components=64)
+    arms = arm_specs or default_motif_arm_specs()
     output_root_path = Path(output_root)
     output_root_path.mkdir(parents=True, exist_ok=True)
     resolved_discovery_split = discovery_split_name or experiment_config.splits.discovery
@@ -1469,38 +1467,44 @@ def run_motif_benchmark_matrix(
                         )
 
                     discovery_collection, test_collection, split, _ = cached
-                    _maybe_emit_benchmark_progress(
-                        progress_callback,
-                        BenchmarkProgressEvent(
-                            benchmark_name="motif",
-                            event_type="arm_step",
-                            task_name=task.name,
-                            arm_name=arm.name,
-                            step_name="pca",
-                            current=0,
-                            total=1,
-                            message="fit/apply PCA",
-                        ),
-                    )
-                    transformed_discovery, transformed_test, global_transform, pca_summary = _fit_optional_pca(
-                        arm=arm,
-                        discovery_collection=discovery_collection,
-                        test_collection=test_collection,
-                        fit_indices=split.fit_indices,
-                    )
-                    _maybe_emit_benchmark_progress(
-                        progress_callback,
-                        BenchmarkProgressEvent(
-                            benchmark_name="motif",
-                            event_type="arm_step",
-                            task_name=task.name,
-                            arm_name=arm.name,
-                            step_name="pca",
-                            current=1,
-                            total=1,
-                            message="fit/apply PCA",
-                        ),
-                    )
+                    if arm.use_pca:
+                        _maybe_emit_benchmark_progress(
+                            progress_callback,
+                            BenchmarkProgressEvent(
+                                benchmark_name="motif",
+                                event_type="arm_step",
+                                task_name=task.name,
+                                arm_name=arm.name,
+                                step_name="pca",
+                                current=0,
+                                total=1,
+                                message="fit/apply PCA",
+                            ),
+                        )
+                        transformed_discovery, transformed_test, global_transform, pca_summary = _fit_optional_pca(
+                            arm=arm,
+                            discovery_collection=discovery_collection,
+                            test_collection=test_collection,
+                            fit_indices=split.fit_indices,
+                        )
+                        _maybe_emit_benchmark_progress(
+                            progress_callback,
+                            BenchmarkProgressEvent(
+                                benchmark_name="motif",
+                                event_type="arm_step",
+                                task_name=task.name,
+                                arm_name=arm.name,
+                                step_name="pca",
+                                current=1,
+                                total=1,
+                                message="fit/apply PCA",
+                            ),
+                        )
+                    else:
+                        transformed_discovery = discovery_collection
+                        transformed_test = test_collection
+                        global_transform = None
+                        pca_summary = None
                     whitening_summary = None
                     discovery_session_transforms = None
                     test_whitening_summary = None

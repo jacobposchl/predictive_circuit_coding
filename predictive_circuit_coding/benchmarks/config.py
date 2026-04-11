@@ -43,7 +43,6 @@ class NotebookPipelineConfig:
     run_stage_image_identity_appendix: bool
     stage_prepared_sessions_locally: bool
     step_log_every: int
-    pca_components: int
     session_holdout_fraction: float
     session_holdout_seed: int | None
     neighbor_k: int
@@ -112,7 +111,6 @@ def load_notebook_pipeline_config(path: str | Path) -> NotebookPipelineConfig:
         run_stage_image_identity_appendix=bool(stages.get("image_identity_appendix", False)),
         stage_prepared_sessions_locally=bool(pipeline.get("stage_prepared_sessions_locally", False)),
         step_log_every=int(pipeline.get("step_log_every", 10)),
-        pca_components=int(pipeline.get("pca_components", 64)),
         session_holdout_fraction=float(pipeline.get("session_holdout_fraction", 0.5)),
         session_holdout_seed=(
             int(pipeline["session_holdout_seed"])

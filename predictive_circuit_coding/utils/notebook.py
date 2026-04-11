@@ -536,13 +536,25 @@ def load_pipeline_display_tables(
     final = _load(final_summary_csv_path)
     training_geometry = _load(training_geometry_monitor_csv_path)
 
+    arm_order = {
+        "count_patch_mean_raw": 0,
+        "untrained_encoder_raw": 1,
+        "encoder_raw": 2,
+        "encoder_whitened": 3,
+    }
+
+    def _sort_for_comparison(df):
+        if "arm_name" not in df.columns:
+            return df
+        sorted_df = df.copy()
+        sorted_df["_arm_order"] = sorted_df["arm_name"].map(arm_order).fillna(99)
+        sort_columns = ["_arm_order"]
+        if "task_name" in sorted_df.columns:
+            sort_columns = ["task_name", "_arm_order"]
+        return sorted_df.sort_values(sort_columns, na_position="last").drop(columns=["_arm_order"])
+
     if not representation.empty:
-        sort_column = (
-            "test_probe_pr_auc"
-            if "test_probe_pr_auc" in representation.columns
-            else "test_probe_roc_auc"
-        )
-        representation = representation.sort_values(sort_column, ascending=False, na_position="last")
+        representation = _sort_for_comparison(representation)
         preferred = [
             "task_name",
             "arm_name",
@@ -550,6 +562,7 @@ def load_pipeline_display_tables(
             "status",
             "failure_reason",
             "feature_family",
+            "encoder_training_status",
             "geometry_mode",
             "test_probe_accuracy",
             "test_probe_bce",
@@ -561,12 +574,7 @@ def load_pipeline_display_tables(
         representation = representation[[column for column in preferred if column in representation.columns]]
 
     if not motif.empty:
-        sort_column = (
-            "held_out_similarity_pr_auc"
-            if "held_out_similarity_pr_auc" in motif.columns
-            else "held_out_similarity_roc_auc"
-        )
-        motif = motif.sort_values(sort_column, ascending=False, na_position="last")
+        motif = _sort_for_comparison(motif)
         preferred = [
             "task_name",
             "arm_name",
@@ -574,6 +582,7 @@ def load_pipeline_display_tables(
             "status",
             "failure_reason",
             "feature_family",
+            "encoder_training_status",
             "geometry_mode",
             "candidate_count",
             "cluster_count",
@@ -820,10 +829,10 @@ def build_synthetic_pipeline_summary_tables() -> dict[str, Any]:
             },
             {
                 "task_name": "stimulus_omitted",
-                "arm_name": "count_patch_mean_pca_whitened",
+                "arm_name": "untrained_encoder_raw",
                 "status": "ok",
-                "feature_family": "count_patch_mean",
-                "geometry_mode": "whitened",
+                "feature_family": "untrained_encoder",
+                "geometry_mode": "raw",
                 "test_probe_accuracy": 0.69,
                 "test_probe_bce": 0.64,
                 "test_probe_pr_auc": 0.68,
@@ -867,10 +876,10 @@ def build_synthetic_pipeline_summary_tables() -> dict[str, Any]:
             },
             {
                 "task_name": "stimulus_omitted",
-                "arm_name": "count_patch_mean_pca_whitened",
+                "arm_name": "untrained_encoder_raw",
                 "status": "ok",
-                "feature_family": "count_patch_mean",
-                "geometry_mode": "whitened",
+                "feature_family": "untrained_encoder",
+                "geometry_mode": "raw",
                 "candidate_count": 18,
                 "cluster_count": 3,
                 "held_out_test_probe_pr_auc": 0.52,

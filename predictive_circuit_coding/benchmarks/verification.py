@@ -22,15 +22,12 @@ from predictive_circuit_coding.utils.notebook import collect_notebook_target_val
 
 _FULL_REPRESENTATION_ARMS = {
     "count_patch_mean_raw",
-    "count_patch_mean_whitened",
-    "count_patch_mean_pca_raw",
-    "count_patch_mean_pca_whitened",
+    "untrained_encoder_raw",
     "encoder_raw",
     "encoder_whitened",
 }
 _FULL_MOTIF_ARMS = {
-    "count_patch_mean_pca_raw",
-    "count_patch_mean_pca_whitened",
+    "untrained_encoder_raw",
     "encoder_raw",
     "encoder_whitened",
 }
@@ -152,7 +149,7 @@ def _check_full_config(
         _add_issue(
             issues,
             "full_config",
-            f"Representation arms are not the full crossed set. Expected {sorted(_FULL_REPRESENTATION_ARMS)}, got {sorted(representation_arms)}.",
+            f"Representation arms are not the full encoder-baseline set. Expected {sorted(_FULL_REPRESENTATION_ARMS)}, got {sorted(representation_arms)}.",
         )
     if motif_arms != _FULL_MOTIF_ARMS:
         _add_issue(
