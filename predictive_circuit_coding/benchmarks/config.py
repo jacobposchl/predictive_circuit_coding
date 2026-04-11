@@ -90,11 +90,17 @@ def load_notebook_pipeline_config(path: str | Path) -> NotebookPipelineConfig:
     drive_export_root = _resolve_path(config_dir, paths.get("drive_export_root"))
     source_dataset_root = _resolve_path(config_dir, paths.get("source_dataset_root"))
     if experiment_config_path is None:
-        raise ValueError("paths.experiment_config_path is required")
+        hint = ""
+        if any(key in raw for key in ("dataset_id", "training", "objective", "model")):
+            hint = (
+                " This looks like an experiment config; pass a pipeline config such as "
+                "configs/pcc/pipeline_cross_session_aug_debug.yaml instead."
+            )
+        raise ValueError("paths.experiment_config_path is required." + hint)
     if data_config_path is None:
-        raise ValueError("paths.data_config_path is required")
+        raise ValueError("paths.data_config_path is required.")
     if local_artifact_root is None:
-        raise ValueError("paths.local_artifact_root is required")
+        raise ValueError("paths.local_artifact_root is required.")
 
     return NotebookPipelineConfig(
         config_path=config_path,

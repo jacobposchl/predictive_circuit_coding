@@ -149,6 +149,9 @@ def test_unified_pipeline_notebook_parses_and_has_stage_runner_cell() -> None:
     sources = ["".join(cell.get("source", [])) for cell in cells]
     assert any("run_notebook_pipeline_from_config" in source for source in sources)
     assert any("PIPELINE_CONFIG_PATH" in source for source in sources)
+    config_cell = next(source for source in sources if "PIPELINE_CONFIG_PATH" in source)
+    assert "configs/pcc/pipeline_" in config_cell
+    assert ".yaml" in config_cell
 
 
 def test_default_benchmark_arms_use_untrained_encoder_baseline_without_pca() -> None:
@@ -232,6 +235,32 @@ def test_load_notebook_pipeline_config_resolves_relative_paths(tmp_path: Path) -
     assert config.representation_arm_names == ("encoder_raw",)
     assert config.notebook_ui.mode == "clean_dashboard"
     assert config.notebook_ui.log_mode == "failures_only"
+
+
+def test_load_notebook_pipeline_config_rejects_experiment_config_with_helpful_hint(tmp_path: Path) -> None:
+    experiment_config_path = tmp_path / "predictive_circuit_coding_debug.yaml"
+    experiment_config_path.write_text(
+        textwrap.dedent(
+            """
+            dataset_id: synthetic
+            seed: 7
+            training:
+              num_epochs: 1
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    try:
+        load_notebook_pipeline_config(experiment_config_path)
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected experiment config to be rejected as a notebook pipeline config")
+
+    assert "paths.experiment_config_path is required" in message
+    assert "looks like an experiment config" in message
+    assert "pipeline_cross_session_aug_debug.yaml" in message
 
 
 def test_representation_benchmark_skips_optional_missing_field(tmp_path: Path) -> None:
