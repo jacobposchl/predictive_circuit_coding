@@ -238,7 +238,6 @@ def _stage_summary(stage_name: str, outputs: dict[str, Any], status: str) -> Not
         stage_name=stage_name,
         status=status,
         headline=f"{stage_name}: {status}",
-        metrics={},
         artifact_paths={key: str(value) for key, value in outputs.items() if value},
     )
 
@@ -271,11 +270,20 @@ def prepare_or_restore_training_stage(
     config_hash = _json_hash(stage_config)
     inputs = {"base_experiment_config": _path_identity(base_experiment_config), "data_config_path": _path_identity(data_config_path)}
     if _stage_is_reusable(states=states, stage_name="train", config_hash=config_hash, inputs=inputs):
-        return dict(states["train"]["outputs"])
+        outputs = dict(states["train"]["outputs"])
+        if progress_ui is not None and run_stage_train:
+            progress_ui.finish_stage(_stage_summary("train", outputs, "reused"))
+            progress_ui.advance_pipeline()
+        return outputs
 
     paths.train_root.mkdir(parents=True, exist_ok=True)
     if progress_ui is not None:
         progress_ui.start_stage(stage_name="train", total=1, description="Train")
+    training_progress_callback = (
+        progress_ui.make_training_callback(stage_name="train")
+        if progress_ui is not None
+        else None
+    )
 
     if run_stage_train:
         if use_experiment_config_as_is:
@@ -299,6 +307,7 @@ def prepare_or_restore_training_stage(
             data_config_path=data_config_path,
             train_split=runtime_config.splits.train,
             valid_split=runtime_config.splits.valid,
+            progress_callback=training_progress_callback,
         )
         outputs = {
             "runtime_experiment_config_path": str(paths.runtime_experiment_config_path),
@@ -354,7 +363,11 @@ def run_standard_evaluation_stage(
         "data_config_path": _path_identity(data_config_path),
     }
     if _stage_is_reusable(states=states, stage_name="evaluate", config_hash=config_hash, inputs=inputs):
-        return dict(states["evaluate"]["outputs"])
+        outputs = dict(states["evaluate"]["outputs"])
+        if progress_ui is not None and run_stage_evaluate:
+            progress_ui.finish_stage(_stage_summary("evaluate", outputs, "reused"))
+            progress_ui.advance_pipeline()
+        return outputs
     if not run_stage_evaluate:
         outputs = {"evaluation_summary_paths": []}
         _set_stage_state(states=states, paths=paths, stage_name="evaluate", status="complete", config_hash=config_hash, inputs=inputs, outputs=outputs)
@@ -362,6 +375,13 @@ def run_standard_evaluation_stage(
 
     config = load_experiment_config(runtime_experiment_config_path)
     paths.evaluation_root.mkdir(parents=True, exist_ok=True)
+    if progress_ui is not None:
+        progress_ui.start_stage(stage_name="evaluate", total=2, description="Evaluate")
+    evaluation_progress_callback = (
+        progress_ui.make_evaluation_callback(split_total=2)
+        if progress_ui is not None
+        else None
+    )
     summaries: list[str] = []
     for split_name in (config.splits.valid, config.splits.test):
         summary = evaluate_checkpoint_on_split(
@@ -369,6 +389,7 @@ def run_standard_evaluation_stage(
             data_config_path=data_config_path,
             checkpoint_path=str(checkpoint_path),
             split_name=split_name,
+            progress_callback=evaluation_progress_callback,
         )
         summary_path = paths.evaluation_root / f"{split_name}_summary.json"
         write_evaluation_summary(summary, summary_path)
@@ -415,7 +436,11 @@ def run_refinement_stage(
         "data_config_path": _path_identity(data_config_path),
     }
     if _stage_is_reusable(states=states, stage_name="refinement", config_hash=config_hash, inputs=inputs):
-        return dict(states["refinement"]["outputs"])
+        outputs = dict(states["refinement"]["outputs"])
+        if progress_ui is not None and run_stage_refinement:
+            progress_ui.finish_stage(_stage_summary("refinement", outputs, "reused"))
+            progress_ui.advance_pipeline()
+        return outputs
     if not run_stage_refinement:
         outputs = {
             "refinement_summary_json_path": str(paths.reports_root / "refinement_summary.json"),
@@ -425,6 +450,14 @@ def run_refinement_stage(
         return outputs
 
     config = load_experiment_config(runtime_experiment_config_path)
+    total_refinement_arms = len(task_specs) * len(arm_specs)
+    if progress_ui is not None:
+        progress_ui.start_stage(stage_name="refinement", total=total_refinement_arms, description="Refinement")
+    benchmark_progress_callback = (
+        progress_ui.make_benchmark_callback(benchmark_name="refinement", total_arms=total_refinement_arms)
+        if progress_ui is not None
+        else None
+    )
     results = run_motif_benchmark_matrix(
         experiment_config=config,
         data_config_path=data_config_path,
@@ -435,6 +468,7 @@ def run_refinement_stage(
         session_holdout_fraction=session_holdout_fraction,
         session_holdout_seed=session_holdout_seed,
         debug_retain_intermediates=debug_retain_intermediates,
+        progress_callback=benchmark_progress_callback,
     )
     rows = [result.summary for result in results]
     summary_json_path, summary_csv_path = write_summary_rows(
@@ -489,7 +523,11 @@ def write_final_project_reports(
     config_hash = _json_hash({"run_stage_final_reports": bool(run_stage_final_reports), "row_count": len(rows)})
     inputs = {"refinement_summary_json_path": _path_identity(paths.reports_root / "refinement_summary.json")}
     if _stage_is_reusable(states=states, stage_name="final_reports", config_hash=config_hash, inputs=inputs):
-        return dict(states["final_reports"]["outputs"])
+        outputs = dict(states["final_reports"]["outputs"])
+        if progress_ui is not None:
+            progress_ui.finish_stage(_stage_summary("final_reports", outputs, "reused"))
+            progress_ui.advance_pipeline()
+        return outputs
     payload = build_final_project_summary(motif_rows=rows)
     summary_json_path, summary_csv_path = write_single_row_summary(
         payload,
