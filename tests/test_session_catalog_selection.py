@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import csv
 import json
@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
+from predictive_circuit_coding.benchmarks.pipeline import _ensure_local_prepared_sessions
 from predictive_circuit_coding.cli.prepare_data import main as prepare_main
 from predictive_circuit_coding.cli.train import main as train_main
 from predictive_circuit_coding.data import (
@@ -431,3 +432,78 @@ def test_train_cli_records_runtime_selection_sidecar_inputs(tmp_path: Path):
     payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
     assert payload["inputs"]["dataset_selection_active"] is True
     assert payload["inputs"]["runtime_split_manifest_path"].endswith("selected_split_manifest.json")
+
+
+def test_resolve_runtime_dataset_view_rebuilds_support_files_from_prepared_sessions(tmp_path: Path):
+    prep_config_path = _write_prep_config(tmp_path)
+    prep_config = load_preparation_config(prep_config_path)
+    workspace = create_workspace(prep_config)
+    dataset_id = prep_config.dataset.dataset_id
+    for session_id, subject_id in (
+        ("session_train", "mouse_train"),
+        ("session_valid", "mouse_valid"),
+        ("session_discovery", "mouse_discovery"),
+        ("session_test", "mouse_test"),
+    ):
+        _write_session(
+            workspace.brainset_prepared_root / f"{session_id}.h5",
+            dataset_id=dataset_id,
+            session_id=session_id,
+            subject_id=subject_id,
+            regions=["VISp", "LP"],
+        )
+
+    experiment_config_path = _write_experiment_config(tmp_path)
+
+    from predictive_circuit_coding.training import load_experiment_config
+
+    experiment_config = load_experiment_config(experiment_config_path)
+    view = resolve_runtime_dataset_view(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+    )
+
+    assert Path(view.session_catalog_path).is_file()
+    assert Path(view.split_manifest_path).is_file()
+    assert workspace.session_manifest_path.is_file()
+    assert len(view.session_catalog.records) == 4
+    assert {record.session_id for record in view.session_catalog.records} == {
+        "session_train",
+        "session_valid",
+        "session_discovery",
+        "session_test",
+    }
+
+
+def test_ensure_local_prepared_sessions_stages_from_source_root(tmp_path: Path):
+    prep_config_path = _write_prep_config(tmp_path)
+    prep_config = load_preparation_config(prep_config_path)
+    workspace = create_workspace(prep_config)
+    dataset_id = prep_config.dataset.dataset_id
+    source_root = tmp_path / "source_dataset"
+    source_prepared_root = source_root / "prepared" / dataset_id
+    source_prepared_root.mkdir(parents=True, exist_ok=True)
+
+    for session_id, subject_id in (
+        ("session_train", "mouse_train"),
+        ("session_valid", "mouse_valid"),
+    ):
+        _write_session(
+            source_prepared_root / f"{session_id}.h5",
+            dataset_id=dataset_id,
+            session_id=session_id,
+            subject_id=subject_id,
+            regions=["VISp", "LP"],
+        )
+
+    _ensure_local_prepared_sessions(
+        data_config_path=prep_config_path,
+        source_dataset_root=source_root,
+        stage_prepared_sessions_locally=True,
+    )
+
+    assert sorted(path.stem for path in workspace.brainset_prepared_root.glob("*.h5")) == [
+        "session_train",
+        "session_valid",
+    ]
+

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 import re
@@ -7,6 +7,7 @@ from pathlib import Path
 from predictive_circuit_coding.data.catalog import (
     SessionCatalog,
     SessionCatalogRecord,
+    build_session_catalog_from_prepared_sessions,
     build_session_catalog_from_manifest,
     load_session_catalog,
     project_catalog_to_session_manifest,
@@ -15,7 +16,7 @@ from predictive_circuit_coding.data.catalog import (
 )
 from predictive_circuit_coding.data.config import DataPreparationConfig, SplitPlanningConfig, load_preparation_config
 from predictive_circuit_coding.data.layout import PreparationWorkspace, build_workspace
-from predictive_circuit_coding.data.manifest import load_session_manifest
+from predictive_circuit_coding.data.manifest import load_session_manifest, write_session_manifest
 from predictive_circuit_coding.data.splits import SplitManifest, build_split_manifest, load_split_manifest, write_split_manifest
 from predictive_circuit_coding.training.config import DatasetSelectionConfig, ExperimentConfig
 from predictive_circuit_coding.windowing import build_torch_brain_config
@@ -255,6 +256,25 @@ def materialize_runtime_selection(
     )
 
 
+def _materialize_workspace_support_from_prepared_sessions(
+    *,
+    prep_config: DataPreparationConfig,
+    workspace: PreparationWorkspace,
+) -> bool:
+    prepared_paths = sorted(workspace.brainset_prepared_root.glob("*.h5"))
+    if not prepared_paths:
+        return False
+    catalog = build_session_catalog_from_prepared_sessions(prep_config, workspace=workspace)
+    if not catalog.records:
+        return False
+    write_session_catalog(catalog, workspace.session_catalog_path)
+    write_session_catalog_csv(catalog, workspace.session_catalog_csv_path)
+    manifest = project_catalog_to_session_manifest(catalog)
+    write_session_manifest(manifest, workspace.session_manifest_path)
+    write_split_manifest(build_split_manifest(manifest, config=prep_config.splits), workspace.split_manifest_path)
+    return True
+
+
 def resolve_runtime_dataset_view(
     *,
     experiment_config: ExperimentConfig,
@@ -269,6 +289,11 @@ def resolve_runtime_dataset_view(
             prep_config=prep_config,
             workspace=workspace,
             runtime_catalog=runtime_catalog,
+        )
+    if not workspace.session_catalog_path.is_file() or not workspace.split_manifest_path.is_file():
+        _materialize_workspace_support_from_prepared_sessions(
+            prep_config=prep_config,
+            workspace=workspace,
         )
     if workspace.session_catalog_path.is_file():
         catalog = load_session_catalog(workspace.session_catalog_path)
@@ -308,3 +333,5 @@ def resolve_runtime_dataset_view(
         selection_summary=None,
         session_catalog_path=workspace.session_catalog_path,
     )
+
+
