@@ -1,0 +1,8 @@
+extends: predictive_circuit_coding_refined_debug.yaml
+experiment:
+  variant_name: refined_countnorm
+count_normalization:
+  mode: log1p_train_zscore
+  stats_path: ../../artifacts/count_normalization_stats_debug.json
+artifacts:
+  checkpoint_prefix: pcc_refined_countnorm_debug

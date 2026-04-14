@@ -62,21 +62,6 @@ def _pooled_features_from_tokens(tokens: torch.Tensor, token_mask: torch.Tensor)
     return (tokens * mask).sum(dim=1) / token_counts
 
 
-def _build_count_token_embeddings(batch) -> tuple[torch.Tensor, torch.Tensor]:
-    patch_counts = batch.patch_counts.detach().cpu().to(dtype=torch.float32)
-    patch_mask = batch.patch_mask.detach().cpu()
-    batch_size, unit_count, patch_count, patch_bins = patch_counts.shape
-    feature_dim = patch_count * patch_bins
-    tokens = torch.zeros((batch_size, unit_count, patch_count, feature_dim), dtype=torch.float32)
-    for patch_index in range(patch_count):
-        start = patch_index * patch_bins
-        end = start + patch_bins
-        tokens[:, :, patch_index, start:end] = patch_counts[:, :, patch_index, :]
-    flat_tokens = tokens.reshape(batch_size, unit_count * patch_count, feature_dim)
-    flat_mask = patch_mask.reshape(batch_size, unit_count * patch_count)
-    return flat_tokens, flat_mask
-
-
 def _write_benchmark_token_shard(
     *,
     shard_dir: Path,
@@ -250,32 +235,44 @@ def apply_global_linear_transform_to_tokens(
     return transformed.reshape(original_shape[0], original_shape[1], -1)
 
 
+def normalize_feature_rows(features: torch.Tensor) -> torch.Tensor:
+    tensor = features.detach().cpu().to(dtype=torch.float32)
+    return tensor / tensor.norm(dim=-1, keepdim=True).clamp_min(1.0e-8)
+
+
+def normalize_token_tensor(tokens: torch.Tensor, token_mask: torch.Tensor | None = None) -> torch.Tensor:
+    tensor = tokens.detach().cpu().to(dtype=torch.float32)
+    normalized = tensor / tensor.norm(dim=-1, keepdim=True).clamp_min(1.0e-8)
+    if token_mask is not None:
+        normalized = normalized * token_mask.detach().cpu().unsqueeze(-1).to(dtype=normalized.dtype)
+    return normalized
+
+
 def _build_encoder_tokens(
     *,
     experiment_config: ExperimentConfig,
     checkpoint_path: str | Path | None,
-    use_checkpoint: bool,
 ):
     device = resolve_device(experiment_config.execution.device)
-    if use_checkpoint:
-        model = build_model_from_config(experiment_config).to(device)
-    else:
-        cuda_devices: list[int] = []
-        if device.type == "cuda" and torch.cuda.is_available():
-            cuda_devices = [torch.cuda.current_device() if device.index is None else int(device.index)]
-        with torch.random.fork_rng(devices=cuda_devices, enabled=True):
-            torch.manual_seed(int(experiment_config.seed))
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(int(experiment_config.seed))
-            model = build_model_from_config(experiment_config).to(device)
-    if use_checkpoint:
-        if checkpoint_path is None:
-            raise ValueError("checkpoint_path is required when use_checkpoint=True")
-        checkpoint = load_training_checkpoint(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint["model_state"])
+    model = build_model_from_config(experiment_config).to(device)
+    if checkpoint_path is None:
+        raise ValueError("checkpoint_path is required for encoder feature extraction")
+    checkpoint = load_training_checkpoint(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state"])
     model.eval()
     scaler_enabled = bool(experiment_config.execution.mixed_precision and device.type == "cuda")
     return model, device, scaler_enabled
+
+
+def _pooled_features_for_config(output, experiment_config: ExperimentConfig) -> torch.Tensor:
+    if experiment_config.discovery.pooled_feature_mode == "cls_tokens":
+        if output.summary_tokens is None:
+            raise ValueError("CLS pooled features requested but the model did not produce summary tokens")
+        mask = output.patch_mask.any(dim=1).detach().cpu()
+        return _pooled_features_from_tokens(output.summary_tokens.detach().cpu(), mask)
+    flat_tokens = output.tokens.detach().cpu().reshape(output.tokens.shape[0], -1, output.tokens.shape[-1])
+    flat_mask = output.patch_mask.detach().cpu().reshape(output.patch_mask.shape[0], -1)
+    return _pooled_features_from_tokens(flat_tokens, flat_mask)
 
 
 def extract_benchmark_selected_windows(
@@ -308,11 +305,10 @@ def extract_benchmark_selected_windows(
     model = None
     device = torch.device("cpu")
     scaler_enabled = False
-    if feature_family in {"encoder", "untrained_encoder"}:
+    if feature_family == "encoder":
         model, device, scaler_enabled = _build_encoder_tokens(
             experiment_config=experiment_config,
             checkpoint_path=checkpoint_path,
-            use_checkpoint=feature_family == "encoder",
         )
 
     shard_paths: list[Path] = []
@@ -345,7 +341,7 @@ def extract_benchmark_selected_windows(
             ]
             batch = tokenizer(samples)
             labels = torch.tensor([float(window.label) for window in window_batch], dtype=torch.float32)
-            if feature_family in {"encoder", "untrained_encoder"}:
+            if feature_family == "encoder":
                 device_batch = batch.to(device)
                 autocast_context = (
                     torch.autocast(device_type=device.type, dtype=torch.float16) if scaler_enabled else nullcontext()
@@ -354,12 +350,11 @@ def extract_benchmark_selected_windows(
                     output = model(device_batch)  # type: ignore[operator]
                 flat_tokens = output.tokens.detach().cpu().reshape(output.tokens.shape[0], -1, output.tokens.shape[-1])
                 flat_mask = output.patch_mask.detach().cpu().reshape(output.patch_mask.shape[0], -1)
-            elif feature_family == "count_patch_mean":
-                flat_tokens, flat_mask = _build_count_token_embeddings(batch)
+                pooled_features = _pooled_features_for_config(output, experiment_config)
             else:
                 raise ValueError(f"Unsupported feature_family: {feature_family}")
 
-            pooled_chunks.append(_pooled_features_from_tokens(flat_tokens, flat_mask))
+            pooled_chunks.append(pooled_features)
             token_chunks.append(flat_tokens)
             mask_chunks.append(flat_mask)
             label_chunks.append(labels)
@@ -442,11 +437,10 @@ def extract_benchmark_split_collection(
     model = None
     device = torch.device("cpu")
     scaler_enabled = False
-    if feature_family in {"encoder", "untrained_encoder"}:
+    if feature_family == "encoder":
         model, device, scaler_enabled = _build_encoder_tokens(
             experiment_config=experiment_config,
             checkpoint_path=checkpoint_path,
-            use_checkpoint=feature_family == "encoder",
         )
 
     pooled_chunks: list[torch.Tensor] = []
@@ -474,7 +468,7 @@ def extract_benchmark_split_collection(
                 target_label_mode=target_label_mode,
                 target_label_match_value=target_label_match_value,
             )
-            if feature_family in {"encoder", "untrained_encoder"}:
+            if feature_family == "encoder":
                 device_batch = batch.to(device)
                 autocast_context = (
                     torch.autocast(device_type=device.type, dtype=torch.float16) if scaler_enabled else nullcontext()
@@ -483,12 +477,11 @@ def extract_benchmark_split_collection(
                     output = model(device_batch)  # type: ignore[operator]
                 flat_tokens = output.tokens.detach().cpu().reshape(output.tokens.shape[0], -1, output.tokens.shape[-1])
                 flat_mask = output.patch_mask.detach().cpu().reshape(output.patch_mask.shape[0], -1)
-            elif feature_family == "count_patch_mean":
-                flat_tokens, flat_mask = _build_count_token_embeddings(batch)
+                pooled_features = _pooled_features_for_config(output, experiment_config)
             else:
                 raise ValueError(f"Unsupported feature_family: {feature_family}")
 
-            pooled_chunks.append(_pooled_features_from_tokens(flat_tokens, flat_mask))
+            pooled_chunks.append(pooled_features)
             token_chunks.append(flat_tokens)
             mask_chunks.append(flat_mask)
             label_chunks.append(labels.detach().cpu())
@@ -553,6 +546,7 @@ def write_collection_token_shards(
     output_dir: str | Path,
     global_transform: GlobalLinearTransform | None = None,
     session_transforms: dict[str, object] | None = None,
+    normalize_tokens: bool = False,
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[Path, ...]:
     target_dir = Path(output_dir)
@@ -575,6 +569,8 @@ def write_collection_token_shards(
                 session_ids=tuple(str(value) for value in payload["session_ids"]),
                 transforms=session_transforms,
             )
+        if normalize_tokens:
+            embeddings = normalize_feature_rows(embeddings)
         output_payload = dict(payload)
         output_payload["embeddings"] = embeddings
         output_path = target_dir / f"token_shard_{shard_index:05d}.pt"

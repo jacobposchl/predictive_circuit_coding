@@ -4,12 +4,13 @@ from importlib import import_module
 
 _CONFIG_EXPORTS = {
     "ArtifactConfig",
-    "CrossSessionAugConfig",
+    "CountNormalizationConfig",
     "DataRuntimeConfig",
     "DatasetSelectionConfig",
     "DiscoveryConfig",
     "EvaluationConfig",
     "ExecutionConfig",
+    "ExperimentIdentityConfig",
     "ExperimentConfig",
     "ModelConfig",
     "ObjectiveConfig",

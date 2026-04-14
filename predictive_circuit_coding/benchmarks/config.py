@@ -37,22 +37,15 @@ class NotebookPipelineConfig:
     source_dataset_root: Path | None
     run_stage_train: bool
     run_stage_evaluate: bool
-    run_stage_representation_benchmark: bool
-    run_stage_motif_benchmark: bool
+    run_stage_refinement: bool
     run_stage_alignment_diagnostic: bool
-    run_stage_image_identity_appendix: bool
     stage_prepared_sessions_locally: bool
     step_log_every: int
     session_holdout_fraction: float
     session_holdout_seed: int | None
     neighbor_k: int
     debug_retain_intermediates: bool
-    image_target_name: str | None
-    image_target_names: tuple[str, ...] | None
-    image_target_names_auto: bool
-    representation_task_names: tuple[str, ...] | None
     motif_task_names: tuple[str, ...] | None
-    representation_arm_names: tuple[str, ...] | None
     motif_arm_names: tuple[str, ...] | None
     notebook_ui: NotebookProgressConfig
 
@@ -94,7 +87,7 @@ def load_notebook_pipeline_config(path: str | Path) -> NotebookPipelineConfig:
         if any(key in raw for key in ("dataset_id", "training", "objective", "model")):
             hint = (
                 " This looks like an experiment config; pass a pipeline config such as "
-                "configs/pcc/pipeline_cross_session_aug_debug.yaml instead."
+                "configs/pcc/pipeline_refined_debug.yaml instead."
             )
         raise ValueError("paths.experiment_config_path is required." + hint)
     if data_config_path is None:
@@ -111,10 +104,8 @@ def load_notebook_pipeline_config(path: str | Path) -> NotebookPipelineConfig:
         source_dataset_root=source_dataset_root,
         run_stage_train=bool(stages.get("train", True)),
         run_stage_evaluate=bool(stages.get("evaluate", True)),
-        run_stage_representation_benchmark=bool(stages.get("representation_benchmark", True)),
-        run_stage_motif_benchmark=bool(stages.get("motif_benchmark", True)),
+        run_stage_refinement=bool(stages.get("refinement", True)),
         run_stage_alignment_diagnostic=bool(stages.get("alignment_diagnostic", False)),
-        run_stage_image_identity_appendix=bool(stages.get("image_identity_appendix", False)),
         stage_prepared_sessions_locally=bool(pipeline.get("stage_prepared_sessions_locally", False)),
         step_log_every=int(pipeline.get("step_log_every", 10)),
         session_holdout_fraction=float(pipeline.get("session_holdout_fraction", 0.5)),
@@ -125,20 +116,7 @@ def load_notebook_pipeline_config(path: str | Path) -> NotebookPipelineConfig:
         ),
         neighbor_k=int(pipeline.get("neighbor_k", 5)),
         debug_retain_intermediates=bool(pipeline.get("debug_retain_intermediates", False)),
-        image_target_name=(
-            str(tasks["image_target_name"])
-            if tasks.get("image_target_name") not in (None, "")
-            else None
-        ),
-        image_target_names=(
-            None
-            if tasks.get("image_target_names") in (None, "", "auto")
-            else _resolve_names(tasks.get("image_target_names"))
-        ),
-        image_target_names_auto=(str(tasks.get("image_target_names", "")).strip().lower() == "auto"),
-        representation_task_names=_resolve_names(tasks.get("representation")),
         motif_task_names=_resolve_names(tasks.get("motifs")),
-        representation_arm_names=_resolve_names(arms.get("representation")),
         motif_arm_names=_resolve_names(arms.get("motifs")),
         notebook_ui=NotebookProgressConfig(
             enabled=bool(notebook_ui.get("enabled", True)),

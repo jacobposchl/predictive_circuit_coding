@@ -15,7 +15,6 @@ from predictive_circuit_coding.benchmarks.contracts import (
     BenchmarkArmSpec,
     BenchmarkTaskSpec,
     MotifBenchmarkResult,
-    RepresentationBenchmarkResult,
 )
 from predictive_circuit_coding.benchmarks.features import (
     BenchmarkWindowCollection,
@@ -23,6 +22,8 @@ from predictive_circuit_coding.benchmarks.features import (
     extract_benchmark_selected_windows,
     extract_benchmark_split_collection,
     fit_global_pca_transform,
+    normalize_feature_rows,
+    normalize_token_tensor,
     write_collection_token_shards,
 )
 from predictive_circuit_coding.benchmarks.reports import write_single_row_summary
@@ -32,6 +33,7 @@ from predictive_circuit_coding.decoding import (
     apply_session_linear_transforms_to_tokens,
     build_session_stratified_holdout_split,
     fit_additive_probe_features,
+    fit_session_alignment_transforms,
     fit_session_whitening_transforms,
     summarize_neighbor_geometry,
 )
@@ -66,69 +68,24 @@ def _maybe_emit_benchmark_progress(
 
 
 def default_benchmark_task_specs(
-    *,
-    include_image_identity: bool = False,
-    image_target_name: str | None = None,
-    image_target_names: tuple[str, ...] | None = None,
 ) -> tuple[BenchmarkTaskSpec, ...]:
-    tasks = [
+    return (
         BenchmarkTaskSpec(name="stimulus_change", target_label="stimulus_change"),
         BenchmarkTaskSpec(name="trials_go", target_label="trials.go"),
-        BenchmarkTaskSpec(name="stimulus_omitted", target_label="stimulus_presentations.omitted"),
-    ]
-    resolved_image_names: list[str] = []
-    if image_target_name not in (None, ""):
-        resolved_image_names.append(str(image_target_name))
-    for value in image_target_names or ():
-        if str(value) and str(value) not in resolved_image_names:
-            resolved_image_names.append(str(value))
-    if include_image_identity:
-        if not resolved_image_names:
-            tasks.append(
-                BenchmarkTaskSpec(
-                    name="image_identity_one_vs_rest",
-                    target_label="stimulus_presentations.image_name",
-                    target_label_match_value=None,
-                    optional=True,
-                )
-            )
-        for image_name in resolved_image_names:
-            safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(image_name)).strip("_")
-            safe_name = safe_name or "image"
-            tasks.append(
-                BenchmarkTaskSpec(
-                    name=f"image_identity_{safe_name}",
-                    target_label="stimulus_presentations.image_name",
-                    target_label_match_value=str(image_name),
-                    optional=True,
-                )
-            )
-    elif image_target_name not in (None, ""):
-        tasks.append(
-            BenchmarkTaskSpec(
-                name="image_identity_one_vs_rest",
-                target_label="stimulus_presentations.image_name",
-                target_label_match_value=image_target_name,
-                optional=True,
-            )
-        )
-    return tuple(tasks)
-
-
-def default_representation_arm_specs() -> tuple[BenchmarkArmSpec, ...]:
-    return (
-        BenchmarkArmSpec("count_patch_mean_raw", "count_patch_mean", "raw", use_pca=False),
-        BenchmarkArmSpec("untrained_encoder_raw", "untrained_encoder", "raw", use_pca=False),
-        BenchmarkArmSpec("encoder_raw", "encoder", "raw", use_pca=False),
-        BenchmarkArmSpec("encoder_whitened", "encoder", "whitened", use_pca=False),
     )
 
 
 def default_motif_arm_specs() -> tuple[BenchmarkArmSpec, ...]:
     return (
-        BenchmarkArmSpec("untrained_encoder_raw", "untrained_encoder", "raw", use_pca=False),
-        BenchmarkArmSpec("encoder_raw", "encoder", "raw", use_pca=False),
-        BenchmarkArmSpec("encoder_whitened", "encoder", "whitened", use_pca=False),
+        BenchmarkArmSpec("encoder_raw", "raw"),
+        BenchmarkArmSpec("encoder_token_normalized", "token_normalized"),
+        BenchmarkArmSpec("encoder_probe_weighted", "raw", candidate_geometry_mode="probe_weighted"),
+        BenchmarkArmSpec(
+            "encoder_aligned_oracle",
+            "aligned_oracle",
+            claim_safe=False,
+            supervision_level="oracle_eval_labels",
+        ),
     )
 
 
@@ -265,11 +222,12 @@ def _held_out_similarity_summary(
 
 
 def _encoder_arm_metadata(arm: BenchmarkArmSpec) -> dict[str, str | bool]:
-    if arm.feature_family == "encoder":
-        return {"encoder_training_status": "trained", "encoder_checkpoint_loaded": True}
-    if arm.feature_family == "untrained_encoder":
-        return {"encoder_training_status": "untrained", "encoder_checkpoint_loaded": False}
-    return {"encoder_training_status": "not_encoder", "encoder_checkpoint_loaded": False}
+    return {
+        "encoder_training_status": "trained",
+        "encoder_checkpoint_loaded": True,
+        "claim_safe": bool(arm.claim_safe),
+        "supervision_level": arm.supervision_level,
+    }
 
 
 def _transform_summary_row(
@@ -280,6 +238,9 @@ def _transform_summary_row(
     pca_summary: dict[str, Any] | None,
     whitening_summary: dict[str, Any] | None,
     test_whitening_summary: dict[str, Any] | None,
+    token_normalization_summary: dict[str, Any] | None = None,
+    alignment_summary: dict[str, Any] | None = None,
+    candidate_geometry_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     aggregate = (whitening_summary or {}).get("aggregate_metrics") or {}
     encoder_metadata = _encoder_arm_metadata(arm)
@@ -288,16 +249,20 @@ def _transform_summary_row(
         "target_label": task.target_label,
         "target_label_match_value": task.target_label_match_value,
         "arm_name": arm.name,
-        "feature_family": arm.feature_family,
+        "feature_family": "encoder",
         **encoder_metadata,
         "geometry_mode": arm.geometry_mode,
-        "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
-        "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
+        "candidate_geometry_mode": arm.candidate_geometry_mode,
+        "variant_name": experiment_config.experiment.variant_name,
         "whitening_session_count": (whitening_summary or {}).get("session_count"),
         "whitening_reference_session_id": (whitening_summary or {}).get("reference_session_id"),
         "whitening_mean_label_axis_cosine_before": aggregate.get("mean_label_axis_cosine_before"),
         "whitening_mean_label_axis_cosine_after": aggregate.get("mean_label_axis_cosine_after"),
         "test_whitening_session_count": (test_whitening_summary or {}).get("session_count"),
+        "token_normalization_applied": token_normalization_summary is not None,
+        "alignment_session_count": (alignment_summary or {}).get("session_count"),
+        "candidate_geometry_mode": arm.candidate_geometry_mode,
+        "candidate_geometry_transform": (candidate_geometry_summary or {}).get("transform_type"),
     }
 
 
@@ -361,11 +326,11 @@ def _representation_row(
         "target_label": task.target_label,
         "target_label_match_value": task.target_label_match_value,
         "arm_name": arm.name,
-        "feature_family": arm.feature_family,
+        "feature_family": "encoder",
         **encoder_metadata,
         "geometry_mode": arm.geometry_mode,
-        "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
-        "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
+        "candidate_geometry_mode": arm.candidate_geometry_mode,
+        "variant_name": experiment_config.experiment.variant_name,
         "status": status,
         "failure_reason": failure_reason,
         "discovery_fit_probe_accuracy": (discovery_fit_metrics or {}).get("probe_accuracy"),
@@ -419,11 +384,10 @@ def _motif_row(
         "target_label": task.target_label,
         "target_label_match_value": task.target_label_match_value,
         "arm_name": arm.name,
-        "feature_family": arm.feature_family,
+        "feature_family": "encoder",
         **encoder_metadata,
         "geometry_mode": arm.geometry_mode,
-        "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
-        "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
+        "variant_name": experiment_config.experiment.variant_name,
         "status": status,
         "failure_reason": failure_reason,
         "candidate_count": candidate_count,
@@ -586,6 +550,96 @@ def _build_whitened_test_collection(
     return _apply_session_whitening_to_collection(collection=collection, fit_indices=fit_indices)
 
 
+def _normalize_collection_tokens(collection: BenchmarkWindowCollection) -> tuple[BenchmarkWindowCollection, dict[str, Any]]:
+    normalized = BenchmarkWindowCollection(
+        feature_family=collection.feature_family,
+        pooled_features=normalize_feature_rows(collection.pooled_features),
+        token_tensors=normalize_token_tensor(collection.token_tensors, collection.token_mask),
+        token_mask=collection.token_mask,
+        labels=collection.labels,
+        window_recording_ids=collection.window_recording_ids,
+        window_session_ids=collection.window_session_ids,
+        window_subject_ids=collection.window_subject_ids,
+        window_start_s=collection.window_start_s,
+        window_end_s=collection.window_end_s,
+        shard_paths=collection.shard_paths,
+        coverage_summary=collection.coverage_summary,
+    )
+    zero_feature_count = int((collection.pooled_features.norm(dim=-1) <= 1.0e-8).sum().item())
+    return normalized, {
+        "transform_type": "token_normalized",
+        "feature_count": int(collection.pooled_features.shape[0]),
+        "zero_feature_count": zero_feature_count,
+    }
+
+
+def _apply_oracle_alignment_to_collection(
+    *,
+    collection: BenchmarkWindowCollection,
+) -> tuple[BenchmarkWindowCollection, dict[str, Any], dict[str, Any]]:
+    fit_indices = _all_indices(collection.pooled_features.shape[0])
+    transforms, summary = fit_session_alignment_transforms(
+        features=collection.pooled_features,
+        labels=collection.labels,
+        session_ids=collection.window_session_ids,
+        fit_indices=fit_indices,
+    )
+    transformed = BenchmarkWindowCollection(
+        feature_family=collection.feature_family,
+        pooled_features=apply_session_linear_transforms_to_features(
+            features=collection.pooled_features,
+            session_ids=collection.window_session_ids,
+            transforms=transforms,
+        ),
+        token_tensors=apply_session_linear_transforms_to_tokens(
+            tokens=collection.token_tensors,
+            session_ids=collection.window_session_ids,
+            transforms=transforms,
+        ),
+        token_mask=collection.token_mask,
+        labels=collection.labels,
+        window_recording_ids=collection.window_recording_ids,
+        window_session_ids=collection.window_session_ids,
+        window_subject_ids=collection.window_subject_ids,
+        window_start_s=collection.window_start_s,
+        window_end_s=collection.window_end_s,
+        shard_paths=collection.shard_paths,
+        coverage_summary=collection.coverage_summary,
+    )
+    return transformed, summary, transforms
+
+
+def _probe_weight_scale(state_dict: dict[str, Any]) -> torch.Tensor:
+    weight = state_dict["linear.weight"].detach().cpu().reshape(-1).to(dtype=torch.float32).abs()
+    return weight / weight.mean().clamp_min(1.0e-8)
+
+
+def _apply_probe_weight_to_candidates(
+    candidates: tuple[CandidateTokenRecord, ...],
+    *,
+    state_dict: dict[str, Any],
+) -> tuple[tuple[CandidateTokenRecord, ...], dict[str, Any]]:
+    from dataclasses import replace
+
+    scale = _probe_weight_scale(state_dict)
+    transformed: list[CandidateTokenRecord] = []
+    for candidate in candidates:
+        embedding = torch.tensor(candidate.embedding, dtype=torch.float32)
+        transformed.append(replace(candidate, embedding=tuple((embedding * scale).tolist())))
+    return tuple(transformed), {
+        "transform_type": "probe_weighted",
+        "dimension": int(scale.numel()),
+        "scale_min": float(scale.min().item()) if scale.numel() else None,
+        "scale_max": float(scale.max().item()) if scale.numel() else None,
+        "scale_mean": float(scale.mean().item()) if scale.numel() else None,
+    }
+
+
+def _apply_probe_weight_to_tokens(tokens: torch.Tensor, *, state_dict: dict[str, Any]) -> torch.Tensor:
+    scale = _probe_weight_scale(state_dict).view(1, 1, -1)
+    return tokens.detach().cpu().to(dtype=torch.float32) * scale
+
+
 def _default_cluster_stats() -> dict[str, Any]:
     return {
         "cluster_count": 0.0,
@@ -611,7 +665,7 @@ def _empty_similarity_summary(reason: str) -> dict[str, Any]:
     }
 
 
-def run_representation_benchmark_matrix(
+def _removed_feature_matrix(
     *,
     experiment_config: ExperimentConfig,
     data_config_path: str | Path,
@@ -632,7 +686,7 @@ def run_representation_benchmark_matrix(
         data_config_path=data_config_path,
     )
     tasks = task_specs or default_benchmark_task_specs()
-    arms = arm_specs or default_representation_arm_specs()
+    arms = arm_specs or default_motif_arm_specs()
     output_root_path = Path(output_root)
     output_root_path.mkdir(parents=True, exist_ok=True)
     resolved_discovery_split = discovery_split_name or experiment_config.splits.discovery
@@ -651,13 +705,13 @@ def run_representation_benchmark_matrix(
         _maybe_emit_benchmark_progress(
             progress_callback,
             BenchmarkProgressEvent(
-                benchmark_name="representation",
+                benchmark_name="removed_feature_matrix",
                 event_type="task_start",
                 task_name=task.name,
                 task_index=task_index,
                 task_total=len(representation_tasks),
                 arm_total=total_arms,
-                message=f"representation task {task.name}",
+                message=f"removed feature task {task.name}",
             ),
         )
         if not task.include_in_representation:
@@ -682,7 +736,7 @@ def run_representation_benchmark_matrix(
             _maybe_emit_benchmark_progress(
                 progress_callback,
                 BenchmarkProgressEvent(
-                    benchmark_name="representation",
+                    benchmark_name="removed_feature_matrix",
                     event_type="arm_start",
                     task_name=task.name,
                     task_index=task_index,
@@ -713,13 +767,14 @@ def run_representation_benchmark_matrix(
                     row,
                     output_json_path=summary_json_path,
                     output_csv_path=summary_csv_path,
-                    root_key="representation_benchmark",
+                    root_key="removed_feature_matrix",
                 )
                 transform_payload = {
                     "task_name": task.name,
                     "arm_name": arm.name,
-                    "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
-                    "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
+                    "variant_name": experiment_config.experiment.variant_name,
+                    "claim_safe": bool(arm.claim_safe),
+                    "supervision_level": arm.supervision_level,
                     "status": skip_status,
                     "failure_reason": skip_reason,
                 }
@@ -761,12 +816,12 @@ def run_representation_benchmark_matrix(
                 continue
 
             try:
-                cached = family_cache.get(arm.feature_family)
+                cached = family_cache.get("encoder")
                 if cached is None:
                     _maybe_emit_benchmark_progress(
                         progress_callback,
                         BenchmarkProgressEvent(
-                            benchmark_name="representation",
+                            benchmark_name="removed_feature_matrix",
                             event_type="arm_step",
                             task_name=task.name,
                             arm_name=arm.name,
@@ -785,7 +840,7 @@ def run_representation_benchmark_matrix(
                     discovery_collection = extract_benchmark_selected_windows(
                         experiment_config=task_config,
                         data_config_path=data_config_path,
-                        feature_family=arm.feature_family,
+                        feature_family="encoder",
                         checkpoint_path=checkpoint_path,
                         dataset_view=dataset_view,
                         window_plan=window_plan,
@@ -807,7 +862,7 @@ def run_representation_benchmark_matrix(
                     _maybe_emit_benchmark_progress(
                         progress_callback,
                         BenchmarkProgressEvent(
-                            benchmark_name="representation",
+                            benchmark_name="removed_feature_matrix",
                             event_type="arm_step",
                             task_name=task.name,
                             arm_name=arm.name,
@@ -820,7 +875,7 @@ def run_representation_benchmark_matrix(
                     test_collection = extract_benchmark_split_collection(
                         experiment_config=task_config,
                         data_config_path=data_config_path,
-                        feature_family=arm.feature_family,
+                        feature_family="encoder",
                         split_name=resolved_test_split,
                         target_label=task.target_label,
                         target_label_mode=task.target_label_mode,
@@ -849,20 +904,20 @@ def run_representation_benchmark_matrix(
                         holdout_fraction=session_holdout_fraction,
                         seed=resolved_holdout_seed,
                     )
-                    family_cache[arm.feature_family] = (discovery_collection, test_collection, split)
-                    cached = family_cache[arm.feature_family]
+                    family_cache["encoder"] = (discovery_collection, test_collection, split)
+                    cached = family_cache["encoder"]
                 else:
                     _maybe_emit_benchmark_progress(
                         progress_callback,
                         BenchmarkProgressEvent(
-                            benchmark_name="representation",
+                            benchmark_name="removed_feature_matrix",
                             event_type="arm_step",
                             task_name=task.name,
                             arm_name=arm.name,
                             step_name="reuse_cached_features",
                             current=1,
                             total=1,
-                            message=f"reuse {arm.feature_family} features",
+                            message="reuse encoder features",
                         ),
                     )
 
@@ -871,7 +926,7 @@ def run_representation_benchmark_matrix(
                     _maybe_emit_benchmark_progress(
                         progress_callback,
                         BenchmarkProgressEvent(
-                            benchmark_name="representation",
+                            benchmark_name="removed_feature_matrix",
                             event_type="arm_step",
                             task_name=task.name,
                             arm_name=arm.name,
@@ -890,7 +945,7 @@ def run_representation_benchmark_matrix(
                     _maybe_emit_benchmark_progress(
                         progress_callback,
                         BenchmarkProgressEvent(
-                            benchmark_name="representation",
+                            benchmark_name="removed_feature_matrix",
                             event_type="arm_step",
                             task_name=task.name,
                             arm_name=arm.name,
@@ -911,7 +966,7 @@ def run_representation_benchmark_matrix(
                     _maybe_emit_benchmark_progress(
                         progress_callback,
                         BenchmarkProgressEvent(
-                            benchmark_name="representation",
+                            benchmark_name="removed_feature_matrix",
                             event_type="arm_step",
                             task_name=task.name,
                             arm_name=arm.name,
@@ -931,7 +986,7 @@ def run_representation_benchmark_matrix(
                     _maybe_emit_benchmark_progress(
                         progress_callback,
                         BenchmarkProgressEvent(
-                            benchmark_name="representation",
+                            benchmark_name="removed_feature_matrix",
                             event_type="arm_step",
                             task_name=task.name,
                             arm_name=arm.name,
@@ -947,7 +1002,7 @@ def run_representation_benchmark_matrix(
                 _maybe_emit_benchmark_progress(
                     progress_callback,
                     BenchmarkProgressEvent(
-                        benchmark_name="representation",
+                            benchmark_name="removed_feature_matrix",
                         event_type="arm_step",
                         task_name=task.name,
                         arm_name=arm.name,
@@ -967,7 +1022,7 @@ def run_representation_benchmark_matrix(
                 _maybe_emit_benchmark_progress(
                     progress_callback,
                     BenchmarkProgressEvent(
-                        benchmark_name="representation",
+                            benchmark_name="removed_feature_matrix",
                         event_type="arm_step",
                         task_name=task.name,
                         arm_name=arm.name,
@@ -980,7 +1035,7 @@ def run_representation_benchmark_matrix(
                 _maybe_emit_benchmark_progress(
                     progress_callback,
                     BenchmarkProgressEvent(
-                        benchmark_name="representation",
+                            benchmark_name="removed_feature_matrix",
                         event_type="arm_step",
                         task_name=task.name,
                         arm_name=arm.name,
@@ -1001,7 +1056,7 @@ def run_representation_benchmark_matrix(
                 _maybe_emit_benchmark_progress(
                     progress_callback,
                     BenchmarkProgressEvent(
-                        benchmark_name="representation",
+                            benchmark_name="removed_feature_matrix",
                         event_type="arm_step",
                         task_name=task.name,
                         arm_name=arm.name,
@@ -1036,7 +1091,7 @@ def run_representation_benchmark_matrix(
                 _maybe_emit_benchmark_progress(
                     progress_callback,
                     BenchmarkProgressEvent(
-                        benchmark_name="representation",
+                            benchmark_name="removed_feature_matrix",
                         event_type="arm_step",
                         task_name=task.name,
                         arm_name=arm.name,
@@ -1078,13 +1133,12 @@ def run_representation_benchmark_matrix(
                 row,
                 output_json_path=summary_json_path,
                 output_csv_path=summary_csv_path,
-                root_key="representation_benchmark",
+                root_key="removed_feature_matrix",
             )
             transform_payload = {
                 "task_name": task.name,
                 "arm_name": arm.name,
-                "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
-                "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
+                "variant_name": experiment_config.experiment.variant_name,
                 "status": status,
                 "failure_reason": failure_reason,
                 "pca_summary": pca_summary,
@@ -1138,7 +1192,7 @@ def run_representation_benchmark_matrix(
         _maybe_emit_benchmark_progress(
             progress_callback,
             BenchmarkProgressEvent(
-                benchmark_name="representation",
+                benchmark_name="removed_feature_matrix",
                 event_type="task_end",
                 task_name=task.name,
                 task_index=task_index,
@@ -1282,8 +1336,9 @@ def run_motif_benchmark_matrix(
                 transform_payload = {
                     "task_name": task.name,
                     "arm_name": arm.name,
-                    "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
-                    "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
+                    "variant_name": experiment_config.experiment.variant_name,
+                    "claim_safe": bool(arm.claim_safe),
+                    "supervision_level": arm.supervision_level,
                     "status": skip_status,
                     "failure_reason": skip_reason,
                 }
@@ -1365,9 +1420,9 @@ def run_motif_benchmark_matrix(
                 }
             else:
                 try:
-                    cached = raw_cache.get(arm.feature_family)
+                    cached = raw_cache.get("encoder")
                     if cached is None:
-                        raw_shard_dir = task_output_root / "_tmp_feature_shards" / arm.feature_family
+                        raw_shard_dir = task_output_root / "_tmp_feature_shards" / "encoder"
                         _maybe_emit_benchmark_progress(
                             progress_callback,
                             BenchmarkProgressEvent(
@@ -1384,7 +1439,7 @@ def run_motif_benchmark_matrix(
                         discovery_collection = extract_benchmark_selected_windows(
                             experiment_config=task_config,
                             data_config_path=data_config_path,
-                            feature_family=arm.feature_family,
+                            feature_family="encoder",
                             checkpoint_path=checkpoint_path,
                             dataset_view=dataset_view,
                             window_plan=plan,
@@ -1420,7 +1475,7 @@ def run_motif_benchmark_matrix(
                         test_collection = extract_benchmark_split_collection(
                             experiment_config=task_config,
                             data_config_path=data_config_path,
-                            feature_family=arm.feature_family,
+                            feature_family="encoder",
                             split_name=resolved_test_split,
                             target_label=task.target_label,
                             target_label_mode=task.target_label_mode,
@@ -1449,8 +1504,8 @@ def run_motif_benchmark_matrix(
                             holdout_fraction=session_holdout_fraction,
                             seed=resolved_holdout_seed,
                         )
-                        raw_cache[arm.feature_family] = (discovery_collection, test_collection, split, raw_shard_dir)
-                        cached = raw_cache[arm.feature_family]
+                        raw_cache["encoder"] = (discovery_collection, test_collection, split, raw_shard_dir)
+                        cached = raw_cache["encoder"]
                     else:
                         _maybe_emit_benchmark_progress(
                             progress_callback,
@@ -1462,7 +1517,7 @@ def run_motif_benchmark_matrix(
                                 step_name="reuse_cached_features",
                                 current=1,
                                 total=1,
-                                message=f"reuse {arm.feature_family} features",
+                                message="reuse encoder features",
                             ),
                         )
 
@@ -1508,6 +1563,10 @@ def run_motif_benchmark_matrix(
                     whitening_summary = None
                     discovery_session_transforms = None
                     test_whitening_summary = None
+                    token_normalization_summary = None
+                    alignment_summary = None
+                    test_alignment_summary = None
+                    candidate_geometry_summary = None
                     if arm.geometry_mode == "whitened":
                         _maybe_emit_benchmark_progress(
                             progress_callback,
@@ -1542,6 +1601,18 @@ def run_motif_benchmark_matrix(
                                 message="apply whitening",
                             ),
                         )
+                    elif arm.geometry_mode == "token_normalized":
+                        transformed_discovery, token_normalization_summary = _normalize_collection_tokens(
+                            transformed_discovery
+                        )
+                        transformed_test, _ = _normalize_collection_tokens(transformed_test)
+                    elif arm.geometry_mode == "aligned_oracle":
+                        transformed_discovery, alignment_summary, discovery_session_transforms = _apply_oracle_alignment_to_collection(
+                            collection=transformed_discovery,
+                        )
+                        transformed_test, test_alignment_summary, _ = _apply_oracle_alignment_to_collection(
+                            collection=transformed_test,
+                        )
 
                     transformed_shard_dir = arm_root / "_tmp_transformed_shards"
                     _maybe_emit_benchmark_progress(
@@ -1562,6 +1633,7 @@ def run_motif_benchmark_matrix(
                         output_dir=transformed_shard_dir,
                         global_transform=global_transform,
                         session_transforms=discovery_session_transforms,
+                        normalize_tokens=arm.geometry_mode == "token_normalized",
                         progress_callback=lambda current, total, task_name=task.name, arm_name=arm.name: _maybe_emit_benchmark_progress(
                             progress_callback,
                             BenchmarkProgressEvent(
@@ -1677,6 +1749,19 @@ def run_motif_benchmark_matrix(
                         )
                         candidate_selection_fallback_used = True
                         candidate_selection_effective_min_score = None
+                    clustering_candidates = candidates
+                    similarity_test_tokens = transformed_test.token_tensors
+                    if candidates and arm.candidate_geometry_mode == "probe_weighted":
+                        clustering_candidates, candidate_geometry_summary = _apply_probe_weight_to_candidates(
+                            candidates,
+                            state_dict=fit_probe.state_dict,
+                        )
+                        similarity_test_tokens = _apply_probe_weight_to_tokens(
+                            transformed_test.token_tensors,
+                            state_dict=fit_probe.state_dict,
+                        )
+                    elif arm.candidate_geometry_mode != "embedding":
+                        raise ValueError(f"Unsupported candidate_geometry_mode: {arm.candidate_geometry_mode}")
                     _maybe_emit_benchmark_progress(
                         progress_callback,
                         BenchmarkProgressEvent(
@@ -1691,7 +1776,7 @@ def run_motif_benchmark_matrix(
                         ),
                     )
 
-                    if not candidates:
+                    if not clustering_candidates:
                         clustered_candidates = tuple()
                         cluster_stats = _default_cluster_stats()
                         cluster_quality_summary = _default_cluster_stats()
@@ -1711,7 +1796,7 @@ def run_motif_benchmark_matrix(
                             ),
                         )
                         clustered_candidates, cluster_stats = cluster_candidate_tokens(
-                            candidates=candidates,
+                            candidates=clustering_candidates,
                             min_cluster_size=task_config.discovery.min_cluster_size,
                         )
                         _maybe_emit_benchmark_progress(
@@ -1780,7 +1865,7 @@ def run_motif_benchmark_matrix(
                             metric_scope="fit_selected_windows",
                         ),
                         candidates=clustered_candidates,
-                        cluster_stats=(cluster_stats if candidates else _default_cluster_stats()),
+                        cluster_stats=(cluster_stats if clustering_candidates else _default_cluster_stats()),
                         cluster_quality_summary=cluster_quality_summary,
                     )
                     cluster_report = build_discovery_cluster_report(artifact)
@@ -1811,7 +1896,7 @@ def run_motif_benchmark_matrix(
                             labels=transformed_test.labels,
                             window_session_ids=transformed_test.window_session_ids,
                             window_scores=_window_similarity_scores(
-                                tokens=transformed_test.token_tensors,
+                                tokens=similarity_test_tokens,
                                 token_mask=transformed_test.token_mask,
                                 centroids=centroids,
                             ),
@@ -1841,13 +1926,18 @@ def run_motif_benchmark_matrix(
                     transform_payload = {
                         "task_name": task.name,
                         "arm_name": arm.name,
-                        "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
-                        "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
+                        "variant_name": experiment_config.experiment.variant_name,
+                        "claim_safe": bool(arm.claim_safe),
+                        "supervision_level": arm.supervision_level,
                         "status": status,
                         "failure_reason": failure_reason,
                         "pca_summary": pca_summary,
                         "whitening_summary": whitening_summary,
                         "test_whitening_summary": test_whitening_summary,
+                        "token_normalization_summary": token_normalization_summary,
+                        "alignment_summary": alignment_summary,
+                        "test_alignment_summary": test_alignment_summary,
+                        "candidate_geometry_summary": candidate_geometry_summary,
                         "row": _transform_summary_row(
                             experiment_config=experiment_config,
                             task=task,
@@ -1855,6 +1945,9 @@ def run_motif_benchmark_matrix(
                             pca_summary=pca_summary,
                             whitening_summary=whitening_summary,
                             test_whitening_summary=test_whitening_summary,
+                            token_normalization_summary=token_normalization_summary,
+                            alignment_summary=alignment_summary,
+                            candidate_geometry_summary=candidate_geometry_summary,
                         ),
                     }
                     if transformed_shard_dir.exists() and not debug_retain_intermediates:
@@ -1892,8 +1985,9 @@ def run_motif_benchmark_matrix(
                     transform_payload = {
                         "task_name": task.name,
                         "arm_name": arm.name,
-                        "training_variant_name": experiment_config.objective.cross_session_aug.training_variant_name,
-                        "cross_session_aug_enabled": bool(experiment_config.objective.cross_session_aug.enabled),
+                        "variant_name": experiment_config.experiment.variant_name,
+                        "claim_safe": bool(arm.claim_safe),
+                        "supervision_level": arm.supervision_level,
                         "status": status,
                         "failure_reason": failure_reason,
                     }

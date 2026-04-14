@@ -1,0 +1,7 @@
+extends: predictive_circuit_coding_refined_debug.yaml
+experiment:
+  variant_name: refined_l2off
+model:
+  l2_normalize_tokens: false
+artifacts:
+  checkpoint_prefix: pcc_refined_l2off_debug

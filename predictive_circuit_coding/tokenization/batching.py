@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any
 
 import numpy as np
 import torch
 
-from predictive_circuit_coding.training.config import DataRuntimeConfig
+from predictive_circuit_coding.training.config import CountNormalizationConfig, DataRuntimeConfig
 from predictive_circuit_coding.training.contracts import (
     PopulationWindowBatch,
     TokenProvenanceBatch,
@@ -182,6 +183,49 @@ def _select_units(
 
 
 @dataclass(frozen=True)
+class CountNormalizationStats:
+    mode: str
+    mean: float
+    std: float
+    count: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "mean": float(self.mean),
+            "std": float(self.std),
+            "count": int(self.count),
+        }
+
+
+def load_count_normalization_stats(path: str) -> CountNormalizationStats:
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    return CountNormalizationStats(
+        mode=str(payload.get("mode", "none")),
+        mean=float(payload.get("mean", 0.0)),
+        std=float(payload.get("std", 1.0)),
+        count=int(payload.get("count", 0)),
+    )
+
+
+def write_count_normalization_stats(stats: CountNormalizationStats, path: str) -> str:
+    target = str(path)
+    with open(target, "w", encoding="utf-8") as handle:
+        json.dump(stats.to_dict(), handle, indent=2)
+    return target
+
+
+def apply_count_normalization(counts: torch.Tensor, stats: CountNormalizationStats | None) -> torch.Tensor:
+    if stats is None or stats.mode == "none":
+        return counts
+    if stats.mode != "log1p_train_zscore":
+        raise ValueError(f"Unsupported count normalization mode: {stats.mode}")
+    transformed = torch.log1p(counts.clamp_min(0.0))
+    return (transformed - float(stats.mean)) / max(float(stats.std), 1.0e-6)
+
+
+@dataclass(frozen=True)
 class WindowBinner:
     config: DataRuntimeConfig
 
@@ -202,8 +246,9 @@ class TemporalPatchBuilder:
 
 
 class PopulationWindowBatchCollator:
-    def __init__(self, config: DataRuntimeConfig):
+    def __init__(self, config: DataRuntimeConfig, *, count_normalization_stats: CountNormalizationStats | None = None):
         self.config = config
+        self.count_normalization_stats = count_normalization_stats
         self.binner = WindowBinner(config)
         self.patch_builder = TemporalPatchBuilder(config)
 
@@ -233,6 +278,7 @@ class PopulationWindowBatchCollator:
                 unit_depth_um=unit_depth_um,
                 config=self.config,
             )
+            counts = apply_count_normalization(counts, self.count_normalization_stats)
             max_units = max(max_units, counts.shape[0])
             per_sample_counts.append(counts)
 
@@ -311,5 +357,14 @@ class PopulationWindowBatchCollator:
         )
 
 
-def build_population_window_collator(config: DataRuntimeConfig) -> PopulationWindowBatchCollator:
-    return PopulationWindowBatchCollator(config)
+def build_population_window_collator(
+    config: DataRuntimeConfig,
+    *,
+    count_normalization: CountNormalizationConfig | None = None,
+) -> PopulationWindowBatchCollator:
+    stats = None
+    if count_normalization is not None and count_normalization.mode != "none":
+        if count_normalization.stats_path is None:
+            raise ValueError("count_normalization.stats_path is required when count normalization is enabled")
+        stats = load_count_normalization_stats(str(count_normalization.stats_path))
+    return PopulationWindowBatchCollator(config, count_normalization_stats=stats)

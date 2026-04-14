@@ -4,61 +4,30 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
-import shutil
 from pathlib import Path
-import sys
+import shutil
 from typing import Any, Iterable, TextIO
 
 import yaml
 
 from predictive_circuit_coding.benchmarks.config import load_notebook_pipeline_config
-from predictive_circuit_coding.benchmarks.contracts import (
-    BenchmarkArmSpec,
-    BenchmarkTaskSpec,
-    PipelineRunManifest,
-    PipelineStageState,
-)
+from predictive_circuit_coding.benchmarks.contracts import BenchmarkArmSpec, BenchmarkTaskSpec, PipelineRunManifest, PipelineStageState
 from predictive_circuit_coding.benchmarks.reports import build_final_project_summary, write_single_row_summary, write_summary_rows
-from predictive_circuit_coding.benchmarks.run import (
-    default_benchmark_task_specs,
-    default_motif_arm_specs,
-    default_representation_arm_specs,
-    run_motif_benchmark_matrix,
-    run_representation_benchmark_matrix,
-)
-from predictive_circuit_coding.data import (
-    build_workspace,
-    create_workspace,
-    filter_session_catalog,
-    load_preparation_config,
-    load_session_catalog,
-)
+from predictive_circuit_coding.benchmarks.run import default_benchmark_task_specs, default_motif_arm_specs, run_motif_benchmark_matrix
 from predictive_circuit_coding.evaluation import evaluate_checkpoint_on_split
-from predictive_circuit_coding.training import load_experiment_config, train_model, write_evaluation_summary, write_run_manifest
+from predictive_circuit_coding.training import load_experiment_config, train_model, write_evaluation_summary
 from predictive_circuit_coding.utils.notebook import (
+    NotebookDatasetConfig,
     NotebookProgressConfig,
     NotebookProgressUI,
     NotebookStageSummary,
-    build_notebook_preflight_rows,
-    load_pipeline_display_tables,
-    NotebookDatasetConfig,
     NotebookTrainingConfig,
-    materialize_notebook_prepared_sessions,
-    prepare_notebook_runtime_context,
     prepare_notebook_runtime_context_from_experiment_config,
     resolve_notebook_checkpoint,
-    run_notebook_session_alignment_diagnostics,
 )
 
 
-_PIPELINE_STAGE_ORDER = (
-    "train",
-    "evaluate",
-    "representation_benchmark",
-    "motif_benchmark",
-    "alignment_diagnostic",
-    "final_reports",
-)
+_PIPELINE_STAGE_ORDER = ("train", "evaluate", "refinement", "alignment_diagnostic", "final_reports")
 
 
 @dataclass(frozen=True)
@@ -68,8 +37,7 @@ class NotebookPipelinePaths:
     drive_run_root: Path | None
     train_root: Path
     evaluation_root: Path
-    representation_root: Path
-    motif_root: Path
+    refinement_root: Path
     diagnostics_root: Path
     reports_root: Path
     pipeline_root: Path
@@ -89,13 +57,9 @@ class NotebookPipelineRunResult:
     training_summary_path: Path
     training_history_json_path: Path | None
     training_history_csv_path: Path | None
-    training_geometry_monitor_json_path: Path | None
-    training_geometry_monitor_csv_path: Path | None
     evaluation_summary_paths: tuple[Path, ...]
-    representation_summary_json_path: Path
-    representation_summary_csv_path: Path
-    motif_summary_json_path: Path
-    motif_summary_csv_path: Path
+    refinement_summary_json_path: Path
+    refinement_summary_csv_path: Path
     final_summary_json_path: Path
     final_summary_csv_path: Path
     alignment_summary_json_path: Path | None
@@ -109,21 +73,18 @@ def _utc_now() -> str:
 
 
 def _json_hash(payload: dict[str, Any]) -> str:
-    serialized = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
-    return hashlib.sha256(serialized).hexdigest()
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _path_identity(path: str | Path | None) -> str | None:
+    return str(Path(path).resolve()) if path is not None else None
 
 
 def _resolve_latest_run_id(drive_export_root: str | Path) -> str | None:
-    export_root = Path(drive_export_root)
-    if not export_root.is_dir():
+    root = Path(drive_export_root)
+    if not root.is_dir():
         return None
-    candidates = sorted(
-        [
-            path.name
-            for path in export_root.iterdir()
-            if path.is_dir() and path.name.startswith("run_") and (path / "run_1" / "train").is_dir()
-        ]
-    )
+    candidates = sorted(path.name for path in root.iterdir() if path.is_dir() and path.name.startswith("run_"))
     return candidates[-1] if candidates else None
 
 
@@ -143,9 +104,8 @@ def _build_pipeline_paths(
         drive_run_root=drive_run_root,
         train_root=local_run_root / "train",
         evaluation_root=local_run_root / "evaluation",
-        representation_root=local_run_root / "benchmarks" / "representation",
-        motif_root=local_run_root / "benchmarks" / "motifs",
-        diagnostics_root=local_run_root / "benchmarks" / "diagnostics",
+        refinement_root=local_run_root / "refinement",
+        diagnostics_root=local_run_root / "diagnostics",
         reports_root=local_run_root / "reports",
         pipeline_root=pipeline_root,
         runtime_experiment_config_path=local_run_root / "train" / "colab_runtime_experiment.yaml",
@@ -163,212 +123,28 @@ def _sync_path(source: Path, target: Path) -> None:
         if target.exists():
             shutil.rmtree(target)
         shutil.copytree(source, target)
-        return
-    if target.exists():
-        target.unlink()
-    shutil.copy2(source, target)
-
-
-def _restore_drive_run_if_present(paths: NotebookPipelinePaths) -> None:
-    if paths.drive_run_root is None or not paths.drive_run_root.exists() or paths.local_run_root.exists():
-        return
-    paths.local_run_root.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(paths.drive_run_root, paths.local_run_root)
+    else:
+        shutil.copy2(source, target)
 
 
 def _sync_run_relatives(paths: NotebookPipelinePaths, relatives: Iterable[str]) -> None:
     if paths.drive_run_root is None:
         return
     for relative in relatives:
-        source = paths.local_run_root / relative
-        target = paths.drive_run_root / relative
-        _sync_path(source, target)
-
-
-def _ensure_local_dataset_workspace(
-    *,
-    base_experiment_config: str | Path,
-    data_config_path: str | Path,
-    source_dataset_root: str | Path | None,
-    stage_prepared_sessions_locally: bool,
-    output_stream: TextIO | None = None,
-) -> dict[str, Any] | None:
-    if source_dataset_root is None:
-        return None
-
-    prep_config = load_preparation_config(data_config_path)
-    workspace = build_workspace(prep_config)
-    source_root = Path(source_dataset_root).resolve()
-    target_root = workspace.root.resolve()
-    if source_root == target_root:
-        return {
-            "mode": "source_equals_target",
-            "source_dataset_root": str(source_root),
-            "target_dataset_root": str(target_root),
-        }
-
-    experiment_config = load_experiment_config(base_experiment_config)
-    source_catalog_path = source_root / "manifests" / "session_catalog.json"
-    if not source_catalog_path.is_file():
-        raise FileNotFoundError(
-            f"Source dataset session catalog not found: {source_catalog_path}. "
-            "Point the pipeline config at the processed Drive dataset root."
-        )
-    source_catalog = load_session_catalog(source_catalog_path)
-
-    if experiment_config.dataset_selection.is_active and stage_prepared_sessions_locally:
-        selected_catalog = filter_session_catalog(source_catalog, selection=experiment_config.dataset_selection)
-        session_ids = tuple(record.session_id for record in selected_catalog.records)
-        if not session_ids:
-            raise ValueError(
-                "Dataset selection matched zero sessions in the source dataset root. "
-                "Relax the experiment config filters or verify the source dataset catalog."
-            )
-        local_prepared_root = target_root / prep_config.dataset.prepared_subdir / experiment_config.dataset_id
-        manifests_ready = (target_root / prep_config.dataset.manifests_subdir / "session_catalog.json").is_file()
-        all_sessions_present = all((local_prepared_root / f"{session_id}.h5").is_file() for session_id in session_ids)
-        if manifests_ready and all_sessions_present:
-            return {
-                "mode": "reuse_local_subset",
-                "source_dataset_root": str(source_root),
-                "target_dataset_root": str(target_root),
-                "session_count": len(session_ids),
-            }
-        result = materialize_notebook_prepared_sessions(
-            source_dataset_root=source_root,
-            target_dataset_root=target_root,
-            session_ids=session_ids,
-            dataset_id=experiment_config.dataset_id,
-            reset_target=True,
-        )
-        if output_stream is not None:
-            output_stream.write(
-                f"Prepared-session staging: local copy enabled | staged sessions={len(result.staged_session_ids)} "
-                f"| target={result.target_prepared_root}\n"
-            )
-        return {
-            "mode": "staged_subset",
-            "source_dataset_root": str(source_root),
-            "target_dataset_root": str(result.target_dataset_root),
-            "session_count": len(result.staged_session_ids),
-        }
-
-    if target_root.is_symlink() and target_root.resolve() == source_root:
-        return {
-            "mode": "reuse_symlink",
-            "source_dataset_root": str(source_root),
-            "target_dataset_root": str(target_root),
-        }
-    if target_root.exists():
-        if target_root.is_symlink() or target_root.is_file():
-            target_root.unlink()
-        else:
-            shutil.rmtree(target_root)
-    target_root.parent.mkdir(parents=True, exist_ok=True)
-    mode = "symlink"
-    try:
-        target_root.symlink_to(source_root, target_is_directory=True)
-    except OSError:
-        shutil.copytree(source_root, target_root)
-        mode = "copytree"
-    if output_stream is not None:
-        output_stream.write(
-            f"Prepared-session staging: full dataset {mode} | source={source_root} | target={target_root}\n"
-        )
-    return {
-        "mode": mode,
-        "source_dataset_root": str(source_root),
-        "target_dataset_root": str(target_root),
-    }
+        _sync_path(paths.local_run_root / relative, paths.drive_run_root / relative)
 
 
 def _load_pipeline_state(path: Path) -> dict[str, dict[str, Any]]:
     if not path.is_file():
         return {}
     payload = json.loads(path.read_text(encoding="utf-8"))
-    return dict(payload.get("stages", {}))
+    stages = payload.get("stages", payload)
+    return {str(key): dict(value) for key, value in stages.items() if isinstance(value, dict)}
 
 
-def _write_pipeline_state(
-    *,
-    path: Path,
-    states: dict[str, dict[str, Any]],
-) -> Path:
+def _write_pipeline_state(path: Path, states: dict[str, dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"stages": states}, indent=2), encoding="utf-8")
-    return path
-
-
-def _write_pipeline_manifest(
-    *,
-    paths: NotebookPipelinePaths,
-    dataset_id: str,
-    created_at_utc: str,
-) -> Path:
-    manifest = PipelineRunManifest(
-        run_id=paths.run_id,
-        dataset_id=str(dataset_id),
-        stage_order=_PIPELINE_STAGE_ORDER,
-        local_run_root=str(paths.local_run_root),
-        drive_run_root=(str(paths.drive_run_root) if paths.drive_run_root is not None else None),
-        config_snapshot_path=str(paths.pipeline_config_snapshot_path),
-        created_at_utc=created_at_utc,
-        updated_at_utc=_utc_now(),
-    )
-    paths.pipeline_manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    paths.pipeline_manifest_path.write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")
-    return paths.pipeline_manifest_path
-
-
-def _path_identity(path: str | Path | None) -> dict[str, Any] | None:
-    if path is None:
-        return None
-    resolved = Path(path)
-    if not resolved.exists():
-        return {"path": str(resolved), "exists": False}
-    if resolved.is_dir():
-        return {"path": str(resolved), "exists": True, "type": "dir"}
-    stat = resolved.stat()
-    return {
-        "path": str(resolved),
-        "exists": True,
-        "type": "file",
-        "size": int(stat.st_size),
-        "mtime_ns": int(stat.st_mtime_ns),
-    }
-
-
-def _outputs_exist(outputs: dict[str, Any]) -> bool:
-    for value in outputs.values():
-        if value in (None, "", [], {}):
-            continue
-        if isinstance(value, (list, tuple)):
-            if not all(Path(item).exists() for item in value):
-                return False
-            continue
-        if not Path(value).exists():
-            return False
-    return True
-
-
-def _stage_is_reusable(
-    *,
-    states: dict[str, dict[str, Any]],
-    stage_name: str,
-    config_hash: str,
-    inputs: dict[str, Any],
-) -> bool:
-    state = states.get(stage_name)
-    if state is None:
-        return False
-    if state.get("status") != "complete":
-        return False
-    if state.get("config_hash") != config_hash:
-        return False
-    if state.get("inputs") != inputs:
-        return False
-    outputs = dict(state.get("outputs") or {})
-    return _outputs_exist(outputs)
 
 
 def _set_stage_state(
@@ -382,310 +158,87 @@ def _set_stage_state(
     outputs: dict[str, Any] | None = None,
     error_message: str | None = None,
 ) -> None:
-    created_at = states.get(stage_name, {}).get("created_at_utc", _utc_now())
-    payload = PipelineStageState(
+    previous = states.get(stage_name, {})
+    states[stage_name] = PipelineStageState(
         stage_name=stage_name,
         status=status,
         config_hash=config_hash,
         inputs=inputs,
         outputs=outputs or {},
-        created_at_utc=created_at,
+        created_at_utc=str(previous.get("created_at_utc") or _utc_now()),
         updated_at_utc=_utc_now(),
         error_message=error_message,
+    ).to_dict()
+    _write_pipeline_state(paths.pipeline_state_path, states)
+
+
+def _stage_is_reusable(
+    *,
+    states: dict[str, dict[str, Any]],
+    stage_name: str,
+    config_hash: str,
+    inputs: dict[str, Any],
+) -> bool:
+    state = states.get(stage_name) or {}
+    return (
+        state.get("status") == "complete"
+        and state.get("config_hash") == config_hash
+        and dict(state.get("inputs") or {}) == inputs
     )
-    states[stage_name] = payload.to_dict()
-    _write_pipeline_state(path=paths.pipeline_state_path, states=states)
+
+
+def _write_pipeline_manifest(paths: NotebookPipelinePaths, *, dataset_id: str, created_at_utc: str) -> None:
+    manifest = PipelineRunManifest(
+        run_id=paths.run_id,
+        dataset_id=dataset_id,
+        stage_order=_PIPELINE_STAGE_ORDER,
+        local_run_root=str(paths.local_run_root),
+        drive_run_root=str(paths.drive_run_root) if paths.drive_run_root is not None else None,
+        config_snapshot_path=str(paths.pipeline_config_snapshot_path),
+        created_at_utc=created_at_utc,
+        updated_at_utc=_utc_now(),
+    )
+    paths.pipeline_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.pipeline_manifest_path.write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")
+
+
+def _select_task_specs(requested_names: tuple[str, ...] | None) -> tuple[BenchmarkTaskSpec, ...]:
+    specs = default_benchmark_task_specs()
+    if requested_names is None:
+        return specs
+    by_name = {spec.name: spec for spec in specs}
+    missing = [name for name in requested_names if name not in by_name]
+    if missing:
+        raise ValueError(f"Unknown refinement task names: {missing}")
+    return tuple(by_name[name] for name in requested_names)
+
+
+def _select_arm_specs(specs: tuple[BenchmarkArmSpec, ...], requested_names: tuple[str, ...] | None) -> tuple[BenchmarkArmSpec, ...]:
+    if requested_names is None:
+        return specs
+    by_name = {spec.name: spec for spec in specs}
+    missing = [name for name in requested_names if name not in by_name]
+    if missing:
+        raise ValueError(f"Unknown refinement arm names: {missing}")
+    return tuple(by_name[name] for name in requested_names)
 
 
 def _summary_rows_from_json(path: Path, root_key: str) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     payload = json.loads(path.read_text(encoding="utf-8"))
-    return list(payload.get(root_key, []))
+    rows = payload.get(root_key, [])
+    return [dict(row) for row in rows if isinstance(row, dict)]
 
 
-def _stage_root(paths: NotebookPipelinePaths, stage_name: str) -> Path:
-    mapping = {
-        "train": paths.train_root,
-        "evaluate": paths.evaluation_root,
-        "representation_benchmark": paths.representation_root,
-        "motif_benchmark": paths.motif_root,
-        "alignment_diagnostic": paths.diagnostics_root,
-        "final_reports": paths.reports_root,
-    }
-    return mapping.get(stage_name, paths.pipeline_root)
-
-
-def _append_stage_log(log_lines: list[str], message: str) -> None:
-    log_lines.append(str(message).rstrip("\n"))
-
-
-def _write_stage_debug_log(
-    *,
-    paths: NotebookPipelinePaths,
-    stage_name: str,
-    log_lines: list[str],
-    error_message: str | None = None,
-    persist: bool = False,
-) -> Path | None:
-    if not persist and error_message is None:
-        return None
-    target = _stage_root(paths, stage_name) / "stage_debug.log"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    lines = list(log_lines)
-    if error_message is not None:
-        lines.append(f"ERROR: {error_message}")
-    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return target
-
-
-def _load_json(path: str | Path) -> dict[str, Any]:
-    candidate = Path(path)
-    if not candidate.is_file():
-        return {}
-    return json.loads(candidate.read_text(encoding="utf-8"))
-
-
-def _build_train_stage_summary(
-    *,
-    outputs: dict[str, Any],
-    status: str,
-    debug_log_path: Path | None = None,
-) -> NotebookStageSummary:
-    summary_payload = _load_json(outputs.get("training_summary_path", ""))
-    metrics = summary_payload.get("metrics", {})
-    losses = summary_payload.get("losses", {})
-    geometry_rows = _summary_rows_from_json(
-        Path(outputs.get("training_geometry_monitor_json_path", "")),
-        "cross_session_geometry_monitor",
-    ) if outputs.get("training_geometry_monitor_json_path") else []
-    history_rows = _summary_rows_from_json(
-        Path(outputs.get("training_history_json_path", "")),
-        "training_history",
-    ) if outputs.get("training_history_json_path") else []
-    latest_geometry = geometry_rows[-1] if geometry_rows else {}
-    latest_history = history_rows[-1] if history_rows else {}
-    variant_name = summary_payload.get("training_variant_name", "baseline")
-    headline = (
-        f"Variant `{variant_name}` best epoch `{summary_payload.get('best_epoch', 'n/a')}` "
-        f"with predictive improvement `{metrics.get('predictive_improvement', 'n/a')}`."
-    )
-    rows = ({
-        "training_variant_name": variant_name,
-        "cross_session_aug_enabled": summary_payload.get("cross_session_aug_enabled"),
-        "best_epoch": summary_payload.get("best_epoch"),
-        "predictive_improvement": metrics.get("predictive_improvement"),
-        "predictive_loss": metrics.get("predictive_loss"),
-        "predictive_baseline_mse": metrics.get("predictive_baseline_mse"),
-        "predictive_raw_mse": metrics.get("predictive_raw_mse"),
-        "cross_session_region_loss": losses.get("cross_session_region_loss"),
-        "cross_session_aug_fraction": losses.get("cross_session_aug_fraction"),
-        "cross_session_donor_available_fraction": losses.get("cross_session_donor_available_fraction"),
-        "cross_session_shared_region_mean": losses.get("cross_session_shared_region_mean"),
-        "latest_epoch": latest_history.get("epoch"),
-        "latest_valid_predictive_improvement": latest_history.get("valid_predictive_improvement"),
-        "latest_train_total_loss": latest_history.get("train_total_loss"),
-        "geometry_session_neighbor_enrichment": latest_geometry.get("session_neighbor_enrichment"),
-        "geometry_label_neighbor_enrichment": latest_geometry.get("label_neighbor_enrichment"),
-    },)
-    return NotebookStageSummary(
-        stage_name="train",
-        status=status,
-        headline=headline,
-        rows=rows,
-        artifact_paths={
-            "checkpoint": str(outputs.get("checkpoint_path", "")),
-            "training_summary": str(outputs.get("training_summary_path", "")),
-            "training_history": str(outputs.get("training_history_json_path", "")),
-            "geometry_monitor": str(outputs.get("training_geometry_monitor_json_path", "")),
-        },
-        debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
-    )
-
-
-def _build_evaluation_stage_summary(
-    *,
-    outputs: dict[str, Any],
-    status: str,
-    debug_log_path: Path | None = None,
-) -> NotebookStageSummary:
-    rows: list[dict[str, Any]] = []
-    for path in outputs.get("evaluation_summary_paths", []):
-        payload = _load_json(path)
-        rows.append(
-            {
-                "split_name": payload.get("split_name"),
-                "predictive_improvement": payload.get("metrics", {}).get("predictive_improvement"),
-                "predictive_loss": payload.get("metrics", {}).get("predictive_loss"),
-                "window_count": payload.get("window_count"),
-            }
-        )
-    return NotebookStageSummary(
-        stage_name="evaluate",
-        status=status,
-        headline="Evaluation summaries written for the configured splits.",
-        rows=tuple(rows),
-        artifact_paths=(
-            {"evaluation_summary_count": str(len(outputs.get("evaluation_summary_paths", [])))}
-            if outputs.get("evaluation_summary_paths")
-            else {}
-        ),
-        debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
-    )
-
-
-def _build_representation_stage_summary(
-    *,
-    outputs: dict[str, Any],
-    status: str,
-    debug_log_path: Path | None = None,
-) -> NotebookStageSummary:
-    tables = load_pipeline_display_tables(
-        representation_summary_csv_path=outputs.get("representation_summary_csv_path", ""),
-        motif_summary_csv_path="",
-        final_summary_csv_path="",
-    )
-    frame = tables.get("representation")
-    rows = tuple(frame.head(5).to_dict(orient="records")) if hasattr(frame, "empty") and not frame.empty else ()
-    headline = "Representation benchmark leaderboard."
-    if rows:
-        best = rows[0]
-        headline = (
-            f"Best row: `{best.get('task_name')}` / `{best.get('arm_name')}` "
-            f"with test PR-AUC `{best.get('test_probe_pr_auc')}`."
-        )
-    return NotebookStageSummary(
-        stage_name="representation_benchmark",
-        status=status,
-        headline=headline,
-        rows=rows,
-        artifact_paths={"representation_summary": str(outputs.get("representation_summary_json_path", ""))},
-        debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
-    )
-
-
-def _build_motif_stage_summary(
-    *,
-    outputs: dict[str, Any],
-    status: str,
-    debug_log_path: Path | None = None,
-) -> NotebookStageSummary:
-    tables = load_pipeline_display_tables(
-        representation_summary_csv_path="",
-        motif_summary_csv_path=outputs.get("motif_summary_csv_path", ""),
-        final_summary_csv_path="",
-    )
-    frame = tables.get("motif")
-    rows = tuple(frame.head(5).to_dict(orient="records")) if hasattr(frame, "empty") and not frame.empty else ()
-    headline = "Motif benchmark leaderboard."
-    if rows:
-        best = rows[0]
-        headline = (
-            f"Best row: `{best.get('task_name')}` / `{best.get('arm_name')}` "
-            f"with held-out motif PR-AUC `{best.get('held_out_similarity_pr_auc')}`."
-        )
-    return NotebookStageSummary(
-        stage_name="motif_benchmark",
-        status=status,
-        headline=headline,
-        rows=rows,
-        artifact_paths={"motif_summary": str(outputs.get("motif_summary_json_path", ""))},
-        debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
-    )
-
-
-def _build_alignment_stage_summary(
-    *,
-    outputs: dict[str, Any],
-    status: str,
-    debug_log_path: Path | None = None,
-) -> NotebookStageSummary:
-    payload = _load_json(outputs.get("alignment_summary_json_path", "")) if outputs.get("alignment_summary_json_path") else {}
-    rows = ()
-    if payload:
-        root_key = next(iter(payload.keys()))
-        raw_rows = payload.get(root_key, [])
-        if isinstance(raw_rows, list):
-            rows = tuple(raw_rows[:5])
-    return NotebookStageSummary(
-        stage_name="alignment_diagnostic",
-        status=status,
-        headline="Optional alignment diagnostic completed.",
-        rows=rows,
-        artifact_paths=(
-            {"alignment_summary": str(outputs.get("alignment_summary_json_path", ""))}
-            if outputs.get("alignment_summary_json_path")
-            else {}
-        ),
-        debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
-    )
-
-
-def _build_final_stage_summary(
-    *,
-    outputs: dict[str, Any],
-    status: str,
-    debug_log_path: Path | None = None,
-) -> NotebookStageSummary:
-    payload = _load_json(outputs.get("final_summary_json_path", ""))
-    rows = tuple(payload.get("final_project_summary", []))
-    claims = []
-    if rows:
-        claims = tuple(rows[0].get("claims", []))
-    return NotebookStageSummary(
-        stage_name="final_reports",
-        status=status,
-        headline="Final project summary written.",
-        rows=rows[:1] if rows else (),
-        notes=claims,
-        artifact_paths={"final_summary": str(outputs.get("final_summary_json_path", ""))},
-        debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
-    )
-
-
-def _build_reused_stage_summary(stage_name: str) -> NotebookStageSummary:
+def _stage_summary(stage_name: str, outputs: dict[str, Any], status: str) -> NotebookStageSummary:
     return NotebookStageSummary(
         stage_name=stage_name,
-        status="reused",
-        headline="Reused from the existing config-matched pipeline state.",
+        status=status,
+        headline=f"{stage_name}: {status}",
+        metrics={},
+        artifact_paths={key: str(value) for key, value in outputs.items() if value},
     )
-
-
-def _select_task_specs(
-    *,
-    include_image_identity: bool,
-    image_target_name: str | None,
-    image_target_names: tuple[str, ...] | None = None,
-    requested_names: tuple[str, ...] | None,
-) -> tuple[BenchmarkTaskSpec, ...]:
-    default_specs = default_benchmark_task_specs(
-        include_image_identity=include_image_identity,
-        image_target_name=image_target_name,
-        image_target_names=image_target_names,
-    )
-    if not requested_names:
-        return default_specs
-    requested = {str(name) for name in requested_names}
-    return tuple(
-        spec
-        for spec in default_specs
-        if spec.name in requested
-        or (
-            include_image_identity
-            and spec.target_label == "stimulus_presentations.image_name"
-            and spec.target_label_match_value is not None
-        )
-    )
-
-
-def _select_arm_specs(
-    specs: tuple[BenchmarkArmSpec, ...],
-    requested_names: tuple[str, ...] | None,
-) -> tuple[BenchmarkArmSpec, ...]:
-    if not requested_names:
-        return specs
-    requested = {str(name) for name in requested_names}
-    return tuple(spec for spec in specs if spec.name in requested)
 
 
 def prepare_or_restore_training_stage(
@@ -698,50 +251,39 @@ def prepare_or_restore_training_stage(
     training_config: NotebookTrainingConfig,
     step_log_every: int,
     run_stage_train: bool,
-    use_experiment_config_as_is: bool,
-    output_stream: TextIO,
+    use_experiment_config_as_is: bool = False,
+    output_stream: TextIO | None = None,
     progress_ui: NotebookProgressUI | None = None,
     debug_retain_intermediates: bool = False,
 ) -> dict[str, Any]:
-    prep_config = load_preparation_config(data_config_path)
-    workspace = create_workspace(prep_config)
+    del debug_retain_intermediates
     stage_config = {
-        "base_experiment_config": str(Path(base_experiment_config).resolve()),
-        "data_config_path": str(Path(data_config_path).resolve()),
+        "base_experiment_config": _path_identity(base_experiment_config),
+        "data_config_path": _path_identity(data_config_path),
+        "run_stage_train": bool(run_stage_train),
+        "use_experiment_config_as_is": bool(use_experiment_config_as_is),
         "dataset_config": dataset_config.__dict__,
         "training_config": training_config.__dict__,
         "step_log_every": int(step_log_every),
-        "run_stage_train": bool(run_stage_train),
-        "use_experiment_config_as_is": bool(use_experiment_config_as_is),
     }
     config_hash = _json_hash(stage_config)
-    inputs = {
-        "base_experiment_config": _path_identity(base_experiment_config),
-        "data_config_path": _path_identity(data_config_path),
-        "workspace_root": _path_identity(workspace.root),
-    }
+    inputs = {"base_experiment_config": _path_identity(base_experiment_config), "data_config_path": _path_identity(data_config_path)}
     if _stage_is_reusable(states=states, stage_name="train", config_hash=config_hash, inputs=inputs):
-        if progress_ui is not None:
-            progress_ui.render_stage_summary(_build_reused_stage_summary("train"))
         return dict(states["train"]["outputs"])
 
-    _set_stage_state(
-        states=states,
-        paths=paths,
-        stage_name="train",
-        status="running",
-        config_hash=config_hash,
-        inputs=inputs,
-    )
+    paths.train_root.mkdir(parents=True, exist_ok=True)
     if progress_ui is not None:
-        progress_ui.start_stage(
-            stage_name="train",
-            total=(training_config.num_epochs if not use_experiment_config_as_is else None),
-            description="Training",
-        )
-    stage_logs: list[str] = []
-    try:
+        progress_ui.start_stage(stage_name="train", total=1, description="Train")
+
+    if run_stage_train:
         if use_experiment_config_as_is:
+            source_config = load_experiment_config(base_experiment_config)
+            paths.runtime_experiment_config_path.write_text(
+                yaml.safe_dump(source_config.to_dict(), sort_keys=False),
+                encoding="utf-8",
+            )
+            runtime_config = load_experiment_config(paths.runtime_experiment_config_path)
+        else:
             context = prepare_notebook_runtime_context_from_experiment_config(
                 base_experiment_config=base_experiment_config,
                 runtime_experiment_config=paths.runtime_experiment_config_path,
@@ -749,195 +291,40 @@ def prepare_or_restore_training_stage(
                 step_log_every=step_log_every,
                 run_id=paths.run_id,
             )
-        else:
-            context = prepare_notebook_runtime_context(
-                base_experiment_config=base_experiment_config,
-                runtime_experiment_config=paths.runtime_experiment_config_path,
-                session_catalog_csv=workspace.session_catalog_csv_path,
-                artifact_root=paths.train_root,
-                dataset_config=dataset_config,
-                training_config=training_config,
-                step_log_every=step_log_every,
-                run_id=paths.run_id,
-            )
-        runtime_config = load_experiment_config(context.experiment_config_path)
-        checkpoint_prefix = runtime_config.artifacts.checkpoint_prefix
-        checkpoint_path = context.checkpoint_path
-        if context.summary_path.exists() or any(context.checkpoint_dir.glob(f"{checkpoint_prefix}_*.pt")):
-            checkpoint_path = resolve_notebook_checkpoint(
-                summary_path=context.summary_path,
-                checkpoint_dir=context.checkpoint_dir,
-                checkpoint_prefix=checkpoint_prefix,
-            )
-
-        if run_stage_train:
-            train_result = train_model(
-                experiment_config=runtime_config,
-                data_config_path=data_config_path,
-                train_split=runtime_config.splits.train,
-                valid_split=runtime_config.splits.valid,
-                progress_callback=(
-                    progress_ui.make_training_callback(stage_name="train")
-                    if progress_ui is not None
-                    else None
-                ),
-                log_sink=lambda line: _append_stage_log(stage_logs, line),
-                emit_logs=progress_ui is None,
-            )
-            checkpoint_path = train_result.checkpoint_path
-            training_summary_path = train_result.summary_path
-            run_manifest_path = context.summary_path.with_name(f"{context.summary_path.stem}_train_run_manifest.json")
-            write_run_manifest(
-                {
-                    "command_name": "train",
-                    "created_at_utc": _utc_now(),
-                    "dataset_id": runtime_config.dataset_id,
-                    "inputs": {
-                        "config": str(context.experiment_config_path),
-                        "data_config": str(Path(data_config_path).resolve()),
-                    },
-                    "outputs": {
-                        "checkpoint_path": str(checkpoint_path),
-                        "training_summary_path": str(training_summary_path),
-                        "training_history_json_path": str(train_result.history_json_path),
-                        "training_history_csv_path": str(train_result.history_csv_path),
-                        "training_geometry_monitor_json_path": (
-                            str(train_result.geometry_monitor_json_path)
-                            if train_result.geometry_monitor_json_path is not None
-                            else ""
-                        ),
-                        "training_geometry_monitor_csv_path": (
-                            str(train_result.geometry_monitor_csv_path)
-                            if train_result.geometry_monitor_csv_path is not None
-                            else ""
-                        ),
-                    },
-                },
-                run_manifest_path,
-            )
-        elif not checkpoint_path.exists():
-            raise FileNotFoundError(
-                "Training stage is disabled, but no checkpoint was found for the selected run. "
-                "Enable RUN_STAGE_TRAIN or point PIPELINE_RUN_ID at an exported run with train artifacts."
-            )
-        else:
-            training_summary_path = context.summary_path
-            run_manifest_path = context.summary_path.with_name(f"{context.summary_path.stem}_train_run_manifest.json")
-        training_history_json_path = (
-            train_result.history_json_path
-            if run_stage_train
-            else (
-                training_summary_path.with_name("training_history.json")
-                if training_summary_path.with_name("training_history.json").is_file()
-                else None
-            )
+            runtime_config = load_experiment_config(context.experiment_config_path)
+        result = train_model(
+            experiment_config=runtime_config,
+            data_config_path=data_config_path,
+            train_split=runtime_config.splits.train,
+            valid_split=runtime_config.splits.valid,
         )
-        training_history_csv_path = (
-            train_result.history_csv_path
-            if run_stage_train
-            else (
-                training_summary_path.with_name("training_history.csv")
-                if training_summary_path.with_name("training_history.csv").is_file()
-                else None
-            )
-        )
-        geometry_monitor_json_path = (
-            train_result.geometry_monitor_json_path
-            if run_stage_train
-            else (
-                training_summary_path.with_name("cross_session_geometry_monitor.json")
-                if training_summary_path.with_name("cross_session_geometry_monitor.json").is_file()
-                else None
-            )
-        )
-        geometry_monitor_csv_path = (
-            train_result.geometry_monitor_csv_path
-            if run_stage_train
-            else (
-                training_summary_path.with_name("cross_session_geometry_monitor.csv")
-                if training_summary_path.with_name("cross_session_geometry_monitor.csv").is_file()
-                else None
-            )
-        )
-
         outputs = {
-            "runtime_experiment_config_path": str(context.experiment_config_path),
-            "exported_runtime_config_path": str(context.exported_runtime_config_path),
-            "checkpoint_path": str(checkpoint_path),
-            "training_summary_path": str(training_summary_path),
-            "training_history_json_path": (
-                str(training_history_json_path)
-                if training_history_json_path is not None
-                else ""
-            ),
-            "training_history_csv_path": (
-                str(training_history_csv_path)
-                if training_history_csv_path is not None
-                else ""
-            ),
-            "training_geometry_monitor_json_path": (
-                str(geometry_monitor_json_path)
-                if geometry_monitor_json_path is not None
-                else ""
-            ),
-            "training_geometry_monitor_csv_path": (
-                str(geometry_monitor_csv_path)
-                if geometry_monitor_csv_path is not None
-                else ""
-            ),
-            "run_manifest_path": str(run_manifest_path) if run_manifest_path.exists() else "",
-            "train_root": str(paths.train_root),
+            "runtime_experiment_config_path": str(paths.runtime_experiment_config_path),
+            "checkpoint_path": str(result.checkpoint_path),
+            "training_summary_path": str(result.summary_path),
+            "training_history_json_path": str(result.history_json_path),
+            "training_history_csv_path": str(result.history_csv_path),
         }
-        debug_log_path = _write_stage_debug_log(
-            paths=paths,
-            stage_name="train",
-            log_lines=stage_logs,
-            persist=debug_retain_intermediates or (progress_ui is None),
+    else:
+        checkpoint = resolve_notebook_checkpoint(
+            summary_path=paths.train_root / "training_summary.json",
+            checkpoint_dir=paths.train_root / "checkpoints",
+            checkpoint_prefix=load_experiment_config(paths.runtime_experiment_config_path).artifacts.checkpoint_prefix,
         )
-        if debug_log_path is not None:
-            outputs["debug_log_path"] = str(debug_log_path)
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="train",
-            status="complete",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=outputs,
-        )
-        _sync_run_relatives(paths, ("train", "pipeline"))
-        if progress_ui is not None:
-            progress_ui.finish_stage(
-                _build_train_stage_summary(outputs=outputs, status="complete", debug_log_path=debug_log_path)
-            )
-            progress_ui.advance_pipeline()
-        return outputs
-    except Exception as exc:
-        debug_log_path = _write_stage_debug_log(
-            paths=paths,
-            stage_name="train",
-            log_lines=stage_logs,
-            error_message=str(exc),
-            persist=True,
-        )
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="train",
-            status="failed",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=({"debug_log_path": str(debug_log_path)} if debug_log_path is not None else None),
-            error_message=str(exc),
-        )
-        if progress_ui is not None:
-            progress_ui.fail_stage(
-                stage_name="train",
-                error_message=str(exc),
-                debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
-                tail_lines=stage_logs[-50:],
-            )
-        raise
+        outputs = {
+            "runtime_experiment_config_path": str(paths.runtime_experiment_config_path),
+            "checkpoint_path": str(checkpoint),
+            "training_summary_path": str(paths.train_root / "training_summary.json"),
+            "training_history_json_path": None,
+            "training_history_csv_path": None,
+        }
+
+    _set_stage_state(states=states, paths=paths, stage_name="train", status="complete", config_hash=config_hash, inputs=inputs, outputs=outputs)
+    _sync_run_relatives(paths, ("train", "pipeline"))
+    if progress_ui is not None:
+        progress_ui.finish_stage(_stage_summary("train", outputs, "complete"))
+        progress_ui.advance_pipeline()
+    return outputs
 
 
 def run_standard_evaluation_stage(
@@ -948,304 +335,59 @@ def run_standard_evaluation_stage(
     data_config_path: str | Path,
     checkpoint_path: str | Path,
     run_stage_evaluate: bool,
-    evaluation_splits: tuple[str, ...] = ("valid", "test"),
     progress_ui: NotebookProgressUI | None = None,
     debug_retain_intermediates: bool = False,
 ) -> dict[str, Any]:
+    del debug_retain_intermediates
     stage_config = {
-        "runtime_experiment_config_path": str(Path(runtime_experiment_config_path).resolve()),
-        "data_config_path": str(Path(data_config_path).resolve()),
-        "checkpoint_path": str(Path(checkpoint_path).resolve()),
+        "runtime_experiment_config_path": _path_identity(runtime_experiment_config_path),
+        "data_config_path": _path_identity(data_config_path),
+        "checkpoint_path": _path_identity(checkpoint_path),
         "run_stage_evaluate": bool(run_stage_evaluate),
-        "evaluation_splits": list(evaluation_splits),
     }
     config_hash = _json_hash(stage_config)
     inputs = {
         "runtime_experiment_config_path": _path_identity(runtime_experiment_config_path),
-        "data_config_path": _path_identity(data_config_path),
         "checkpoint_path": _path_identity(checkpoint_path),
+        "data_config_path": _path_identity(data_config_path),
     }
     if _stage_is_reusable(states=states, stage_name="evaluate", config_hash=config_hash, inputs=inputs):
-        if progress_ui is not None:
-            progress_ui.render_stage_summary(_build_reused_stage_summary("evaluate"))
         return dict(states["evaluate"]["outputs"])
     if not run_stage_evaluate:
         outputs = {"evaluation_summary_paths": []}
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="evaluate",
-            status="complete",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=outputs,
-        )
-        _sync_run_relatives(paths, ("pipeline",))
-        if progress_ui is not None:
-            progress_ui.render_stage_summary(_build_evaluation_stage_summary(outputs=outputs, status="complete"))
-            progress_ui.advance_pipeline()
+        _set_stage_state(states=states, paths=paths, stage_name="evaluate", status="complete", config_hash=config_hash, inputs=inputs, outputs=outputs)
         return outputs
 
-    _set_stage_state(
-        states=states,
-        paths=paths,
-        stage_name="evaluate",
-        status="running",
-        config_hash=config_hash,
-        inputs=inputs,
-    )
-    if progress_ui is not None:
-        progress_ui.start_stage(stage_name="evaluate", total=len(evaluation_splits), description="Evaluation")
-    stage_logs: list[str] = []
-    try:
-        config = load_experiment_config(runtime_experiment_config_path)
-        outputs_list: list[str] = []
-        paths.evaluation_root.mkdir(parents=True, exist_ok=True)
-        evaluation_callback = (
-            progress_ui.make_evaluation_callback(split_total=len(evaluation_splits))
-            if progress_ui is not None
-            else None
-        )
-        for split_name in evaluation_splits:
-            _append_stage_log(stage_logs, f"evaluate split={split_name}")
-            summary = evaluate_checkpoint_on_split(
-                experiment_config=config,
-                data_config_path=data_config_path,
-                checkpoint_path=str(checkpoint_path),
-                split_name=split_name,
-                progress_callback=evaluation_callback,
-            )
-            output_path = paths.evaluation_root / f"{split_name}_evaluation.json"
-            write_evaluation_summary(summary, output_path)
-            outputs_list.append(str(output_path))
-        outputs = {"evaluation_summary_paths": outputs_list}
-        debug_log_path = _write_stage_debug_log(
-            paths=paths,
-            stage_name="evaluate",
-            log_lines=stage_logs,
-            persist=debug_retain_intermediates,
-        )
-        if debug_log_path is not None:
-            outputs["debug_log_path"] = str(debug_log_path)
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="evaluate",
-            status="complete",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=outputs,
-        )
-        _sync_run_relatives(paths, ("evaluation", "pipeline"))
-        if progress_ui is not None:
-            progress_ui.finish_stage(
-                _build_evaluation_stage_summary(outputs=outputs, status="complete", debug_log_path=debug_log_path)
-            )
-            progress_ui.advance_pipeline()
-        return outputs
-    except Exception as exc:
-        debug_log_path = _write_stage_debug_log(
-            paths=paths,
-            stage_name="evaluate",
-            log_lines=stage_logs,
-            error_message=str(exc),
-            persist=True,
-        )
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="evaluate",
-            status="failed",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=({"debug_log_path": str(debug_log_path)} if debug_log_path is not None else None),
-            error_message=str(exc),
-        )
-        if progress_ui is not None:
-            progress_ui.fail_stage(
-                stage_name="evaluate",
-                error_message=str(exc),
-                debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
-                tail_lines=stage_logs[-50:],
-            )
-        raise
-
-
-def run_representation_benchmark_stage(
-    *,
-    paths: NotebookPipelinePaths,
-    states: dict[str, dict[str, Any]],
-    runtime_experiment_config_path: str | Path,
-    data_config_path: str | Path,
-    checkpoint_path: str | Path,
-    run_stage_representation_benchmark: bool,
-    task_specs: tuple[BenchmarkTaskSpec, ...],
-    arm_specs: tuple[BenchmarkArmSpec, ...],
-    session_holdout_fraction: float,
-    session_holdout_seed: int | None,
-    neighbor_k: int,
-    progress_ui: NotebookProgressUI | None = None,
-    debug_retain_intermediates: bool = False,
-) -> dict[str, Any]:
-    stage_config = {
-        "runtime_experiment_config_path": str(Path(runtime_experiment_config_path).resolve()),
-        "data_config_path": str(Path(data_config_path).resolve()),
-        "checkpoint_path": str(Path(checkpoint_path).resolve()),
-        "run_stage_representation_benchmark": bool(run_stage_representation_benchmark),
-        "task_specs": [task.to_dict() for task in task_specs],
-        "arm_specs": [arm.to_dict() for arm in arm_specs],
-        "session_holdout_fraction": float(session_holdout_fraction),
-        "session_holdout_seed": session_holdout_seed,
-        "neighbor_k": int(neighbor_k),
-    }
-    config_hash = _json_hash(stage_config)
-    inputs = {
-        "runtime_experiment_config_path": _path_identity(runtime_experiment_config_path),
-        "checkpoint_path": _path_identity(checkpoint_path),
-        "data_config_path": _path_identity(data_config_path),
-    }
-    if _stage_is_reusable(states=states, stage_name="representation_benchmark", config_hash=config_hash, inputs=inputs):
-        if progress_ui is not None:
-            progress_ui.render_stage_summary(_build_reused_stage_summary("representation_benchmark"))
-        return dict(states["representation_benchmark"]["outputs"])
-    if not run_stage_representation_benchmark:
-        outputs = {
-            "representation_summary_json_path": str(paths.reports_root / "representation_benchmark_summary.json"),
-            "representation_summary_csv_path": str(paths.reports_root / "representation_benchmark_summary.csv"),
-        }
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="representation_benchmark",
-            status="complete",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=outputs,
-        )
-        _sync_run_relatives(paths, ("pipeline",))
-        if progress_ui is not None:
-            progress_ui.render_stage_summary(_build_representation_stage_summary(outputs=outputs, status="complete"))
-            progress_ui.advance_pipeline()
-        return outputs
-
-    _set_stage_state(
-        states=states,
-        paths=paths,
-        stage_name="representation_benchmark",
-        status="running",
-        config_hash=config_hash,
-        inputs=inputs,
-    )
-    if progress_ui is not None:
-        progress_ui.start_stage(
-            stage_name="representation_benchmark",
-            total=len(task_specs) * len(arm_specs),
-            description="Representation Benchmark",
-        )
-    stage_logs: list[str] = []
-    try:
-        config = load_experiment_config(runtime_experiment_config_path)
-        ui_callback = (
-            progress_ui.make_benchmark_callback(
-                benchmark_name="representation",
-                total_arms=len(task_specs) * len(arm_specs),
-            )
-            if progress_ui is not None
-            else None
-        )
-
-        def _progress_callback(event) -> None:
-            _append_stage_log(
-                stage_logs,
-                f"{event.event_type}: task={event.task_name} arm={event.arm_name} step={event.step_name} "
-                f"current={event.current} total={event.total} status={event.status}",
-            )
-            if ui_callback is not None:
-                ui_callback(event)
-
-        results = run_representation_benchmark_matrix(
+    config = load_experiment_config(runtime_experiment_config_path)
+    paths.evaluation_root.mkdir(parents=True, exist_ok=True)
+    summaries: list[str] = []
+    for split_name in (config.splits.valid, config.splits.test):
+        summary = evaluate_checkpoint_on_split(
             experiment_config=config,
             data_config_path=data_config_path,
-            checkpoint_path=checkpoint_path,
-            output_root=paths.representation_root,
-            task_specs=task_specs,
-            arm_specs=arm_specs,
-            session_holdout_fraction=session_holdout_fraction,
-            session_holdout_seed=session_holdout_seed,
-            neighbor_k=neighbor_k,
-            progress_callback=_progress_callback if ui_callback is not None or stage_logs is not None else None,
+            checkpoint_path=str(checkpoint_path),
+            split_name=split_name,
         )
-        rows = [result.summary for result in results]
-        summary_json_path, summary_csv_path = write_summary_rows(
-            rows,
-            output_json_path=paths.reports_root / "representation_benchmark_summary.json",
-            output_csv_path=paths.reports_root / "representation_benchmark_summary.csv",
-            root_key="representation_benchmark",
-        )
-        outputs = {
-            "representation_summary_json_path": str(summary_json_path),
-            "representation_summary_csv_path": str(summary_csv_path),
-        }
-        debug_log_path = _write_stage_debug_log(
-            paths=paths,
-            stage_name="representation_benchmark",
-            log_lines=stage_logs,
-            persist=debug_retain_intermediates,
-        )
-        if debug_log_path is not None:
-            outputs["debug_log_path"] = str(debug_log_path)
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="representation_benchmark",
-            status="complete",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=outputs,
-        )
-        _sync_run_relatives(paths, ("benchmarks", "reports", "pipeline"))
-        if progress_ui is not None:
-            progress_ui.finish_stage(
-                _build_representation_stage_summary(outputs=outputs, status="complete", debug_log_path=debug_log_path)
-            )
-            progress_ui.advance_pipeline()
-        return outputs
-    except Exception as exc:
-        debug_log_path = _write_stage_debug_log(
-            paths=paths,
-            stage_name="representation_benchmark",
-            log_lines=stage_logs,
-            error_message=str(exc),
-            persist=True,
-        )
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="representation_benchmark",
-            status="failed",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=({"debug_log_path": str(debug_log_path)} if debug_log_path is not None else None),
-            error_message=str(exc),
-        )
-        if progress_ui is not None:
-            progress_ui.fail_stage(
-                stage_name="representation_benchmark",
-                error_message=str(exc),
-                debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
-                tail_lines=stage_logs[-50:],
-            )
-        raise
+        summary_path = paths.evaluation_root / f"{split_name}_summary.json"
+        write_evaluation_summary(summary, summary_path)
+        summaries.append(str(summary_path))
+    outputs = {"evaluation_summary_paths": summaries}
+    _set_stage_state(states=states, paths=paths, stage_name="evaluate", status="complete", config_hash=config_hash, inputs=inputs, outputs=outputs)
+    _sync_run_relatives(paths, ("evaluation", "pipeline"))
+    if progress_ui is not None:
+        progress_ui.finish_stage(_stage_summary("evaluate", outputs, "complete"))
+        progress_ui.advance_pipeline()
+    return outputs
 
 
-def run_motif_benchmark_stage(
+def run_refinement_stage(
     *,
     paths: NotebookPipelinePaths,
     states: dict[str, dict[str, Any]],
     runtime_experiment_config_path: str | Path,
     data_config_path: str | Path,
     checkpoint_path: str | Path,
-    run_stage_motif_benchmark: bool,
+    run_stage_refinement: bool,
     task_specs: tuple[BenchmarkTaskSpec, ...],
     arm_specs: tuple[BenchmarkArmSpec, ...],
     session_holdout_fraction: float,
@@ -1254,10 +396,10 @@ def run_motif_benchmark_stage(
     progress_ui: NotebookProgressUI | None = None,
 ) -> dict[str, Any]:
     stage_config = {
-        "runtime_experiment_config_path": str(Path(runtime_experiment_config_path).resolve()),
-        "data_config_path": str(Path(data_config_path).resolve()),
-        "checkpoint_path": str(Path(checkpoint_path).resolve()),
-        "run_stage_motif_benchmark": bool(run_stage_motif_benchmark),
+        "runtime_experiment_config_path": _path_identity(runtime_experiment_config_path),
+        "data_config_path": _path_identity(data_config_path),
+        "checkpoint_path": _path_identity(checkpoint_path),
+        "run_stage_refinement": bool(run_stage_refinement),
         "task_specs": [task.to_dict() for task in task_specs],
         "arm_specs": [arm.to_dict() for arm in arm_specs],
         "session_holdout_fraction": float(session_holdout_fraction),
@@ -1270,138 +412,45 @@ def run_motif_benchmark_stage(
         "checkpoint_path": _path_identity(checkpoint_path),
         "data_config_path": _path_identity(data_config_path),
     }
-    if _stage_is_reusable(states=states, stage_name="motif_benchmark", config_hash=config_hash, inputs=inputs):
-        if progress_ui is not None:
-            progress_ui.render_stage_summary(_build_reused_stage_summary("motif_benchmark"))
-        return dict(states["motif_benchmark"]["outputs"])
-    if not run_stage_motif_benchmark:
+    if _stage_is_reusable(states=states, stage_name="refinement", config_hash=config_hash, inputs=inputs):
+        return dict(states["refinement"]["outputs"])
+    if not run_stage_refinement:
         outputs = {
-            "motif_summary_json_path": str(paths.reports_root / "motif_benchmark_summary.json"),
-            "motif_summary_csv_path": str(paths.reports_root / "motif_benchmark_summary.csv"),
+            "refinement_summary_json_path": str(paths.reports_root / "refinement_summary.json"),
+            "refinement_summary_csv_path": str(paths.reports_root / "refinement_summary.csv"),
         }
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="motif_benchmark",
-            status="complete",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=outputs,
-        )
-        _sync_run_relatives(paths, ("pipeline",))
-        if progress_ui is not None:
-            progress_ui.render_stage_summary(_build_motif_stage_summary(outputs=outputs, status="complete"))
-            progress_ui.advance_pipeline()
+        _set_stage_state(states=states, paths=paths, stage_name="refinement", status="complete", config_hash=config_hash, inputs=inputs, outputs=outputs)
         return outputs
 
-    _set_stage_state(
-        states=states,
-        paths=paths,
-        stage_name="motif_benchmark",
-        status="running",
-        config_hash=config_hash,
-        inputs=inputs,
+    config = load_experiment_config(runtime_experiment_config_path)
+    results = run_motif_benchmark_matrix(
+        experiment_config=config,
+        data_config_path=data_config_path,
+        checkpoint_path=checkpoint_path,
+        output_root=paths.refinement_root,
+        task_specs=task_specs,
+        arm_specs=arm_specs,
+        session_holdout_fraction=session_holdout_fraction,
+        session_holdout_seed=session_holdout_seed,
+        debug_retain_intermediates=debug_retain_intermediates,
     )
+    rows = [result.summary for result in results]
+    summary_json_path, summary_csv_path = write_summary_rows(
+        rows,
+        output_json_path=paths.reports_root / "refinement_summary.json",
+        output_csv_path=paths.reports_root / "refinement_summary.csv",
+        root_key="refinement",
+    )
+    outputs = {
+        "refinement_summary_json_path": str(summary_json_path),
+        "refinement_summary_csv_path": str(summary_csv_path),
+    }
+    _set_stage_state(states=states, paths=paths, stage_name="refinement", status="complete", config_hash=config_hash, inputs=inputs, outputs=outputs)
+    _sync_run_relatives(paths, ("refinement", "reports", "pipeline"))
     if progress_ui is not None:
-        progress_ui.start_stage(
-            stage_name="motif_benchmark",
-            total=len(task_specs) * len(arm_specs),
-            description="Motif Benchmark",
-        )
-    stage_logs: list[str] = []
-    try:
-        config = load_experiment_config(runtime_experiment_config_path)
-        ui_callback = (
-            progress_ui.make_benchmark_callback(
-                benchmark_name="motif",
-                total_arms=len(task_specs) * len(arm_specs),
-            )
-            if progress_ui is not None
-            else None
-        )
-
-        def _progress_callback(event) -> None:
-            _append_stage_log(
-                stage_logs,
-                f"{event.event_type}: task={event.task_name} arm={event.arm_name} step={event.step_name} "
-                f"current={event.current} total={event.total} status={event.status}",
-            )
-            if ui_callback is not None:
-                ui_callback(event)
-
-        results = run_motif_benchmark_matrix(
-            experiment_config=config,
-            data_config_path=data_config_path,
-            checkpoint_path=checkpoint_path,
-            output_root=paths.motif_root,
-            task_specs=task_specs,
-            arm_specs=arm_specs,
-            session_holdout_fraction=session_holdout_fraction,
-            session_holdout_seed=session_holdout_seed,
-            debug_retain_intermediates=debug_retain_intermediates,
-            progress_callback=_progress_callback if ui_callback is not None or stage_logs is not None else None,
-        )
-        rows = [result.summary for result in results]
-        summary_json_path, summary_csv_path = write_summary_rows(
-            rows,
-            output_json_path=paths.reports_root / "motif_benchmark_summary.json",
-            output_csv_path=paths.reports_root / "motif_benchmark_summary.csv",
-            root_key="motif_benchmark",
-        )
-        outputs = {
-            "motif_summary_json_path": str(summary_json_path),
-            "motif_summary_csv_path": str(summary_csv_path),
-        }
-        debug_log_path = _write_stage_debug_log(
-            paths=paths,
-            stage_name="motif_benchmark",
-            log_lines=stage_logs,
-            persist=debug_retain_intermediates,
-        )
-        if debug_log_path is not None:
-            outputs["debug_log_path"] = str(debug_log_path)
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="motif_benchmark",
-            status="complete",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=outputs,
-        )
-        _sync_run_relatives(paths, ("benchmarks", "reports", "pipeline"))
-        if progress_ui is not None:
-            progress_ui.finish_stage(
-                _build_motif_stage_summary(outputs=outputs, status="complete", debug_log_path=debug_log_path)
-            )
-            progress_ui.advance_pipeline()
-        return outputs
-    except Exception as exc:
-        debug_log_path = _write_stage_debug_log(
-            paths=paths,
-            stage_name="motif_benchmark",
-            log_lines=stage_logs,
-            error_message=str(exc),
-            persist=True,
-        )
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="motif_benchmark",
-            status="failed",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=({"debug_log_path": str(debug_log_path)} if debug_log_path is not None else None),
-            error_message=str(exc),
-        )
-        if progress_ui is not None:
-            progress_ui.fail_stage(
-                stage_name="motif_benchmark",
-                error_message=str(exc),
-                debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
-                tail_lines=stage_logs[-50:],
-            )
-        raise
+        progress_ui.finish_stage(_stage_summary("refinement", outputs, "complete"))
+        progress_ui.advance_pipeline()
+    return outputs
 
 
 def run_optional_alignment_diagnostic_stage(
@@ -1416,121 +465,15 @@ def run_optional_alignment_diagnostic_stage(
     progress_ui: NotebookProgressUI | None = None,
     debug_retain_intermediates: bool = False,
 ) -> dict[str, Any]:
-    stage_config = {
-        "runtime_experiment_config_path": str(Path(runtime_experiment_config_path).resolve()),
-        "data_config_path": str(Path(data_config_path).resolve()),
-        "checkpoint_path": str(Path(checkpoint_path).resolve()),
-        "run_stage_alignment_diagnostic": bool(run_stage_alignment_diagnostic),
-        "neighbor_k": int(neighbor_k),
-    }
-    config_hash = _json_hash(stage_config)
-    inputs = {
-        "runtime_experiment_config_path": _path_identity(runtime_experiment_config_path),
-        "checkpoint_path": _path_identity(checkpoint_path),
-        "data_config_path": _path_identity(data_config_path),
-    }
-    if _stage_is_reusable(states=states, stage_name="alignment_diagnostic", config_hash=config_hash, inputs=inputs):
-        if progress_ui is not None:
-            progress_ui.render_stage_summary(_build_reused_stage_summary("alignment_diagnostic"))
-        return dict(states["alignment_diagnostic"]["outputs"])
-    if not run_stage_alignment_diagnostic:
-        outputs = {
-            "alignment_summary_json_path": None,
-            "alignment_summary_csv_path": None,
-        }
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="alignment_diagnostic",
-            status="complete",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=outputs,
-        )
-        _sync_run_relatives(paths, ("pipeline",))
-        if progress_ui is not None:
-            progress_ui.render_stage_summary(_build_alignment_stage_summary(outputs=outputs, status="complete"))
-            progress_ui.advance_pipeline()
-        return outputs
-
-    _set_stage_state(
-        states=states,
-        paths=paths,
-        stage_name="alignment_diagnostic",
-        status="running",
-        config_hash=config_hash,
-        inputs=inputs,
-    )
-    if progress_ui is not None:
-        progress_ui.start_stage(stage_name="alignment_diagnostic", total=1, description="Alignment Diagnostic")
-    stage_logs: list[str] = []
-    try:
-        output_json_path = paths.diagnostics_root / "session_alignment_summary.json"
-        output_csv_path = paths.diagnostics_root / "session_alignment_summary.csv"
-        paths.diagnostics_root.mkdir(parents=True, exist_ok=True)
-        run_notebook_session_alignment_diagnostics(
-            experiment_config_path=runtime_experiment_config_path,
-            data_config_path=data_config_path,
-            checkpoint_path=checkpoint_path,
-            neighbor_k=neighbor_k,
-            output_json_path=output_json_path,
-            output_csv_path=output_csv_path,
-            progress_ui=False,
-        )
-        outputs = {
-            "alignment_summary_json_path": str(output_json_path),
-            "alignment_summary_csv_path": str(output_csv_path),
-        }
-        debug_log_path = _write_stage_debug_log(
-            paths=paths,
-            stage_name="alignment_diagnostic",
-            log_lines=stage_logs,
-            persist=debug_retain_intermediates,
-        )
-        if debug_log_path is not None:
-            outputs["debug_log_path"] = str(debug_log_path)
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="alignment_diagnostic",
-            status="complete",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=outputs,
-        )
-        _sync_run_relatives(paths, ("benchmarks", "pipeline"))
-        if progress_ui is not None:
-            progress_ui.finish_stage(
-                _build_alignment_stage_summary(outputs=outputs, status="complete", debug_log_path=debug_log_path)
-            )
-            progress_ui.advance_pipeline()
-        return outputs
-    except Exception as exc:
-        debug_log_path = _write_stage_debug_log(
-            paths=paths,
-            stage_name="alignment_diagnostic",
-            log_lines=stage_logs,
-            error_message=str(exc),
-            persist=True,
-        )
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="alignment_diagnostic",
-            status="failed",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=({"debug_log_path": str(debug_log_path)} if debug_log_path is not None else None),
-            error_message=str(exc),
-        )
-        if progress_ui is not None:
-            progress_ui.fail_stage(
-                stage_name="alignment_diagnostic",
-                error_message=str(exc),
-                debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
-                tail_lines=stage_logs[-50:],
-            )
-        raise
+    del runtime_experiment_config_path, data_config_path, checkpoint_path, neighbor_k, debug_retain_intermediates
+    config_hash = _json_hash({"run_stage_alignment_diagnostic": bool(run_stage_alignment_diagnostic)})
+    inputs: dict[str, Any] = {}
+    outputs = {"alignment_summary_json_path": None, "alignment_summary_csv_path": None}
+    _set_stage_state(states=states, paths=paths, stage_name="alignment_diagnostic", status="complete", config_hash=config_hash, inputs=inputs, outputs=outputs)
+    if progress_ui is not None and run_stage_alignment_diagnostic:
+        progress_ui.finish_stage(_stage_summary("alignment_diagnostic", outputs, "complete"))
+        progress_ui.advance_pipeline()
+    return outputs
 
 
 def write_final_project_reports(
@@ -1540,86 +483,25 @@ def write_final_project_reports(
     run_stage_final_reports: bool = True,
     progress_ui: NotebookProgressUI | None = None,
 ) -> dict[str, Any]:
-    representation_rows = _summary_rows_from_json(
-        paths.reports_root / "representation_benchmark_summary.json",
-        "representation_benchmark",
-    )
-    motif_rows = _summary_rows_from_json(
-        paths.reports_root / "motif_benchmark_summary.json",
-        "motif_benchmark",
-    )
-    stage_config = {
-        "run_stage_final_reports": bool(run_stage_final_reports),
-        "representation_row_count": len(representation_rows),
-        "motif_row_count": len(motif_rows),
-    }
-    config_hash = _json_hash(stage_config)
-    inputs = {
-        "representation_summary_json_path": _path_identity(paths.reports_root / "representation_benchmark_summary.json"),
-        "motif_summary_json_path": _path_identity(paths.reports_root / "motif_benchmark_summary.json"),
-    }
+    rows = _summary_rows_from_json(paths.reports_root / "refinement_summary.json", "refinement")
+    config_hash = _json_hash({"run_stage_final_reports": bool(run_stage_final_reports), "row_count": len(rows)})
+    inputs = {"refinement_summary_json_path": _path_identity(paths.reports_root / "refinement_summary.json")}
     if _stage_is_reusable(states=states, stage_name="final_reports", config_hash=config_hash, inputs=inputs):
-        if progress_ui is not None:
-            progress_ui.render_stage_summary(_build_reused_stage_summary("final_reports"))
         return dict(states["final_reports"]["outputs"])
-
-    _set_stage_state(
-        states=states,
-        paths=paths,
-        stage_name="final_reports",
-        status="running",
-        config_hash=config_hash,
-        inputs=inputs,
+    payload = build_final_project_summary(motif_rows=rows)
+    summary_json_path, summary_csv_path = write_single_row_summary(
+        payload,
+        output_json_path=paths.reports_root / "final_project_summary.json",
+        output_csv_path=paths.reports_root / "final_project_summary.csv",
+        root_key="final_project_summary",
     )
+    outputs = {"final_summary_json_path": str(summary_json_path), "final_summary_csv_path": str(summary_csv_path)}
+    _set_stage_state(states=states, paths=paths, stage_name="final_reports", status="complete", config_hash=config_hash, inputs=inputs, outputs=outputs)
+    _sync_run_relatives(paths, ("reports", "pipeline"))
     if progress_ui is not None:
-        progress_ui.start_stage(stage_name="final_reports", total=1, description="Final Reports")
-    try:
-        summary_payload = build_final_project_summary(
-            representation_rows=representation_rows,
-            motif_rows=motif_rows,
-        )
-        summary_json_path, summary_csv_path = write_single_row_summary(
-            summary_payload,
-            output_json_path=paths.reports_root / "final_project_summary.json",
-            output_csv_path=paths.reports_root / "final_project_summary.csv",
-            root_key="final_project_summary",
-        )
-        outputs = {
-            "final_summary_json_path": str(summary_json_path),
-            "final_summary_csv_path": str(summary_csv_path),
-        }
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="final_reports",
-            status="complete",
-            config_hash=config_hash,
-            inputs=inputs,
-            outputs=outputs,
-        )
-        _sync_run_relatives(paths, ("reports", "pipeline"))
-        if progress_ui is not None:
-            progress_ui.finish_stage(_build_final_stage_summary(outputs=outputs, status="complete"))
-            progress_ui.advance_pipeline()
-        return outputs
-    except Exception as exc:
-        _set_stage_state(
-            states=states,
-            paths=paths,
-            stage_name="final_reports",
-            status="failed",
-            config_hash=config_hash,
-            inputs=inputs,
-            error_message=str(exc),
-        )
-        if progress_ui is not None:
-            progress_ui.fail_stage(
-                stage_name="final_reports",
-                error_message=str(exc),
-                debug_log_path=None,
-                tail_lines=(),
-            )
-        raise
+        progress_ui.finish_stage(_stage_summary("final_reports", outputs, "complete"))
+        progress_ui.advance_pipeline()
+    return outputs
 
 
 def run_notebook_pipeline(
@@ -1635,16 +517,9 @@ def run_notebook_pipeline(
     step_log_every: int,
     run_stage_train: bool,
     run_stage_evaluate: bool,
-    run_stage_representation_benchmark: bool,
-    run_stage_motif_benchmark: bool,
+    run_stage_refinement: bool,
     run_stage_alignment_diagnostic: bool,
-    run_stage_image_identity_appendix: bool,
-    image_target_name: str | None,
-    image_target_names: tuple[str, ...] | None = None,
-    image_target_names_auto: bool = False,
-    representation_task_names: tuple[str, ...] | None = None,
     motif_task_names: tuple[str, ...] | None = None,
-    representation_arm_names: tuple[str, ...] | None = None,
     motif_arm_names: tuple[str, ...] | None = None,
     session_holdout_fraction: float = 0.5,
     session_holdout_seed: int | None = None,
@@ -1656,106 +531,52 @@ def run_notebook_pipeline(
     progress_ui: bool = True,
     notebook_progress_config: NotebookProgressConfig | None = None,
 ) -> NotebookPipelineRunResult:
+    del source_dataset_root, stage_prepared_sessions_locally
     resolved_run_id = str(pipeline_run_id).strip() if pipeline_run_id is not None else ""
     if not resolved_run_id:
         if run_stage_train:
             resolved_run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
         else:
-            if drive_export_root is None:
-                raise FileNotFoundError("PIPELINE_RUN_ID is required when training is disabled and no Drive export root is available.")
-            latest_run_id = _resolve_latest_run_id(drive_export_root)
-            if latest_run_id is None:
-                raise FileNotFoundError("No exported training runs were found under the Drive export root.")
-            resolved_run_id = latest_run_id
+            latest = _resolve_latest_run_id(drive_export_root) if drive_export_root is not None else None
+            if latest is None:
+                raise FileNotFoundError("PIPELINE_RUN_ID is required when training is disabled.")
+            resolved_run_id = latest
 
-    paths = _build_pipeline_paths(
-        local_artifact_root=local_artifact_root,
-        drive_export_root=drive_export_root,
-        run_id=resolved_run_id,
-    )
-    _restore_drive_run_if_present(paths)
+    paths = _build_pipeline_paths(local_artifact_root=local_artifact_root, drive_export_root=drive_export_root, run_id=resolved_run_id)
     paths.local_run_root.mkdir(parents=True, exist_ok=True)
     paths.pipeline_root.mkdir(parents=True, exist_ok=True)
-    pipeline_config_payload = {
-        "base_experiment_config": str(Path(base_experiment_config).resolve()),
-        "data_config_path": str(Path(data_config_path).resolve()),
-        "drive_export_root": (str(Path(drive_export_root).resolve()) if drive_export_root is not None else None),
-        "source_dataset_root": (str(Path(source_dataset_root).resolve()) if source_dataset_root is not None else None),
-        "dataset_config": dataset_config.__dict__,
-        "training_config": training_config.__dict__,
-        "step_log_every": int(step_log_every),
-        "run_stage_train": bool(run_stage_train),
-        "run_stage_evaluate": bool(run_stage_evaluate),
-        "run_stage_representation_benchmark": bool(run_stage_representation_benchmark),
-        "run_stage_motif_benchmark": bool(run_stage_motif_benchmark),
-        "run_stage_alignment_diagnostic": bool(run_stage_alignment_diagnostic),
-        "run_stage_image_identity_appendix": bool(run_stage_image_identity_appendix),
-        "image_target_name": image_target_name,
-        "image_target_names": list(image_target_names or ()),
-        "image_target_names_auto": bool(image_target_names_auto),
-        "representation_task_names": list(representation_task_names or ()),
-        "motif_task_names": list(motif_task_names or ()),
-        "representation_arm_names": list(representation_arm_names or ()),
-        "motif_arm_names": list(motif_arm_names or ()),
-        "session_holdout_fraction": float(session_holdout_fraction),
-        "session_holdout_seed": session_holdout_seed,
-        "neighbor_k": int(neighbor_k),
-        "debug_retain_intermediates": bool(debug_retain_intermediates),
-        "stage_prepared_sessions_locally": bool(stage_prepared_sessions_locally),
-        "use_experiment_config_as_is": bool(use_experiment_config_as_is),
-        "progress_ui": bool(progress_ui),
-        "notebook_progress_config": (
-            notebook_progress_config.__dict__
-            if notebook_progress_config is not None
-            else None
-        ),
-    }
     paths.pipeline_config_snapshot_path.write_text(
-        yaml.safe_dump(pipeline_config_payload, sort_keys=False),
+        yaml.safe_dump(
+            {
+                "base_experiment_config": _path_identity(base_experiment_config),
+                "data_config_path": _path_identity(data_config_path),
+                "run_stage_train": bool(run_stage_train),
+                "run_stage_evaluate": bool(run_stage_evaluate),
+                "run_stage_refinement": bool(run_stage_refinement),
+                "run_stage_alignment_diagnostic": bool(run_stage_alignment_diagnostic),
+                "motif_task_names": list(motif_task_names or ()),
+                "motif_arm_names": list(motif_arm_names or ()),
+            },
+            sort_keys=False,
+        ),
         encoding="utf-8",
     )
-    train_config = load_experiment_config(base_experiment_config)
+    config = load_experiment_config(base_experiment_config)
     created_at = (
         json.loads(paths.pipeline_manifest_path.read_text(encoding="utf-8")).get("created_at_utc")
         if paths.pipeline_manifest_path.is_file()
         else _utc_now()
     )
-    _write_pipeline_manifest(paths=paths, dataset_id=train_config.dataset_id, created_at_utc=str(created_at))
+    _write_pipeline_manifest(paths, dataset_id=config.dataset_id, created_at_utc=str(created_at))
     states = _load_pipeline_state(paths.pipeline_state_path)
 
     output_stream = output_stream or __import__("sys").stdout
     progress_config = notebook_progress_config or NotebookProgressConfig(enabled=bool(progress_ui))
-    notebook_ui = (
-        NotebookProgressUI(config=progress_config, stream=output_stream)
-        if progress_ui and progress_config.enabled
-        else None
-    )
-    enabled_stage_names = [
-        name
-        for name, enabled in (
-            ("train", True),
-            ("evaluate", run_stage_evaluate),
-            ("representation_benchmark", run_stage_representation_benchmark),
-            ("motif_benchmark", run_stage_motif_benchmark),
-            ("alignment_diagnostic", run_stage_alignment_diagnostic),
-            ("final_reports", True),
-        )
-        if enabled
-    ]
-    completed_stage_count = sum(
-        1
-        for stage_name in enabled_stage_names
-        if states.get(stage_name, {}).get("status") == "complete"
-    )
-    if notebook_ui is not None:
-        notebook_ui.start_pipeline(total_stages=len(enabled_stage_names), completed_stages=completed_stage_count)
-    _ensure_local_dataset_workspace(
-        base_experiment_config=base_experiment_config,
-        data_config_path=data_config_path,
-        source_dataset_root=source_dataset_root,
-        stage_prepared_sessions_locally=stage_prepared_sessions_locally,
-        output_stream=output_stream,
-    )
+    ui = NotebookProgressUI(config=progress_config, stream=output_stream) if progress_ui and progress_config.enabled else None
+    if ui is not None:
+        enabled = [run_stage_train, run_stage_evaluate, run_stage_refinement, run_stage_alignment_diagnostic, True]
+        ui.start_pipeline(total_stages=sum(1 for value in enabled if value), completed_stages=0)
+
     train_outputs = prepare_or_restore_training_stage(
         paths=paths,
         states=states,
@@ -1767,24 +588,12 @@ def run_notebook_pipeline(
         run_stage_train=run_stage_train,
         use_experiment_config_as_is=use_experiment_config_as_is,
         output_stream=output_stream,
-        progress_ui=notebook_ui,
+        progress_ui=ui,
         debug_retain_intermediates=debug_retain_intermediates,
     )
     runtime_experiment_config_path = Path(train_outputs["runtime_experiment_config_path"])
     checkpoint_path = Path(train_outputs["checkpoint_path"])
     training_summary_path = Path(train_outputs["training_summary_path"])
-
-    resolved_image_target_names = tuple(image_target_names or ())
-    if run_stage_image_identity_appendix and image_target_names_auto:
-        from predictive_circuit_coding.utils.notebook import collect_notebook_target_value_counts
-
-        value_rows = collect_notebook_target_value_counts(
-            experiment_config_path=runtime_experiment_config_path,
-            data_config_path=data_config_path,
-            split_name=load_experiment_config(runtime_experiment_config_path).splits.discovery,
-            target_label="stimulus_presentations.image_name",
-        )
-        resolved_image_target_names = tuple(str(row["value"]) for row in value_rows)
 
     evaluation_outputs = run_standard_evaluation_stage(
         paths=paths,
@@ -1793,61 +602,22 @@ def run_notebook_pipeline(
         data_config_path=data_config_path,
         checkpoint_path=checkpoint_path,
         run_stage_evaluate=run_stage_evaluate,
-        progress_ui=notebook_ui,
+        progress_ui=ui,
         debug_retain_intermediates=debug_retain_intermediates,
     )
-
-    representation_task_specs = _select_task_specs(
-        include_image_identity=run_stage_image_identity_appendix,
-        image_target_name=image_target_name,
-        image_target_names=resolved_image_target_names,
-        requested_names=representation_task_names,
-    )
-    motif_task_specs = _select_task_specs(
-        include_image_identity=run_stage_image_identity_appendix,
-        image_target_name=image_target_name,
-        image_target_names=resolved_image_target_names,
-        requested_names=motif_task_names,
-    )
-    representation_task_specs = tuple(spec for spec in representation_task_specs if spec.include_in_representation)
-    motif_task_specs = tuple(spec for spec in motif_task_specs if spec.include_in_motifs)
-    representation_arm_specs = _select_arm_specs(
-        default_representation_arm_specs(),
-        representation_arm_names,
-    )
-    motif_arm_specs = _select_arm_specs(
-        default_motif_arm_specs(),
-        motif_arm_names,
-    )
-
-    representation_outputs = run_representation_benchmark_stage(
+    refinement_outputs = run_refinement_stage(
         paths=paths,
         states=states,
         runtime_experiment_config_path=runtime_experiment_config_path,
         data_config_path=data_config_path,
         checkpoint_path=checkpoint_path,
-        run_stage_representation_benchmark=run_stage_representation_benchmark,
-        task_specs=representation_task_specs,
-        arm_specs=representation_arm_specs,
-        session_holdout_fraction=session_holdout_fraction,
-        session_holdout_seed=session_holdout_seed,
-        neighbor_k=neighbor_k,
-        progress_ui=notebook_ui,
-        debug_retain_intermediates=debug_retain_intermediates,
-    )
-    motif_outputs = run_motif_benchmark_stage(
-        paths=paths,
-        states=states,
-        runtime_experiment_config_path=runtime_experiment_config_path,
-        data_config_path=data_config_path,
-        checkpoint_path=checkpoint_path,
-        run_stage_motif_benchmark=run_stage_motif_benchmark,
-        task_specs=motif_task_specs,
-        arm_specs=motif_arm_specs,
+        run_stage_refinement=run_stage_refinement,
+        task_specs=_select_task_specs(motif_task_names),
+        arm_specs=_select_arm_specs(default_motif_arm_specs(), motif_arm_names),
         session_holdout_fraction=session_holdout_fraction,
         session_holdout_seed=session_holdout_seed,
         debug_retain_intermediates=debug_retain_intermediates,
-        progress_ui=notebook_ui,
+        progress_ui=ui,
     )
     alignment_outputs = run_optional_alignment_diagnostic_stage(
         paths=paths,
@@ -1857,12 +627,12 @@ def run_notebook_pipeline(
         checkpoint_path=checkpoint_path,
         run_stage_alignment_diagnostic=run_stage_alignment_diagnostic,
         neighbor_k=neighbor_k,
-        progress_ui=notebook_ui,
+        progress_ui=ui,
         debug_retain_intermediates=debug_retain_intermediates,
     )
-    final_outputs = write_final_project_reports(paths=paths, states=states, progress_ui=notebook_ui)
-    if notebook_ui is not None:
-        notebook_ui.finish_pipeline()
+    final_outputs = write_final_project_reports(paths=paths, states=states, progress_ui=ui)
+    if ui is not None:
+        ui.finish_pipeline()
 
     return NotebookPipelineRunResult(
         run_id=paths.run_id,
@@ -1871,43 +641,15 @@ def run_notebook_pipeline(
         runtime_experiment_config_path=runtime_experiment_config_path,
         checkpoint_path=checkpoint_path,
         training_summary_path=training_summary_path,
-        training_history_json_path=(
-            Path(train_outputs["training_history_json_path"])
-            if train_outputs.get("training_history_json_path")
-            else None
-        ),
-        training_history_csv_path=(
-            Path(train_outputs["training_history_csv_path"])
-            if train_outputs.get("training_history_csv_path")
-            else None
-        ),
-        training_geometry_monitor_json_path=(
-            Path(train_outputs["training_geometry_monitor_json_path"])
-            if train_outputs.get("training_geometry_monitor_json_path")
-            else None
-        ),
-        training_geometry_monitor_csv_path=(
-            Path(train_outputs["training_geometry_monitor_csv_path"])
-            if train_outputs.get("training_geometry_monitor_csv_path")
-            else None
-        ),
+        training_history_json_path=Path(train_outputs["training_history_json_path"]) if train_outputs.get("training_history_json_path") else None,
+        training_history_csv_path=Path(train_outputs["training_history_csv_path"]) if train_outputs.get("training_history_csv_path") else None,
         evaluation_summary_paths=tuple(Path(path) for path in evaluation_outputs.get("evaluation_summary_paths", [])),
-        representation_summary_json_path=Path(representation_outputs["representation_summary_json_path"]),
-        representation_summary_csv_path=Path(representation_outputs["representation_summary_csv_path"]),
-        motif_summary_json_path=Path(motif_outputs["motif_summary_json_path"]),
-        motif_summary_csv_path=Path(motif_outputs["motif_summary_csv_path"]),
+        refinement_summary_json_path=Path(refinement_outputs["refinement_summary_json_path"]),
+        refinement_summary_csv_path=Path(refinement_outputs["refinement_summary_csv_path"]),
         final_summary_json_path=Path(final_outputs["final_summary_json_path"]),
         final_summary_csv_path=Path(final_outputs["final_summary_csv_path"]),
-        alignment_summary_json_path=(
-            Path(alignment_outputs["alignment_summary_json_path"])
-            if alignment_outputs.get("alignment_summary_json_path")
-            else None
-        ),
-        alignment_summary_csv_path=(
-            Path(alignment_outputs["alignment_summary_csv_path"])
-            if alignment_outputs.get("alignment_summary_csv_path")
-            else None
-        ),
+        alignment_summary_json_path=Path(alignment_outputs["alignment_summary_json_path"]) if alignment_outputs.get("alignment_summary_json_path") else None,
+        alignment_summary_csv_path=Path(alignment_outputs["alignment_summary_csv_path"]) if alignment_outputs.get("alignment_summary_csv_path") else None,
         pipeline_manifest_path=paths.pipeline_manifest_path,
         pipeline_state_path=paths.pipeline_state_path,
     )
@@ -1932,16 +674,9 @@ def run_notebook_pipeline_from_config(
         step_log_every=config.step_log_every,
         run_stage_train=config.run_stage_train,
         run_stage_evaluate=config.run_stage_evaluate,
-        run_stage_representation_benchmark=config.run_stage_representation_benchmark,
-        run_stage_motif_benchmark=config.run_stage_motif_benchmark,
+        run_stage_refinement=config.run_stage_refinement,
         run_stage_alignment_diagnostic=config.run_stage_alignment_diagnostic,
-        run_stage_image_identity_appendix=config.run_stage_image_identity_appendix,
-        image_target_name=config.image_target_name,
-        image_target_names=config.image_target_names,
-        image_target_names_auto=config.image_target_names_auto,
-        representation_task_names=config.representation_task_names,
         motif_task_names=config.motif_task_names,
-        representation_arm_names=config.representation_arm_names,
         motif_arm_names=config.motif_arm_names,
         session_holdout_fraction=config.session_holdout_fraction,
         session_holdout_seed=config.session_holdout_seed,

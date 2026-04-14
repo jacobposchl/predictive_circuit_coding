@@ -29,6 +29,11 @@ class PredictiveCircuitEncoder(nn.Module):
         super().__init__()
         self.config = config
         self.embedder = PatchEmbedder(patch_bins=patch_bins, d_model=config.d_model, num_patches=num_patches)
+        self.population_tokens = (
+            nn.Parameter(torch.zeros(1, 1, num_patches, config.d_model))
+            if config.population_token_mode == "per_patch_cls"
+            else None
+        )
         self.temporal_stack = nn.ModuleList(
             [
                 TemporalSelfAttentionBlock(
@@ -57,18 +62,31 @@ class PredictiveCircuitEncoder(nn.Module):
 
     def forward(self, batch: PopulationWindowBatch) -> EncoderOutput:
         tokens = self.embedder(batch.patch_counts)
+        unit_mask = batch.unit_mask
+        population_token_count = 0
+        if self.population_tokens is not None:
+            population_token_count = 1
+            population_tokens = self.population_tokens.expand(tokens.shape[0], -1, -1, -1)
+            tokens = torch.cat([population_tokens, tokens], dim=1)
+            population_mask = torch.ones((unit_mask.shape[0], 1), dtype=unit_mask.dtype, device=unit_mask.device)
+            unit_mask = torch.cat([population_mask, unit_mask], dim=1)
         for block in self.temporal_stack:
-            tokens = block(tokens, unit_mask=batch.unit_mask)
+            tokens = block(tokens, unit_mask=unit_mask)
         for block in self.spatiotemporal_stack:
-            tokens = block(tokens, unit_mask=batch.unit_mask)
+            tokens = block(tokens, unit_mask=unit_mask)
         tokens = self.final_norm(tokens)
         if self.config.l2_normalize_tokens:
             tokens = F.normalize(tokens, dim=-1)
+        summary_tokens = None
+        if population_token_count:
+            summary_tokens = tokens[:, :population_token_count].squeeze(1)
+            tokens = tokens[:, population_token_count:]
         tokens = tokens * batch.patch_mask.unsqueeze(-1).to(dtype=tokens.dtype)
         return EncoderOutput(
             tokens=tokens,
             unit_mask=batch.unit_mask,
             patch_mask=batch.patch_mask,
+            summary_tokens=summary_tokens,
         )
 
 
@@ -95,4 +113,5 @@ class PredictiveCircuitModel(nn.Module):
             reconstruction_outputs=reconstruction_outputs,
             unit_mask=encoder_output.unit_mask,
             patch_mask=encoder_output.patch_mask,
+            summary_tokens=encoder_output.summary_tokens,
         )

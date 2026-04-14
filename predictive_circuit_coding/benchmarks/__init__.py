@@ -5,7 +5,6 @@ from predictive_circuit_coding.benchmarks.contracts import (
     MotifBenchmarkResult,
     PipelineRunManifest,
     PipelineStageState,
-    RepresentationBenchmarkResult,
 )
 from predictive_circuit_coding.benchmarks.pipeline import (
     NotebookPipelinePaths,
@@ -13,25 +12,22 @@ from predictive_circuit_coding.benchmarks.pipeline import (
     prepare_or_restore_training_stage,
     resume_notebook_pipeline,
     run_notebook_pipeline_from_config,
-    run_motif_benchmark_stage,
     run_notebook_pipeline,
     run_optional_alignment_diagnostic_stage,
-    run_representation_benchmark_stage,
+    run_refinement_stage,
     run_standard_evaluation_stage,
     write_final_project_reports,
 )
 from predictive_circuit_coding.benchmarks.run import (
     default_benchmark_task_specs,
     default_motif_arm_specs,
-    default_representation_arm_specs,
     run_motif_benchmark_matrix,
-    run_representation_benchmark_matrix,
 )
 from predictive_circuit_coding.benchmarks.verification import (
-    FullRunVerificationResult,
+    RefinementVerificationResult,
     TaskCoverageRow,
     VerificationIssue,
-    verify_full_run_readiness,
+    verify_refinement_readiness,
 )
 
 __all__ = [
@@ -43,24 +39,20 @@ __all__ = [
     "NotebookPipelineRunResult",
     "PipelineRunManifest",
     "PipelineStageState",
-    "RepresentationBenchmarkResult",
     "load_notebook_pipeline_config",
     "default_benchmark_task_specs",
     "default_motif_arm_specs",
-    "default_representation_arm_specs",
     "prepare_or_restore_training_stage",
     "resume_notebook_pipeline",
     "run_notebook_pipeline_from_config",
     "run_motif_benchmark_matrix",
-    "run_motif_benchmark_stage",
     "run_notebook_pipeline",
     "run_optional_alignment_diagnostic_stage",
-    "run_representation_benchmark_matrix",
-    "run_representation_benchmark_stage",
+    "run_refinement_stage",
     "run_standard_evaluation_stage",
     "write_final_project_reports",
-    "FullRunVerificationResult",
+    "RefinementVerificationResult",
     "TaskCoverageRow",
     "VerificationIssue",
-    "verify_full_run_readiness",
+    "verify_refinement_readiness",
 ]

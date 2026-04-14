@@ -10,3 +10,4 @@ class EncoderOutput:
     tokens: torch.Tensor
     unit_mask: torch.Tensor
     patch_mask: torch.Tensor
+    summary_tokens: torch.Tensor | None = None

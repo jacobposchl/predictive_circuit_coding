@@ -1,0 +1,7 @@
+extends: predictive_circuit_coding_refined_full.yaml
+experiment:
+  variant_name: refined_recon000
+objective:
+  reconstruction_weight: 0.0
+artifacts:
+  checkpoint_prefix: pcc_refined_recon000_full

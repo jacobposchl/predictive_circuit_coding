@@ -99,6 +99,7 @@ class ModelForwardOutput:
     reconstruction_outputs: torch.Tensor
     unit_mask: torch.Tensor
     patch_mask: torch.Tensor
+    summary_tokens: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -118,8 +119,10 @@ class CheckpointMetadata:
     config_snapshot: dict[str, Any]
     model_hparams: dict[str, Any]
     continuation_baseline_type: str
-    training_variant_name: str = "baseline"
-    cross_session_aug_enabled: bool = False
+    variant_name: str = "refined_core"
+    reconstruction_target_mode: str = "raw"
+    count_normalization_mode: str = "none"
+    count_normalization_stats_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -162,8 +165,10 @@ class TrainingSummary:
     metrics: dict[str, float]
     losses: dict[str, float]
     checkpoint_path: str
-    training_variant_name: str = "baseline"
-    cross_session_aug_enabled: bool = False
+    variant_name: str = "refined_core"
+    reconstruction_target_mode: str = "raw"
+    count_normalization_mode: str = "none"
+    count_normalization_stats_path: str | None = None
     selection_reason: str = "validated_best"
 
     def to_dict(self) -> dict[str, Any]:

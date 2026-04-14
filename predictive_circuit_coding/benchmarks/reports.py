@@ -52,10 +52,8 @@ def _mean_metric(rows: list[dict[str, Any]], key: str) -> float | None:
 
 def build_final_project_summary(
     *,
-    representation_rows: list[dict[str, Any]],
     motif_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    representation_ok = [row for row in representation_rows if row.get("status") == "ok"]
     motif_ok = [row for row in motif_rows if row.get("status") == "ok"]
 
     def _best_row(rows: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
@@ -68,49 +66,27 @@ def build_final_project_summary(
             return None
         return max(scored_rows, key=lambda row: float(row[key]))
 
-    best_representation = _best_row(representation_ok, "test_probe_pr_auc")
     best_motif = _best_row(motif_ok, "held_out_similarity_pr_auc")
 
-    claims: list[str] = []
-    if best_representation is not None:
-        claims.append(
-            "representation: best held-out cross-session probe PR-AUC came from "
-            f"{best_representation['arm_name']} on {best_representation['task_name']} "
-            f"({best_representation.get('training_variant_name', 'baseline')})"
-        )
+    notes: list[str] = []
     if best_motif is not None:
-        claims.append(
-            "motifs: best held-out motif PR-AUC came from "
+        notes.append(
+            "best held-out motif PR-AUC came from "
             f"{best_motif['arm_name']} on {best_motif['task_name']} "
-            f"({best_motif.get('training_variant_name', 'baseline')})"
-        )
-    if representation_ok:
-        claims.append(
-            "representation learning: compare encoder_raw against untrained_encoder_raw to isolate training from architecture/tokenization"
-        )
-        claims.append(
-            "geometry: compare encoder_raw against encoder_whitened to isolate the effect of whitening on the trained representation"
-        )
-    if motif_ok:
-        claims.append(
-            "motif specificity: compare trained encoder motif rows against untrained_encoder_raw to test whether motifs depend on learned weights"
+            f"({best_motif.get('variant_name', 'refined_core')})"
         )
 
     return {
-        "representation_row_count": len(representation_rows),
-        "motif_row_count": len(motif_rows),
-        "representation_completed_row_count": len(representation_ok),
+        "refinement_row_count": len(motif_rows),
         "motif_completed_row_count": len(motif_ok),
-        "representation_mean_test_probe_pr_auc": _mean_metric(representation_ok, "test_probe_pr_auc"),
         "motif_mean_held_out_similarity_pr_auc": _mean_metric(motif_ok, "held_out_similarity_pr_auc"),
-        "training_variant_names": sorted(
+        "variant_names": sorted(
             {
-                str(row.get("training_variant_name", "baseline"))
-                for row in (representation_rows + motif_rows)
-                if row.get("training_variant_name") is not None
+                str(row.get("variant_name", "refined_core"))
+                for row in motif_rows
+                if row.get("variant_name") is not None
             }
         ),
-        "best_representation_row": best_representation,
         "best_motif_row": best_motif,
-        "claims": claims,
+        "notes": notes,
     }

@@ -1,5 +1,5 @@
 paths:
-  experiment_config_path: predictive_circuit_coding_cross_session_aug_full.yaml
+  experiment_config_path: predictive_circuit_coding_refined_debug.yaml
   data_config_path: allen_visual_behavior_neuropixels_local.yaml
   local_artifact_root: ../../artifacts
   drive_export_root: /content/drive/MyDrive/pcc_colab_outputs
@@ -8,17 +8,15 @@ paths:
 stages:
   train: true
   evaluate: true
-  representation_benchmark: true
-  motif_benchmark: true
+  refinement: true
   alignment_diagnostic: false
-  image_identity_appendix: true
 
 pipeline:
   stage_prepared_sessions_locally: true
-  step_log_every: 10
+  step_log_every: 1
   session_holdout_fraction: 0.5
   session_holdout_seed: 7
-  neighbor_k: 5
+  neighbor_k: 3
   debug_retain_intermediates: false
 
 notebook_ui:
@@ -33,11 +31,7 @@ notebook_ui:
   metric_snapshot_every_n:
 
 tasks:
-  image_target_name:
-  image_target_names: auto
-  representation: [stimulus_change, trials_go]
-  motifs: [stimulus_change, trials_go]
+  motifs: [stimulus_change]
 
 arms:
-  representation: [count_patch_mean_raw, untrained_encoder_raw, encoder_raw, encoder_whitened]
-  motifs: [untrained_encoder_raw, encoder_raw, encoder_whitened]
+  motifs: [encoder_raw, encoder_token_normalized, encoder_probe_weighted, encoder_aligned_oracle]

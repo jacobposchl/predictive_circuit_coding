@@ -1,0 +1,9 @@
+extends: predictive_circuit_coding_refined_debug.yaml
+experiment:
+  variant_name: refined_cls
+model:
+  population_token_mode: per_patch_cls
+discovery:
+  pooled_feature_mode: cls_tokens
+artifacts:
+  checkpoint_prefix: pcc_refined_cls_debug

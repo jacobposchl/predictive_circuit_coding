@@ -3,9 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-from torch.nn import functional as F
 
-from predictive_circuit_coding.objectives.region_targets import RegionRateTargets
 from predictive_circuit_coding.objectives.targets import CountTargetBuilder, PredictiveTargets
 from predictive_circuit_coding.training.config import ObjectiveConfig
 from predictive_circuit_coding.training.contracts import ModelForwardOutput, PopulationWindowBatch
@@ -64,54 +62,31 @@ class ReconstructionObjective:
     def __init__(self, config: ObjectiveConfig):
         self.config = config
 
+    def _normalize_window_zscore(
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        expanded_mask = mask.unsqueeze(-1).to(dtype=target.dtype)
+        valid_counts = expanded_mask.sum(dim=2, keepdim=True).clamp_min(1.0)
+        mean = (target * expanded_mask).sum(dim=2, keepdim=True) / valid_counts
+        centered = (target - mean) * expanded_mask
+        variance = (centered * centered).sum(dim=2, keepdim=True) / valid_counts
+        std = variance.sqrt().clamp_min(1.0e-6)
+        return (prediction - mean) / std, (target - mean) / std
+
     def evaluate(self, batch: PopulationWindowBatch, forward_output: ModelForwardOutput) -> tuple[torch.Tensor, dict[str, float]]:
+        prediction = forward_output.reconstruction_outputs
+        target = batch.patch_counts
+        if self.config.reconstruction_target_mode == "window_zscore":
+            prediction, target = self._normalize_window_zscore(prediction, target, batch.patch_mask)
         reconstruction_loss = _masked_mse(
-            forward_output.reconstruction_outputs,
-            batch.patch_counts,
+            prediction,
+            target,
             batch.patch_mask,
         )
         return reconstruction_loss, {"reconstruction_loss": float(reconstruction_loss.detach().item())}
-
-
-class CrossSessionRegionLoss:
-    def evaluate(
-        self,
-        *,
-        predicted_region_rates: torch.Tensor,
-        region_targets: RegionRateTargets,
-        region_loss_weight: float,
-    ) -> tuple[torch.Tensor, dict[str, float]]:
-        target = region_targets.region_rate_future.to(device=predicted_region_rates.device, dtype=predicted_region_rates.dtype)
-        valid_mask = (
-            region_targets.valid_patch_mask.to(device=predicted_region_rates.device)
-            & region_targets.is_augmented.to(device=predicted_region_rates.device).unsqueeze(-1).unsqueeze(-1)
-        )
-        if not bool(valid_mask.any().item()):
-            zero = predicted_region_rates.sum() * 0.0
-            metrics = dict(region_targets.diagnostics)
-            metrics.update(
-                {
-                    "cross_session_region_loss": 0.0,
-                    "cross_session_region_loss_weighted": 0.0,
-                    "cross_session_region_loss_weight": float(region_loss_weight),
-                }
-            )
-            return zero, metrics
-
-        expanded_mask = valid_mask.to(dtype=predicted_region_rates.dtype)
-        squared_error = ((predicted_region_rates - target) ** 2) * expanded_mask
-        denominator = expanded_mask.sum().clamp_min(1.0)
-        raw_loss = squared_error.sum() / denominator
-        weighted_loss = raw_loss * float(region_loss_weight)
-        metrics = dict(region_targets.diagnostics)
-        metrics.update(
-            {
-                "cross_session_region_loss": float(raw_loss.detach().item()),
-                "cross_session_region_loss_weighted": float(weighted_loss.detach().item()),
-                "cross_session_region_loss_weight": float(region_loss_weight),
-            }
-        )
-        return weighted_loss, metrics
 
 
 class CombinedObjective:

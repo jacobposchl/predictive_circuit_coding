@@ -33,6 +33,17 @@ class DataRuntimeConfig:
 
 
 @dataclass(frozen=True)
+class ExperimentIdentityConfig:
+    variant_name: str = "refined_core"
+
+
+@dataclass(frozen=True)
+class CountNormalizationConfig:
+    mode: str = "none"
+    stats_path: Path | None = None
+
+
+@dataclass(frozen=True)
 class ModelConfig:
     d_model: int
     num_heads: int
@@ -42,27 +53,7 @@ class ModelConfig:
     mlp_ratio: float
     l2_normalize_tokens: bool
     norm_eps: float
-
-
-@dataclass(frozen=True)
-class CrossSessionAugConfig:
-    enabled: bool = False
-    training_variant_name: str = "baseline"
-    target_label: str = "stimulus_change"
-    target_label_mode: str = "auto"
-    target_label_match_value: str | None = None
-    aug_prob_start: float = 0.0
-    aug_prob_end: float = 0.0
-    region_loss_weight_start: float = 0.0
-    region_loss_weight_end: float = 0.0
-    warmup_epochs: int = 0
-    canonical_regions: tuple[str, ...] = ()
-    donor_cache_size_per_label_session: int = 8
-    min_shared_regions: int = 1
-    geometry_monitor_every_epochs: int = 0
-    geometry_monitor_split: str = "discovery"
-    geometry_monitor_max_batches: int = 4
-    geometry_monitor_neighbor_k: int = 5
+    population_token_mode: str = "none"
 
 
 @dataclass(frozen=True)
@@ -73,7 +64,7 @@ class ObjectiveConfig:
     reconstruction_loss: str
     reconstruction_weight: float
     exclude_final_prediction_patch: bool
-    cross_session_aug: CrossSessionAugConfig = field(default_factory=CrossSessionAugConfig)
+    reconstruction_target_mode: str = "raw"
 
 
 @dataclass(frozen=True)
@@ -211,6 +202,7 @@ class DiscoveryConfig:
     min_cluster_size: int = 2
     stability_rounds: int = 4
     shuffle_seed: int = 17
+    pooled_feature_mode: str = "mean_tokens"
 
 
 @dataclass(frozen=True)
@@ -223,6 +215,8 @@ class ExperimentConfig:
     objective: ObjectiveConfig
     optimization: OptimizationConfig
     artifacts: ArtifactConfig
+    experiment: ExperimentIdentityConfig = field(default_factory=ExperimentIdentityConfig)
+    count_normalization: CountNormalizationConfig = field(default_factory=CountNormalizationConfig)
     splits: SplitConfig = field(default_factory=SplitConfig)
     dataset_selection: DatasetSelectionConfig = field(default_factory=DatasetSelectionConfig)
     runtime_subset: RuntimeSubsetConfig | None = None
@@ -248,6 +242,8 @@ class ExperimentConfig:
                 payload["dataset_selection"][key] = str(value)
         if self.training.resume_checkpoint is not None:
             payload["training"]["resume_checkpoint"] = str(self.training.resume_checkpoint)
+        if self.count_normalization.stats_path is not None:
+            payload["count_normalization"]["stats_path"] = str(self.count_normalization.stats_path)
         if self.runtime_subset is not None:
             payload["runtime_subset"] = {
                 "split_manifest_path": str(self.runtime_subset.split_manifest_path),
@@ -271,10 +267,29 @@ def _resolve_optional_path(base_dir: Path, value: str | None) -> Path | None:
     return _resolve_path(base_dir, str(value))
 
 
+def _deep_merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if key == "extends":
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_config(dict(merged[key]), value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_experiment_config(path: str | Path) -> ExperimentConfig:
     config_path = Path(path).resolve()
     with config_path.open("r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle)
+    if isinstance(raw, dict) and raw.get("extends") not in (None, ""):
+        base_path = _resolve_path(config_path.parent, str(raw["extends"]))
+        with base_path.open("r", encoding="utf-8") as handle:
+            base_raw = yaml.safe_load(handle)
+        if not isinstance(base_raw, dict):
+            raise ValueError(f"Base config {base_path} must contain a mapping")
+        raw = _deep_merge_config(base_raw, raw)
 
     config_dir = config_path.parent
     runtime = raw["data_runtime"]
@@ -282,6 +297,8 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     objective = raw["objective"]
     optimization = raw["optimization"]
     artifacts = raw["artifacts"]
+    experiment_raw = raw.get("experiment", {})
+    count_normalization_raw = raw.get("count_normalization", {})
     split_raw = raw.get("splits", {})
     selection_raw = raw.get("dataset_selection", {})
     runtime_subset_raw = raw.get("runtime_subset", {})
@@ -290,12 +307,13 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     evaluation_raw = raw.get("evaluation", {})
     discovery_raw = raw.get("discovery", {})
 
-    cross_session_aug_raw = dict(objective.get("cross_session_aug") or {})
-
     cfg = ExperimentConfig(
         dataset_id=str(raw["dataset_id"]),
         split_name=str(raw.get("split_name", "train")),
         seed=int(raw.get("seed", 0)),
+        experiment=ExperimentIdentityConfig(
+            variant_name=str(experiment_raw.get("variant_name", raw.get("variant_name", "refined_core"))),
+        ),
         data_runtime=DataRuntimeConfig(
             bin_width_ms=float(runtime.get("bin_width_ms", 20.0)),
             context_bins=int(runtime.get("context_bins", 500)),
@@ -307,6 +325,10 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
             include_stimulus_presentations=bool(runtime.get("include_stimulus_presentations", True)),
             include_optotagging=bool(runtime.get("include_optotagging", True)),
         ),
+        count_normalization=CountNormalizationConfig(
+            mode=str(count_normalization_raw.get("mode", "none")),
+            stats_path=_resolve_optional_path(config_dir, count_normalization_raw.get("stats_path")),
+        ),
         model=ModelConfig(
             d_model=int(model.get("d_model", 256)),
             num_heads=int(model.get("num_heads", 8)),
@@ -316,6 +338,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
             mlp_ratio=float(model.get("mlp_ratio", 4.0)),
             l2_normalize_tokens=bool(model.get("l2_normalize_tokens", True)),
             norm_eps=float(model.get("norm_eps", 1.0e-5)),
+            population_token_mode=str(model.get("population_token_mode", "none")),
         ),
         objective=ObjectiveConfig(
             predictive_target_type=str(objective.get("predictive_target_type", "delta")),
@@ -323,32 +346,8 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
             predictive_loss=str(objective.get("predictive_loss", "mse")),
             reconstruction_loss=str(objective.get("reconstruction_loss", "mse")),
             reconstruction_weight=float(objective.get("reconstruction_weight", 0.2)),
+            reconstruction_target_mode=str(objective.get("reconstruction_target_mode", "raw")),
             exclude_final_prediction_patch=bool(objective.get("exclude_final_prediction_patch", True)),
-            cross_session_aug=CrossSessionAugConfig(
-                enabled=bool(cross_session_aug_raw.get("enabled", False)),
-                training_variant_name=str(cross_session_aug_raw.get("training_variant_name", "baseline")),
-                target_label=str(cross_session_aug_raw.get("target_label", "stimulus_change")),
-                target_label_mode=str(cross_session_aug_raw.get("target_label_mode", "auto")),
-                target_label_match_value=(
-                    str(cross_session_aug_raw["target_label_match_value"])
-                    if cross_session_aug_raw.get("target_label_match_value") is not None
-                    else None
-                ),
-                aug_prob_start=float(cross_session_aug_raw.get("aug_prob_start", 0.0)),
-                aug_prob_end=float(cross_session_aug_raw.get("aug_prob_end", 0.0)),
-                region_loss_weight_start=float(cross_session_aug_raw.get("region_loss_weight_start", 0.0)),
-                region_loss_weight_end=float(cross_session_aug_raw.get("region_loss_weight_end", 0.0)),
-                warmup_epochs=int(cross_session_aug_raw.get("warmup_epochs", 0)),
-                canonical_regions=tuple(str(value) for value in cross_session_aug_raw.get("canonical_regions", []) or ()),
-                donor_cache_size_per_label_session=int(
-                    cross_session_aug_raw.get("donor_cache_size_per_label_session", 8)
-                ),
-                min_shared_regions=int(cross_session_aug_raw.get("min_shared_regions", 1)),
-                geometry_monitor_every_epochs=int(cross_session_aug_raw.get("geometry_monitor_every_epochs", 0)),
-                geometry_monitor_split=str(cross_session_aug_raw.get("geometry_monitor_split", "discovery")),
-                geometry_monitor_max_batches=int(cross_session_aug_raw.get("geometry_monitor_max_batches", 4)),
-                geometry_monitor_neighbor_k=int(cross_session_aug_raw.get("geometry_monitor_neighbor_k", 5)),
-            ),
         ),
         optimization=OptimizationConfig(
             learning_rate=float(optimization.get("learning_rate", 1.0e-4)),
@@ -481,6 +480,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
             min_cluster_size=int(discovery_raw.get("min_cluster_size", 2)),
             stability_rounds=int(discovery_raw.get("stability_rounds", 4)),
             shuffle_seed=int(discovery_raw.get("shuffle_seed", 17)),
+            pooled_feature_mode=str(discovery_raw.get("pooled_feature_mode", "mean_tokens")),
         ),
         config_path=config_path,
     )
@@ -511,6 +511,14 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("model.spatial_layers must be >= 1")
     if not 0.0 <= config.model.dropout < 1.0:
         raise ValueError("model.dropout must be in [0, 1)")
+    if config.model.population_token_mode not in {"none", "per_patch_cls"}:
+        raise ValueError("model.population_token_mode must be 'none' or 'per_patch_cls'")
+    if not config.experiment.variant_name.strip():
+        raise ValueError("experiment.variant_name must not be blank")
+    if config.count_normalization.mode not in {"none", "log1p_train_zscore"}:
+        raise ValueError("count_normalization.mode must be 'none' or 'log1p_train_zscore'")
+    if config.count_normalization.mode == "log1p_train_zscore" and config.count_normalization.stats_path is None:
+        raise ValueError("count_normalization.stats_path is required for log1p_train_zscore")
     if config.objective.predictive_target_type not in {"delta", "next_patch_counts"}:
         raise ValueError("objective.predictive_target_type must be 'delta' or 'next_patch_counts'")
     if config.objective.continuation_baseline_type not in {"previous_patch", "zeros"}:
@@ -519,46 +527,14 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         raise ValueError("Only mse predictive_loss is currently supported")
     if config.objective.reconstruction_loss != "mse":
         raise ValueError("Only mse reconstruction_loss is currently supported")
+    if config.objective.reconstruction_target_mode not in {"raw", "window_zscore"}:
+        raise ValueError("objective.reconstruction_target_mode must be 'raw' or 'window_zscore'")
     if config.objective.reconstruction_weight < 0:
         raise ValueError("objective.reconstruction_weight must be >= 0")
-    aug = config.objective.cross_session_aug
-    if aug.enabled and not aug.target_label.strip():
-        raise ValueError("objective.cross_session_aug.target_label must not be empty when enabled")
-    if aug.target_label_match_value is not None and not aug.target_label_match_value.strip():
-        raise ValueError("objective.cross_session_aug.target_label_match_value must not be blank when provided")
-    if aug.target_label_mode not in {"auto", "overlap", "onset_within_window", "centered_onset"}:
-        raise ValueError(
-            "objective.cross_session_aug.target_label_mode must be one of 'auto', 'overlap', "
-            "'onset_within_window', or 'centered_onset'"
-        )
-    if not aug.training_variant_name.strip():
-        raise ValueError("objective.cross_session_aug.training_variant_name must not be blank")
-    for name, value in (
-        ("objective.cross_session_aug.aug_prob_start", aug.aug_prob_start),
-        ("objective.cross_session_aug.aug_prob_end", aug.aug_prob_end),
-    ):
-        if not 0.0 <= value <= 1.0:
-            raise ValueError(f"{name} must be in [0, 1]")
-    for name, value in (
-        ("objective.cross_session_aug.region_loss_weight_start", aug.region_loss_weight_start),
-        ("objective.cross_session_aug.region_loss_weight_end", aug.region_loss_weight_end),
-    ):
-        if value < 0.0:
-            raise ValueError(f"{name} must be >= 0")
-    if aug.warmup_epochs < 0:
-        raise ValueError("objective.cross_session_aug.warmup_epochs must be >= 0")
-    if aug.donor_cache_size_per_label_session < 1:
-        raise ValueError("objective.cross_session_aug.donor_cache_size_per_label_session must be >= 1")
-    if aug.min_shared_regions < 1:
-        raise ValueError("objective.cross_session_aug.min_shared_regions must be >= 1")
-    if aug.geometry_monitor_every_epochs < 0:
-        raise ValueError("objective.cross_session_aug.geometry_monitor_every_epochs must be >= 0")
-    if aug.geometry_monitor_split not in {"train", "valid", "discovery", "test"}:
-        raise ValueError("objective.cross_session_aug.geometry_monitor_split must be one of train/valid/discovery/test")
-    if aug.geometry_monitor_max_batches < 1:
-        raise ValueError("objective.cross_session_aug.geometry_monitor_max_batches must be >= 1")
-    if aug.geometry_monitor_neighbor_k < 1:
-        raise ValueError("objective.cross_session_aug.geometry_monitor_neighbor_k must be >= 1")
+    if config.discovery.pooled_feature_mode not in {"mean_tokens", "cls_tokens"}:
+        raise ValueError("discovery.pooled_feature_mode must be 'mean_tokens' or 'cls_tokens'")
+    if config.discovery.pooled_feature_mode == "cls_tokens" and config.model.population_token_mode != "per_patch_cls":
+        raise ValueError("discovery.pooled_feature_mode='cls_tokens' requires model.population_token_mode='per_patch_cls'")
     if config.optimization.learning_rate <= 0:
         raise ValueError("optimization.learning_rate must be > 0")
     if config.optimization.weight_decay < 0:

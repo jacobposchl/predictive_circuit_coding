@@ -511,18 +511,15 @@ def build_notebook_preflight_rows(
 
 def load_pipeline_display_tables(
     *,
-    representation_summary_csv_path: str | Path,
-    motif_summary_csv_path: str | Path,
+    refinement_summary_csv_path: str | Path,
     final_summary_csv_path: str | Path,
     training_history_csv_path: str | Path = "",
-    training_geometry_monitor_csv_path: str | Path = "",
 ) -> dict[str, Any]:
     try:
         import pandas as pd
     except Exception:
         return {
-            "representation": [],
-            "motif": [],
+            "refinement": [],
             "final": [],
             "training_history": [],
         }
@@ -533,17 +530,15 @@ def load_pipeline_display_tables(
             return pd.DataFrame()
         return pd.read_csv(candidate)
 
-    representation = _load(representation_summary_csv_path)
-    motif = _load(motif_summary_csv_path)
+    refinement = _load(refinement_summary_csv_path)
     final = _load(final_summary_csv_path)
     training_history = _load(training_history_csv_path)
-    training_geometry = _load(training_geometry_monitor_csv_path)
 
     arm_order = {
-        "count_patch_mean_raw": 0,
-        "untrained_encoder_raw": 1,
-        "encoder_raw": 2,
-        "encoder_whitened": 3,
+        "encoder_raw": 0,
+        "encoder_token_normalized": 1,
+        "encoder_probe_weighted": 2,
+        "encoder_aligned_oracle": 3,
     }
 
     def _sort_for_comparison(df):
@@ -556,37 +551,19 @@ def load_pipeline_display_tables(
             sort_columns = ["task_name", "_arm_order"]
         return sorted_df.sort_values(sort_columns, na_position="last").drop(columns=["_arm_order"])
 
-    if not representation.empty:
-        representation = _sort_for_comparison(representation)
+    if not refinement.empty:
+        refinement = _sort_for_comparison(refinement)
         preferred = [
             "task_name",
             "arm_name",
-            "training_variant_name",
+            "variant_name",
             "status",
             "failure_reason",
             "feature_family",
             "encoder_training_status",
             "geometry_mode",
-            "test_probe_accuracy",
-            "test_probe_bce",
-            "test_probe_pr_auc",
-            "test_probe_roc_auc",
-            "within_session_probe_pr_auc",
-            "within_session_probe_roc_auc",
-        ]
-        representation = representation[[column for column in preferred if column in representation.columns]]
-
-    if not motif.empty:
-        motif = _sort_for_comparison(motif)
-        preferred = [
-            "task_name",
-            "arm_name",
-            "training_variant_name",
-            "status",
-            "failure_reason",
-            "feature_family",
-            "encoder_training_status",
-            "geometry_mode",
+            "candidate_geometry_mode",
+            "claim_safe",
             "candidate_count",
             "cluster_count",
             "held_out_test_probe_pr_auc",
@@ -596,29 +573,15 @@ def load_pipeline_display_tables(
             "cluster_persistence_mean",
             "silhouette_score",
         ]
-        motif = motif[[column for column in preferred if column in motif.columns]]
-
-    if not training_geometry.empty:
-        preferred = [
-            "epoch",
-            "training_variant_name",
-            "split_name",
-            "cross_session_aug_prob",
-            "cross_session_region_loss_weight",
-            "label_neighbor_enrichment",
-            "session_neighbor_enrichment",
-            "subject_neighbor_enrichment",
-            "sample_count",
-            "neighbor_k",
-        ]
-        training_geometry = training_geometry[[column for column in preferred if column in training_geometry.columns]]
+        refinement = refinement[[column for column in preferred if column in refinement.columns]]
 
     if not training_history.empty:
         preferred = [
             "epoch",
             "global_step",
-            "training_variant_name",
-            "cross_session_aug_enabled",
+            "variant_name",
+            "reconstruction_target_mode",
+            "count_normalization_mode",
             "learning_rate",
             "evaluated",
             "became_best",
@@ -627,10 +590,6 @@ def load_pipeline_display_tables(
             "train_total_loss",
             "train_predictive_improvement",
             "train_predictive_loss",
-            "train_cross_session_region_loss",
-            "train_cross_session_aug_fraction",
-            "train_cross_session_donor_available_fraction",
-            "train_cross_session_shared_region_mean",
             "valid_predictive_improvement",
             "valid_predictive_loss",
             "valid_predictive_baseline_mse",
@@ -639,18 +598,15 @@ def load_pipeline_display_tables(
         training_history = training_history[[column for column in preferred if column in training_history.columns]]
 
     return {
-        "representation": representation,
-        "motif": motif,
+        "refinement": refinement,
         "final": final,
         "training_history": training_history,
-        "training_geometry": training_geometry,
     }
 
 
 def build_pipeline_summary_figure(
     *,
-    representation_df,
-    motif_df,
+    refinement_df,
     final_df,
     alignment_df=None,
     title: str = "Predictive Circuit Coding Summary",
@@ -675,43 +631,56 @@ def build_pipeline_summary_figure(
         except Exception:
             return numeric
 
-    n_rep = len(representation_df) if representation_df is not None and not getattr(representation_df, "empty", True) else 0
-    n_motif = len(motif_df) if motif_df is not None and not getattr(motif_df, "empty", True) else 0
-    fig_height = max(11, max(n_rep, n_motif, 4) * 1.2)
+    n_refinement = len(refinement_df) if refinement_df is not None and not getattr(refinement_df, "empty", True) else 0
+    fig_height = max(11, max(n_refinement, 4) * 1.2)
 
     with plt.style.context("seaborn-v0_8-whitegrid"):
         figure, axes = plt.subplots(2, 2, figsize=(16, fig_height), constrained_layout=True)
         figure.suptitle(title, fontsize=16, fontweight="bold", y=1.01)
 
-        rep_axis = axes[0, 0]
-        if representation_df is None or getattr(representation_df, "empty", True):
-            _empty_axis(rep_axis, "Representation Benchmark", "No representation rows available.")
+        probe_axis = axes[0, 0]
+        if refinement_df is None or getattr(refinement_df, "empty", True):
+            _empty_axis(probe_axis, "Probe Signal", "No refinement rows available.")
         else:
-            rep_plot_df = representation_df.copy()
-            rep_plot_df["label"] = (
-                rep_plot_df["task_name"].astype(str) + " | " + rep_plot_df["arm_name"].astype(str)
+            probe_plot_df = refinement_df.copy()
+            probe_plot_df["label"] = (
+                probe_plot_df["task_name"].astype(str) + " | " + probe_plot_df["arm_name"].astype(str)
             ).apply(_truncate)
-            rep_plot_df = rep_plot_df.head(8)
-            x = np.arange(len(rep_plot_df))
+            probe_plot_df = probe_plot_df.head(8)
+            x = np.arange(len(probe_plot_df))
             width = 0.35
-            cross_session = _series(rep_plot_df, "test_probe_pr_auc")
-            within_session = _series(rep_plot_df, "within_session_probe_pr_auc")
-            rep_axis.bar(x, cross_session if cross_session is not None else 0.0, width=width, color="#3b7ddd", alpha=0.85, label="Cross-session PR-AUC")
-            if within_session is not None:
-                rep_axis.scatter(x, within_session, color="#e07a1f", s=60, zorder=3, label="Within-session PR-AUC")
-            rep_axis.set_xticks(x)
-            rep_axis.set_xticklabels(rep_plot_df["label"].tolist(), rotation=40, ha="right", fontsize=8)
-            rep_axis.set_ylim(0.0, 1.05)
-            rep_axis.set_ylabel("Score", fontsize=10)
-            rep_axis.set_title("Representation Benchmark", fontsize=12, fontweight="bold")
-            rep_axis.grid(axis="y", alpha=0.4)
-            rep_axis.legend(loc="upper right", frameon=False, fontsize=9)
+            probe_pr = _series(probe_plot_df, "held_out_test_probe_pr_auc")
+            probe_roc = _series(probe_plot_df, "held_out_test_probe_roc_auc")
+            probe_axis.bar(
+                x - width / 2,
+                probe_pr if probe_pr is not None else 0.0,
+                width=width,
+                color="#3b7ddd",
+                alpha=0.85,
+                label="Probe PR-AUC",
+            )
+            if probe_roc is not None:
+                probe_axis.bar(
+                    x + width / 2,
+                    probe_roc,
+                    width=width,
+                    color="#577590",
+                    alpha=0.85,
+                    label="Probe ROC-AUC",
+                )
+            probe_axis.set_xticks(x)
+            probe_axis.set_xticklabels(probe_plot_df["label"].tolist(), rotation=40, ha="right", fontsize=8)
+            probe_axis.set_ylim(0.0, 1.05)
+            probe_axis.set_ylabel("Score", fontsize=10)
+            probe_axis.set_title("Probe Signal", fontsize=12, fontweight="bold")
+            probe_axis.grid(axis="y", alpha=0.4)
+            probe_axis.legend(loc="upper right", frameon=False, fontsize=9)
 
         motif_axis = axes[0, 1]
-        if motif_df is None or getattr(motif_df, "empty", True):
-            _empty_axis(motif_axis, "Motif Benchmark", "No motif rows available.")
+        if refinement_df is None or getattr(refinement_df, "empty", True):
+            _empty_axis(motif_axis, "Motif Transfer", "No refinement rows available.")
         else:
-            motif_plot_df = motif_df.copy()
+            motif_plot_df = refinement_df.copy()
             motif_plot_df["label"] = (
                 motif_plot_df["task_name"].astype(str) + " | " + motif_plot_df["arm_name"].astype(str)
             ).apply(_truncate)
@@ -751,30 +720,28 @@ def build_pipeline_summary_figure(
             motif_axis.set_xticklabels(motif_plot_df["label"].tolist(), rotation=40, ha="right", fontsize=8)
             motif_axis.set_ylim(0.0, 1.05)
             motif_axis.set_ylabel("Held-out Motif PR-AUC", fontsize=10)
-            motif_axis.set_title("Motif Benchmark", fontsize=12, fontweight="bold")
+            motif_axis.set_title("Motif Transfer", fontsize=12, fontweight="bold")
             motif_axis.grid(axis="y", alpha=0.4)
 
-        geometry_axis = axes[1, 0]
-        if representation_df is None or getattr(representation_df, "empty", True):
-            _empty_axis(geometry_axis, "Generalization Gap", "No representation rows available.")
+        safety_axis = axes[1, 0]
+        if refinement_df is None or getattr(refinement_df, "empty", True):
+            _empty_axis(safety_axis, "Claim Safety", "No refinement rows available.")
         else:
-            geo_df = representation_df.copy()
-            geo_df = geo_df.head(8)
-            x_labels = [_truncate(f"{row.task_name}\n{row.arm_name}", n=24) for row in geo_df.itertuples()]
-            x = np.arange(len(geo_df))
-            width = 0.35
-            test_roc = _series(geo_df, "test_probe_roc_auc")
-            within_roc = _series(geo_df, "within_session_probe_roc_auc")
-            geometry_axis.bar(x - width / 2, test_roc if test_roc is not None else 0.0, width=width, color="#577590", label="Cross-session ROC-AUC")
-            if within_roc is not None:
-                geometry_axis.bar(x + width / 2, within_roc, width=width, color="#f4a261", label="Within-session ROC-AUC")
-            geometry_axis.set_xticks(x)
-            geometry_axis.set_xticklabels(x_labels, rotation=40, ha="right", fontsize=8)
-            geometry_axis.set_ylim(0.0, 1.05)
-            geometry_axis.set_ylabel("ROC-AUC", fontsize=10)
-            geometry_axis.set_title("Generalization Gap", fontsize=12, fontweight="bold")
-            geometry_axis.grid(axis="y", alpha=0.4)
-            geometry_axis.legend(loc="upper left", frameon=False, fontsize=9)
+            safety_df = refinement_df.copy()
+            if "claim_safe" in safety_df.columns:
+                safety_counts = safety_df["claim_safe"].astype(bool).value_counts()
+                labels = ["claim-safe", "diagnostic"]
+                values = [
+                    int(safety_counts.get(True, 0)),
+                    int(safety_counts.get(False, 0)),
+                ]
+            else:
+                labels = ["unknown"]
+                values = [len(safety_df)]
+            safety_axis.bar(labels, values, color=["#2a9d8f", "#e07a1f"][: len(values)], alpha=0.85)
+            safety_axis.set_ylabel("Rows", fontsize=10)
+            safety_axis.set_title("Claim Safety", fontsize=12, fontweight="bold")
+            safety_axis.grid(axis="y", alpha=0.4)
 
         summary_axis = axes[1, 1]
         summary_axis.axis("off")
@@ -782,28 +749,24 @@ def build_pipeline_summary_figure(
         summary_lines: list[str] = []
         if final_df is not None and not getattr(final_df, "empty", True):
             row = final_df.iloc[0]
-            summary_lines.append(f"Representation rows: {row.get('representation_row_count', 'n/a')}")
-            summary_lines.append(f"Motif rows: {row.get('motif_row_count', 'n/a')}")
-            summary_lines.append(
-                f"Mean representation test PR-AUC: {row.get('representation_mean_test_probe_pr_auc', 'n/a')}"
-            )
+            summary_lines.append(f"Refinement rows: {row.get('motif_row_count', row.get('refinement_row_count', 'n/a'))}")
             summary_lines.append(
                 f"Mean motif held-out PR-AUC: {row.get('motif_mean_held_out_similarity_pr_auc', 'n/a')}"
             )
-            claims = row.get("claims")
-            if isinstance(claims, str):
+            notes = row.get("notes")
+            if isinstance(notes, str):
                 try:
                     import ast
 
-                    parsed_claims = ast.literal_eval(claims)
-                    if isinstance(parsed_claims, list):
-                        claims = parsed_claims
+                    parsed_notes = ast.literal_eval(notes)
+                    if isinstance(parsed_notes, list):
+                        notes = parsed_notes
                 except Exception:
-                    claims = [claims]
-            if isinstance(claims, list):
+                    notes = [notes]
+            if isinstance(notes, list):
                 summary_lines.append("")
-                summary_lines.append("Claims:")
-                summary_lines.extend(f"  \u2022 {claim}" for claim in claims[:4])
+                summary_lines.append("Notes:")
+                summary_lines.extend(f"  \u2022 {note}" for note in notes[:4])
         else:
             summary_lines.append("No final summary rows available.")
 
@@ -828,57 +791,16 @@ def build_pipeline_summary_figure(
 def build_synthetic_pipeline_summary_tables() -> dict[str, Any]:
     import pandas as pd
 
-    representation_df = pd.DataFrame(
+    refinement_df = pd.DataFrame(
         [
             {
                 "task_name": "stimulus_change",
-                "arm_name": "encoder_whitened",
-                "status": "ok",
-                "feature_family": "encoder",
-                "geometry_mode": "whitened",
-                "test_probe_accuracy": 0.78,
-                "test_probe_bce": 0.54,
-                "test_probe_pr_auc": 0.81,
-                "test_probe_roc_auc": 0.79,
-                "within_session_probe_pr_auc": 0.87,
-                "within_session_probe_roc_auc": 0.84,
-            },
-            {
-                "task_name": "trials_go",
                 "arm_name": "encoder_raw",
                 "status": "ok",
                 "feature_family": "encoder",
                 "geometry_mode": "raw",
-                "test_probe_accuracy": 0.71,
-                "test_probe_bce": 0.62,
-                "test_probe_pr_auc": 0.72,
-                "test_probe_roc_auc": 0.71,
-                "within_session_probe_pr_auc": 0.75,
-                "within_session_probe_roc_auc": 0.73,
-            },
-            {
-                "task_name": "stimulus_omitted",
-                "arm_name": "untrained_encoder_raw",
-                "status": "ok",
-                "feature_family": "untrained_encoder",
-                "geometry_mode": "raw",
-                "test_probe_accuracy": 0.69,
-                "test_probe_bce": 0.64,
-                "test_probe_pr_auc": 0.68,
-                "test_probe_roc_auc": 0.7,
-                "within_session_probe_pr_auc": 0.74,
-                "within_session_probe_roc_auc": 0.72,
-            },
-        ]
-    )
-    motif_df = pd.DataFrame(
-        [
-            {
-                "task_name": "stimulus_change",
-                "arm_name": "encoder_whitened",
-                "status": "ok",
-                "feature_family": "encoder",
-                "geometry_mode": "whitened",
+                "candidate_geometry_mode": "embedding",
+                "claim_safe": True,
                 "candidate_count": 32,
                 "cluster_count": 4,
                 "held_out_test_probe_pr_auc": 0.66,
@@ -890,10 +812,12 @@ def build_synthetic_pipeline_summary_tables() -> dict[str, Any]:
             },
             {
                 "task_name": "trials_go",
-                "arm_name": "encoder_raw",
+                "arm_name": "encoder_token_normalized",
                 "status": "ok",
                 "feature_family": "encoder",
-                "geometry_mode": "raw",
+                "geometry_mode": "token_normalized",
+                "candidate_geometry_mode": "embedding",
+                "claim_safe": True,
                 "candidate_count": 24,
                 "cluster_count": 2,
                 "held_out_test_probe_pr_auc": 0.58,
@@ -904,11 +828,13 @@ def build_synthetic_pipeline_summary_tables() -> dict[str, Any]:
                 "silhouette_score": 0.38,
             },
             {
-                "task_name": "stimulus_omitted",
-                "arm_name": "untrained_encoder_raw",
+                "task_name": "stimulus_change",
+                "arm_name": "encoder_probe_weighted",
                 "status": "ok",
-                "feature_family": "untrained_encoder",
+                "feature_family": "encoder",
                 "geometry_mode": "raw",
+                "candidate_geometry_mode": "probe_weighted",
+                "claim_safe": True,
                 "candidate_count": 18,
                 "cluster_count": 3,
                 "held_out_test_probe_pr_auc": 0.52,
@@ -918,26 +844,41 @@ def build_synthetic_pipeline_summary_tables() -> dict[str, Any]:
                 "cluster_persistence_mean": 0.36,
                 "silhouette_score": 0.31,
             },
+            {
+                "task_name": "trials_go",
+                "arm_name": "encoder_aligned_oracle",
+                "status": "ok",
+                "feature_family": "encoder",
+                "geometry_mode": "aligned_oracle",
+                "candidate_geometry_mode": "embedding",
+                "claim_safe": False,
+                "candidate_count": 20,
+                "cluster_count": 2,
+                "held_out_test_probe_pr_auc": 0.72,
+                "held_out_test_probe_roc_auc": 0.75,
+                "held_out_similarity_pr_auc": 0.64,
+                "held_out_similarity_roc_auc": 0.67,
+                "cluster_persistence_mean": 0.5,
+                "silhouette_score": 0.4,
+            },
         ]
     )
     final_df = pd.DataFrame(
         [
             {
-                "representation_row_count": len(representation_df),
-                "motif_row_count": len(motif_df),
-                "representation_mean_test_probe_pr_auc": float(representation_df["test_probe_pr_auc"].mean()),
-                "motif_mean_held_out_similarity_pr_auc": float(motif_df["held_out_similarity_pr_auc"].mean()),
-                "claims": [
-                    "representation: encoder_whitened performed best on stimulus_change",
-                    "geometry: whitening improved the top representation row",
-                    "motifs: encoder_whitened produced the strongest held-out motif row",
+                "motif_row_count": len(refinement_df),
+                "motif_mean_held_out_similarity_pr_auc": float(refinement_df["held_out_similarity_pr_auc"].mean()),
+                "claim_safe_row_count": int(refinement_df["claim_safe"].sum()),
+                "diagnostic_row_count": int((~refinement_df["claim_safe"]).sum()),
+                "notes": [
+                    "refinement rows compare trained-encoder discovery transforms",
+                    "oracle alignment is diagnostic and not claim-safe",
                 ],
             }
         ]
     )
     return {
-        "representation": representation_df,
-        "motif": motif_df,
+        "refinement": refinement_df,
         "final": final_df,
     }
 
@@ -951,8 +892,7 @@ def write_synthetic_pipeline_summary_preview(
 
     tables = build_synthetic_pipeline_summary_tables()
     figure = build_pipeline_summary_figure(
-        representation_df=tables["representation"],
-        motif_df=tables["motif"],
+        refinement_df=tables["refinement"],
         final_df=tables["final"],
         title="Predictive Circuit Coding Summary Preview",
     )

@@ -7,7 +7,10 @@ from predictive_circuit_coding.training.config import ExperimentConfig
 
 
 def build_tokenizer_from_config(config: ExperimentConfig):
-    return build_population_window_collator(config.data_runtime)
+    return build_population_window_collator(
+        config.data_runtime,
+        count_normalization=config.count_normalization,
+    )
 
 
 def build_model_from_config(config: ExperimentConfig) -> PredictiveCircuitModel:
