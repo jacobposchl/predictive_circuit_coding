@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from contextlib import nullcontext
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import math
 import random
@@ -103,6 +104,8 @@ def build_checkpoint_metadata(config: ExperimentConfig, *, split_name: str) -> C
 class TrainingRunResult:
     checkpoint_path: Path
     summary_path: Path
+    history_json_path: Path
+    history_csv_path: Path
     best_epoch: int
     best_metric: float
     geometry_monitor_json_path: Path | None = None
@@ -172,6 +175,51 @@ def _write_geometry_monitor_rows(
         for row in rows:
             writer.writerow(row)
     return output_json_path, output_csv_path
+
+
+def _write_training_history_rows(
+    rows: list[dict[str, float | int | str | bool | None]],
+    *,
+    output_json_path: Path,
+    output_csv_path: Path,
+) -> tuple[Path, Path]:
+    write_json_payload({"training_history": rows}, output_json_path)
+    output_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = sorted({key for row in rows for key in row.keys()}) if rows else []
+    with output_csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return output_json_path, output_csv_path
+
+
+def _load_prior_training_history_rows(
+    *,
+    history_json_path: Path,
+    start_epoch: int,
+) -> list[dict[str, float | int | str | bool | None]]:
+    if not history_json_path.is_file() or start_epoch <= 1:
+        return []
+    payload = json.loads(history_json_path.read_text(encoding="utf-8"))
+    rows = payload.get("training_history") or []
+    prior_rows: list[dict[str, float | int | str | bool | None]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            epoch = int(row.get("epoch", 0))
+        except (TypeError, ValueError):
+            continue
+        if 0 < epoch < start_epoch:
+            prior_rows.append(dict(row))
+    return prior_rows
+
+
+def _prefixed_metrics(prefix: str, metrics: dict[str, float] | None) -> dict[str, float | None]:
+    if not metrics:
+        return {}
+    return {f"{prefix}_{str(key)}": float(value) for key, value in metrics.items() if value is not None}
 
 
 def _run_cross_session_geometry_monitor(
@@ -333,6 +381,9 @@ def train_model(
     geometry_monitor_rows: list[dict[str, float | int | str | bool | None]] = []
     geometry_monitor_json_path: Path | None = None
     geometry_monitor_csv_path: Path | None = None
+    training_history_json_path = experiment_config.artifacts.summary_path.with_name("training_history.json")
+    training_history_csv_path = experiment_config.artifacts.summary_path.with_name("training_history.csv")
+    training_history_rows: list[dict[str, float | int | str | bool | None]] = []
     if aug_config.enabled:
         if not canonical_regions:
             raise ValueError(
@@ -428,6 +479,10 @@ def train_model(
             {str(key): float(value) for key, value in state.get("best_validation_metrics", {}).items()}
             if state.get("best_validation_metrics") is not None
             else None
+        )
+        training_history_rows = _load_prior_training_history_rows(
+            history_json_path=training_history_json_path,
+            start_epoch=start_epoch,
         )
         logger.log(f"Resumed from checkpoint at epoch {state['epoch']}")
         _maybe_emit_training_progress(
@@ -582,6 +637,8 @@ def train_model(
 
         current_training_losses = aggregate_metric_dicts(train_metrics, weights=train_metric_weights)
         latest_training_losses = current_training_losses
+        epoch_evaluation_metrics: dict[str, float] | None = None
+        epoch_became_best = False
 
         if epoch % experiment_config.training.evaluate_every_epochs == 0:
             _maybe_emit_training_progress(
@@ -604,6 +661,7 @@ def train_model(
             )
             valid_metric = float(evaluation.metrics["predictive_improvement"])
             latest_evaluation_metrics = dict(evaluation.metrics)
+            epoch_evaluation_metrics = dict(evaluation.metrics)
             _maybe_emit_training_progress(
                 progress_callback,
                 TrainingProgressEvent(
@@ -620,6 +678,7 @@ def train_model(
                 best_validation_metrics = dict(evaluation.metrics)
                 best_training_losses = dict(current_training_losses)
                 best_selection_reason = "validated_best"
+                epoch_became_best = True
                 checkpoint = TrainingCheckpoint(
                     epoch=epoch,
                     global_step=global_step,
@@ -722,6 +781,33 @@ def train_model(
                 write_training_summary(summary, experiment_config.artifacts.summary_path)
                 logger.log_artifact(label="training summary", path=experiment_config.artifacts.summary_path)
 
+        training_history_rows.append(
+            {
+                "epoch": int(epoch),
+                "global_step": int(global_step),
+                "training_variant_name": aug_config.training_variant_name,
+                "cross_session_aug_enabled": bool(aug_config.enabled),
+                "train_split": str(train_split),
+                "valid_split": str(valid_split),
+                "learning_rate": float(optimizer.param_groups[0].get("lr", 0.0)),
+                "evaluated": epoch_evaluation_metrics is not None,
+                "became_best": bool(epoch_became_best),
+                "best_epoch_so_far": int(best_epoch),
+                "best_predictive_improvement_so_far": (
+                    float(best_metric)
+                    if math.isfinite(float(best_metric))
+                    else None
+                ),
+                **_prefixed_metrics("train", current_training_losses),
+                **_prefixed_metrics("valid", epoch_evaluation_metrics),
+            }
+        )
+        _write_training_history_rows(
+            training_history_rows,
+            output_json_path=training_history_json_path,
+            output_csv_path=training_history_csv_path,
+        )
+
         if epoch % experiment_config.training.checkpoint_every_epochs == 0:
             checkpoint = TrainingCheckpoint(
                 epoch=epoch,
@@ -807,6 +893,8 @@ def train_model(
     return TrainingRunResult(
         checkpoint_path=best_checkpoint_path,
         summary_path=experiment_config.artifacts.summary_path,
+        history_json_path=training_history_json_path,
+        history_csv_path=training_history_csv_path,
         best_epoch=best_epoch,
         best_metric=best_metric,
         geometry_monitor_json_path=geometry_monitor_json_path,

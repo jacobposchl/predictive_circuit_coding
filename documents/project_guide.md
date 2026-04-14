@@ -411,6 +411,7 @@ Outputs:
 
 - checkpoint `.pt`
 - training summary JSON
+- training history JSON and CSV for epoch-by-epoch convergence/debug plots
 - optional `cross_session_geometry_monitor.json` and `cross_session_geometry_monitor.csv` when the auxiliary-loss training variant is enabled
 - training run-manifest sidecar
 - if a notebook runtime subset is active, the run-manifest records the artifact-local split manifest and session catalog paths
@@ -421,7 +422,10 @@ For the auxiliary-loss experiment, the train stage also records:
 - `training_variant_name`
 - `cross_session_aug_enabled`
 - aggregated auxiliary-loss metrics in `training_summary.json`
+- per-epoch auxiliary-loss and validation metrics in `training_history.json` / `training_history.csv`
 - periodic raw-latent geometry diagnostics under the geometry-monitor artifact
+
+See `documents/training_notebook_visualization_outputs.md` for the notebook-facing metric definitions and recommended plots.
 
 ### 5. Colab evaluation
 

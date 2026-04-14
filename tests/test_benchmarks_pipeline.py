@@ -387,6 +387,13 @@ def test_augmented_training_writes_geometry_monitor_and_auxiliary_state(tmp_path
         train_split="train",
         valid_split="valid",
     )
+    assert first.history_json_path.is_file()
+    assert first.history_csv_path.is_file()
+    history_rows = json.loads(first.history_json_path.read_text(encoding="utf-8"))["training_history"]
+    assert len(history_rows) == int(experiment_config.training.num_epochs)
+    assert "train_total_loss" in history_rows[-1]
+    assert "valid_predictive_improvement" in history_rows[-1]
+    assert "train_cross_session_aug_fraction" in history_rows[-1]
     assert first.geometry_monitor_json_path is not None and first.geometry_monitor_json_path.is_file()
     assert first.geometry_monitor_csv_path is not None and first.geometry_monitor_csv_path.is_file()
     checkpoint_payload = load_training_checkpoint(first.checkpoint_path, map_location="cpu")
@@ -407,6 +414,8 @@ def test_augmented_training_writes_geometry_monitor_and_auxiliary_state(tmp_path
         valid_split="valid",
     )
     assert second.checkpoint_path.is_file()
+    resumed_history_rows = json.loads(second.history_json_path.read_text(encoding="utf-8"))["training_history"]
+    assert len(resumed_history_rows) == 3
     assert second.geometry_monitor_json_path is not None and second.geometry_monitor_json_path.is_file()
 
 
@@ -448,13 +457,20 @@ def test_augmented_pipeline_run_surfaces_training_variant_and_geometry(tmp_path:
 
     assert result.training_geometry_monitor_json_path is not None
     assert result.training_geometry_monitor_csv_path is not None
+    assert result.training_history_json_path is not None
+    assert result.training_history_csv_path is not None
+    assert result.training_history_json_path.is_file()
+    assert result.training_history_csv_path.is_file()
     tables = load_pipeline_display_tables(
         representation_summary_csv_path=result.representation_summary_csv_path,
         motif_summary_csv_path=result.motif_summary_csv_path,
         final_summary_csv_path=result.final_summary_csv_path,
+        training_history_csv_path=result.training_history_csv_path,
         training_geometry_monitor_csv_path=result.training_geometry_monitor_csv_path,
     )
     assert "training_variant_name" in tables["representation"].columns
+    assert not tables["training_history"].empty
+    assert "valid_predictive_improvement" in tables["training_history"].columns
     assert not tables["training_geometry"].empty
     assert "training_variant_names" in json.loads(result.final_summary_json_path.read_text(encoding="utf-8"))["final_project_summary"][0]
 

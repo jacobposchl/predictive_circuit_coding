@@ -514,6 +514,7 @@ def load_pipeline_display_tables(
     representation_summary_csv_path: str | Path,
     motif_summary_csv_path: str | Path,
     final_summary_csv_path: str | Path,
+    training_history_csv_path: str | Path = "",
     training_geometry_monitor_csv_path: str | Path = "",
 ) -> dict[str, Any]:
     try:
@@ -523,6 +524,7 @@ def load_pipeline_display_tables(
             "representation": [],
             "motif": [],
             "final": [],
+            "training_history": [],
         }
 
     def _load(path: str | Path):
@@ -534,6 +536,7 @@ def load_pipeline_display_tables(
     representation = _load(representation_summary_csv_path)
     motif = _load(motif_summary_csv_path)
     final = _load(final_summary_csv_path)
+    training_history = _load(training_history_csv_path)
     training_geometry = _load(training_geometry_monitor_csv_path)
 
     arm_order = {
@@ -610,10 +613,36 @@ def load_pipeline_display_tables(
         ]
         training_geometry = training_geometry[[column for column in preferred if column in training_geometry.columns]]
 
+    if not training_history.empty:
+        preferred = [
+            "epoch",
+            "global_step",
+            "training_variant_name",
+            "cross_session_aug_enabled",
+            "learning_rate",
+            "evaluated",
+            "became_best",
+            "best_epoch_so_far",
+            "best_predictive_improvement_so_far",
+            "train_total_loss",
+            "train_predictive_improvement",
+            "train_predictive_loss",
+            "train_cross_session_region_loss",
+            "train_cross_session_aug_fraction",
+            "train_cross_session_donor_available_fraction",
+            "train_cross_session_shared_region_mean",
+            "valid_predictive_improvement",
+            "valid_predictive_loss",
+            "valid_predictive_baseline_mse",
+            "valid_predictive_raw_mse",
+        ]
+        training_history = training_history[[column for column in preferred if column in training_history.columns]]
+
     return {
         "representation": representation,
         "motif": motif,
         "final": final,
+        "training_history": training_history,
         "training_geometry": training_geometry,
     }
 

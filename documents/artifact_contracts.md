@@ -112,6 +112,43 @@ Storage policy:
 - notebook-driven final runs retain only the selected `best` and `latest` checkpoints by default
 - verbose per-epoch checkpoints are not first-class artifacts in the compact final workflow
 
+## Training History JSON And CSV
+
+Training runs emit compact epoch-level history artifacts next to `training_summary.json`:
+
+- `train/training_history.json`
+- `train/training_history.csv`
+
+Required row fields:
+
+- `epoch`
+- `global_step`
+- `training_variant_name`
+- `cross_session_aug_enabled`
+- `learning_rate`
+- `evaluated`
+- `became_best`
+- `best_epoch_so_far`
+- `best_predictive_improvement_so_far`
+- `train_total_loss`
+- `train_predictive_improvement`
+- `train_predictive_loss`
+- `valid_predictive_improvement` when validation ran
+- `valid_predictive_loss` when validation ran
+
+Augmented-training rows also include auxiliary diagnostics when available:
+
+- `train_cross_session_region_loss`
+- `train_cross_session_aug_fraction`
+- `train_cross_session_donor_available_fraction`
+- `train_cross_session_shared_region_mean`
+
+Semantics:
+
+- `training_history.*` is the first place to inspect convergence, stability, and auxiliary-loss activation
+- one row is written after every completed epoch
+- `training_summary.json` still describes only the selected best checkpoint
+
 ## Cross-Session Geometry Monitor JSON And CSV
 
 Augmented training runs may emit a compact geometry-monitor artifact next to `training_summary.json`:

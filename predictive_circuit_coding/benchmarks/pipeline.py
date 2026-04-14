@@ -87,6 +87,8 @@ class NotebookPipelineRunResult:
     runtime_experiment_config_path: Path
     checkpoint_path: Path
     training_summary_path: Path
+    training_history_json_path: Path | None
+    training_history_csv_path: Path | None
     training_geometry_monitor_json_path: Path | None
     training_geometry_monitor_csv_path: Path | None
     evaluation_summary_paths: tuple[Path, ...]
@@ -457,7 +459,12 @@ def _build_train_stage_summary(
         Path(outputs.get("training_geometry_monitor_json_path", "")),
         "cross_session_geometry_monitor",
     ) if outputs.get("training_geometry_monitor_json_path") else []
+    history_rows = _summary_rows_from_json(
+        Path(outputs.get("training_history_json_path", "")),
+        "training_history",
+    ) if outputs.get("training_history_json_path") else []
     latest_geometry = geometry_rows[-1] if geometry_rows else {}
+    latest_history = history_rows[-1] if history_rows else {}
     variant_name = summary_payload.get("training_variant_name", "baseline")
     headline = (
         f"Variant `{variant_name}` best epoch `{summary_payload.get('best_epoch', 'n/a')}` "
@@ -475,6 +482,9 @@ def _build_train_stage_summary(
         "cross_session_aug_fraction": losses.get("cross_session_aug_fraction"),
         "cross_session_donor_available_fraction": losses.get("cross_session_donor_available_fraction"),
         "cross_session_shared_region_mean": losses.get("cross_session_shared_region_mean"),
+        "latest_epoch": latest_history.get("epoch"),
+        "latest_valid_predictive_improvement": latest_history.get("valid_predictive_improvement"),
+        "latest_train_total_loss": latest_history.get("train_total_loss"),
         "geometry_session_neighbor_enrichment": latest_geometry.get("session_neighbor_enrichment"),
         "geometry_label_neighbor_enrichment": latest_geometry.get("label_neighbor_enrichment"),
     },)
@@ -486,6 +496,7 @@ def _build_train_stage_summary(
         artifact_paths={
             "checkpoint": str(outputs.get("checkpoint_path", "")),
             "training_summary": str(outputs.get("training_summary_path", "")),
+            "training_history": str(outputs.get("training_history_json_path", "")),
             "geometry_monitor": str(outputs.get("training_geometry_monitor_json_path", "")),
         },
         debug_log_path=(str(debug_log_path) if debug_log_path is not None else None),
@@ -788,6 +799,8 @@ def prepare_or_restore_training_stage(
                     "outputs": {
                         "checkpoint_path": str(checkpoint_path),
                         "training_summary_path": str(training_summary_path),
+                        "training_history_json_path": str(train_result.history_json_path),
+                        "training_history_csv_path": str(train_result.history_csv_path),
                         "training_geometry_monitor_json_path": (
                             str(train_result.geometry_monitor_json_path)
                             if train_result.geometry_monitor_json_path is not None
@@ -810,6 +823,24 @@ def prepare_or_restore_training_stage(
         else:
             training_summary_path = context.summary_path
             run_manifest_path = context.summary_path.with_name(f"{context.summary_path.stem}_train_run_manifest.json")
+        training_history_json_path = (
+            train_result.history_json_path
+            if run_stage_train
+            else (
+                training_summary_path.with_name("training_history.json")
+                if training_summary_path.with_name("training_history.json").is_file()
+                else None
+            )
+        )
+        training_history_csv_path = (
+            train_result.history_csv_path
+            if run_stage_train
+            else (
+                training_summary_path.with_name("training_history.csv")
+                if training_summary_path.with_name("training_history.csv").is_file()
+                else None
+            )
+        )
         geometry_monitor_json_path = (
             train_result.geometry_monitor_json_path
             if run_stage_train
@@ -834,6 +865,16 @@ def prepare_or_restore_training_stage(
             "exported_runtime_config_path": str(context.exported_runtime_config_path),
             "checkpoint_path": str(checkpoint_path),
             "training_summary_path": str(training_summary_path),
+            "training_history_json_path": (
+                str(training_history_json_path)
+                if training_history_json_path is not None
+                else ""
+            ),
+            "training_history_csv_path": (
+                str(training_history_csv_path)
+                if training_history_csv_path is not None
+                else ""
+            ),
             "training_geometry_monitor_json_path": (
                 str(geometry_monitor_json_path)
                 if geometry_monitor_json_path is not None
@@ -1830,6 +1871,16 @@ def run_notebook_pipeline(
         runtime_experiment_config_path=runtime_experiment_config_path,
         checkpoint_path=checkpoint_path,
         training_summary_path=training_summary_path,
+        training_history_json_path=(
+            Path(train_outputs["training_history_json_path"])
+            if train_outputs.get("training_history_json_path")
+            else None
+        ),
+        training_history_csv_path=(
+            Path(train_outputs["training_history_csv_path"])
+            if train_outputs.get("training_history_csv_path")
+            else None
+        ),
         training_geometry_monitor_json_path=(
             Path(train_outputs["training_geometry_monitor_json_path"])
             if train_outputs.get("training_geometry_monitor_json_path")
