@@ -582,7 +582,11 @@ def run_notebook_pipeline(
     progress_ui: bool = True,
     notebook_progress_config: NotebookProgressConfig | None = None,
 ) -> NotebookPipelineRunResult:
-    del source_dataset_root, stage_prepared_sessions_locally
+    _ensure_local_prepared_sessions(
+        data_config_path=data_config_path,
+        source_dataset_root=source_dataset_root,
+        stage_prepared_sessions_locally=stage_prepared_sessions_locally,
+    )
     resolved_run_id = str(pipeline_run_id).strip() if pipeline_run_id is not None else ""
     if not resolved_run_id:
         if run_stage_train:
