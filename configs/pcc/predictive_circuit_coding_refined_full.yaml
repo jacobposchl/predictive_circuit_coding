@@ -99,17 +99,17 @@ execution:
   mixed_precision: true
 
 evaluation:
-  max_batches: 128
+  max_batches: 32
   sequential_step_s:
 
 discovery:
   target_label: stimulus_change
   target_label_mode: auto
-  max_batches: 128
+  max_batches: 32
   sampling_strategy: label_balanced
   min_positive_windows: 32
   negative_to_positive_ratio: 1.0
-  search_max_batches: 1024
+  search_max_batches: 256
   probe_epochs: 50
   probe_learning_rate: 1.0e-2
   top_k_candidates: 64
