@@ -5,7 +5,11 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from predictive_circuit_coding.discovery.notebook import _cluster_report_paths, _coverage_summary_path
+from predictive_circuit_coding.benchmarks.reports import write_summary_rows
+from predictive_circuit_coding.discovery.reporting import (
+    discovery_cluster_report_paths,
+    discovery_coverage_summary_path,
+)
 from predictive_circuit_coding.validation.notebook import default_validation_output_paths as _default_validation_output_paths
 
 
@@ -59,8 +63,8 @@ def build_notebook_diagnostics_experiment_paths(
     checkpoints_root = experiment_root / "checkpoints"
     checkpoint_stem = Path(checkpoint_path).stem
     discovery_artifact_path = checkpoints_root / f"{checkpoint_stem}_{split_name}_discovery.json"
-    decode_coverage_summary_path = _coverage_summary_path(discovery_artifact_path)
-    cluster_summary_json_path, cluster_summary_csv_path = _cluster_report_paths(discovery_artifact_path)
+    decode_coverage_summary_path = discovery_coverage_summary_path(discovery_artifact_path)
+    cluster_summary_json_path, cluster_summary_csv_path = discovery_cluster_report_paths(discovery_artifact_path)
     validation_summary_json_path, validation_summary_csv_path = _default_validation_output_paths(discovery_artifact_path)
     return NotebookDiagnosticsExperimentPaths(
         experiment_name=str(experiment_name),
@@ -415,17 +419,9 @@ def write_notebook_diagnostics_summary(
     output_json_path: str | Path,
     output_csv_path: str | Path,
 ) -> tuple[Path, Path]:
-    json_path = Path(output_json_path)
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps({"experiments": rows}, indent=2), encoding="utf-8")
-    csv_path = Path(output_csv_path)
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = sorted({key for row in rows for key in row.keys()})
-    with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        import csv
-
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-    return json_path, csv_path
+    return write_summary_rows(
+        rows,
+        output_json_path=output_json_path,
+        output_csv_path=output_csv_path,
+        root_key="experiments",
+    )

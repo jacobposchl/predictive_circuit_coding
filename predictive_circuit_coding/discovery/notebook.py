@@ -8,7 +8,12 @@ from pathlib import Path
 
 import yaml
 
-from predictive_circuit_coding.benchmarks.reports import write_summary_rows
+from predictive_circuit_coding.benchmarks.reports import write_single_row_csv, write_summary_rows
+from predictive_circuit_coding.discovery.reporting import (
+    discovery_cluster_report_paths,
+    discovery_coverage_summary_path,
+)
+from predictive_circuit_coding.training.contracts import write_json_payload
 from predictive_circuit_coding.validation.notebook import (
     NotebookValidationRunResult,
     default_validation_output_paths as _default_validation_output_paths,
@@ -264,7 +269,7 @@ def _build_notebook_discovery_comparison_arm_paths(
     checkpoint_stem = Path(checkpoint_path).stem
     discovery_artifact_path = checkpoints_root / f"{checkpoint_stem}_{split_name}_discovery.json"
     validation_summary_json_path, validation_summary_csv_path = _default_validation_output_paths(discovery_artifact_path)
-    cluster_summary_json_path, cluster_summary_csv_path = _cluster_report_paths(discovery_artifact_path)
+    cluster_summary_json_path, cluster_summary_csv_path = discovery_cluster_report_paths(discovery_artifact_path)
     return NotebookDiscoveryComparisonArmPaths(
         arm_name=arm_name,
         arm_root=arm_root,
@@ -323,19 +328,6 @@ def build_notebook_discovery_comparison_paths(
 def _default_discovery_output_path(checkpoint_path: str | Path, split_name: str) -> Path:
     checkpoint = Path(checkpoint_path)
     return checkpoint.with_name(f"{checkpoint.stem}_{split_name}_discovery.json")
-
-
-def _cluster_report_paths(discovery_output_path: str | Path) -> tuple[Path, Path]:
-    output = Path(discovery_output_path)
-    return (
-        output.with_name(f"{output.stem}_cluster_summary.json"),
-        output.with_name(f"{output.stem}_cluster_summary.csv"),
-    )
-
-
-def _coverage_summary_path(discovery_output_path: str | Path) -> Path:
-    output = Path(discovery_output_path)
-    return output.with_name(f"{output.stem}_decode_coverage.json")
 
 
 def _load_discovery_target_label(discovery_artifact_path: str | Path) -> str | None:
@@ -408,8 +400,8 @@ def find_existing_discovery_run(
     )
     if not discovery_path.exists():
         return None
-    coverage_path = _coverage_summary_path(discovery_path)
-    cluster_json, cluster_csv = _cluster_report_paths(discovery_path)
+    coverage_path = discovery_coverage_summary_path(discovery_path)
+    cluster_json, cluster_csv = discovery_cluster_report_paths(discovery_path)
     if not all(p.exists() for p in (coverage_path, cluster_json, cluster_csv)):
         return None
     if target_label is not None:
@@ -461,8 +453,8 @@ def run_notebook_discovery(
     require_non_empty_split(dataset_view=dataset_view, split_name=split_name)
     checkpoint = require_checkpoint_matches_dataset(checkpoint_path=checkpoint_path, dataset_id=config.dataset_id)
     discovery_output_path = Path(output_path) if output_path is not None else _default_discovery_output_path(checkpoint, split_name)
-    coverage_path = _coverage_summary_path(discovery_output_path)
-    cluster_json_path, cluster_csv_path = _cluster_report_paths(discovery_output_path)
+    coverage_path = discovery_coverage_summary_path(discovery_output_path)
+    cluster_json_path, cluster_csv_path = discovery_cluster_report_paths(discovery_output_path)
 
     plan_bar = tqdm(total=0, desc="Discovery coverage scan", unit="window", leave=False, disable=not progress_ui)
 
@@ -518,26 +510,6 @@ def run_notebook_discovery(
         cluster_summary_json_path=cluster_json_path,
         cluster_summary_csv_path=cluster_csv_path,
     )
-
-
-def _write_single_row_csv(row: dict[str, object], path: str | Path) -> Path:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", encoding="utf-8", newline="") as handle:
-        import csv
-
-        fieldnames = list(row.keys())
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerow(row)
-    return target
-
-
-def _write_json_payload(path: str | Path, payload: dict[str, object]) -> Path:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return target
 
 
 def _flatten_transform_summary(summary: dict[str, object]) -> dict[str, object]:
@@ -835,7 +807,7 @@ def run_notebook_discovery_representation_comparison(
             "coverage_summary": comparison_run.coverage_summary.to_dict(),
             "split_summary": comparison_run.split_summary,
         }
-        _write_json_payload(comparison_paths.comparison_metadata_json_path, metadata_payload)
+        write_json_payload(metadata_payload, comparison_paths.comparison_metadata_json_path)
 
         for arm_result in comparison_run.arm_results:
             arm_paths = arm_paths_by_name[arm_result.arm_name]
@@ -843,13 +815,13 @@ def run_notebook_discovery_representation_comparison(
             write_discovery_artifact(arm_result.artifact, arm_paths.discovery_artifact_path)
             write_discovery_cluster_report_json(arm_result.cluster_report, arm_paths.cluster_summary_json_path)
             write_discovery_cluster_report_csv(arm_result.cluster_report, arm_paths.cluster_summary_csv_path)
-            _write_json_payload(arm_paths.validation_summary_json_path, arm_result.validation_summary)
-            _write_single_row_csv(
+            write_json_payload(arm_result.validation_summary, arm_paths.validation_summary_json_path)
+            write_single_row_csv(
                 _flatten_comparison_validation_summary(arm_result.validation_summary),
                 arm_paths.validation_summary_csv_path,
             )
-            _write_json_payload(arm_paths.transform_summary_json_path, arm_result.transform_summary or {})
-            _write_single_row_csv(
+            write_json_payload(arm_result.transform_summary or {}, arm_paths.transform_summary_json_path)
+            write_single_row_csv(
                 _flatten_transform_summary(arm_result.transform_summary or {}),
                 arm_paths.transform_summary_csv_path,
             )
@@ -857,7 +829,7 @@ def run_notebook_discovery_representation_comparison(
                 comparison_paths.shared_runtime_experiment_config_path.read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
-            _write_json_payload(arm_paths.arm_metadata_json_path, expected_metadata_by_arm[arm_result.arm_name])
+            write_json_payload(expected_metadata_by_arm[arm_result.arm_name], arm_paths.arm_metadata_json_path)
     else:
         if comparison_paths.comparison_metadata_json_path.is_file():
             metadata_payload = json.loads(comparison_paths.comparison_metadata_json_path.read_text(encoding="utf-8"))
@@ -865,7 +837,7 @@ def run_notebook_discovery_representation_comparison(
     if not comparison_paths.decode_coverage_summary_path.is_file():
         coverage_payload = metadata_payload.get("coverage_summary") if metadata_payload else None
         if isinstance(coverage_payload, dict):
-            _write_json_payload(comparison_paths.decode_coverage_summary_path, coverage_payload)
+            write_json_payload(coverage_payload, comparison_paths.decode_coverage_summary_path)
 
     summary_rows = [
         build_notebook_discovery_comparison_summary_row(

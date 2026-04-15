@@ -4,10 +4,10 @@ import pytest
 import torch
 
 from predictive_circuit_coding.decoding import fit_additive_probe
+from predictive_circuit_coding.decoding.scoring import window_similarity_scores
 from predictive_circuit_coding.validation.artifact_checks import validate_discovery_artifact_identity
 from predictive_circuit_coding.validation.run import (
     _validate_candidate_schema,
-    _window_similarity_scores,
 )
 
 
@@ -103,10 +103,11 @@ def test_validate_candidate_schema_rejects_bad_embedding_dimension():
 def test_window_similarity_scores_are_finite_for_all_masked_windows():
     tokens = torch.tensor([[[1.0, 0.0], [0.0, 1.0]], [[2.0, 0.0], [0.0, 2.0]]])
     token_mask = torch.tensor([[True, False], [False, False]])
-    scores = _window_similarity_scores(
+    scores = window_similarity_scores(
         tokens=tokens,
         token_mask=token_mask,
         centroids=[torch.tensor([1.0, 0.0])],
+        require_centroids=True,
     )
 
     assert torch.isfinite(scores).all()

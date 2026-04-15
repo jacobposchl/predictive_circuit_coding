@@ -7,7 +7,6 @@ import shutil
 from typing import Any
 
 import torch
-from sklearn.metrics import average_precision_score, roc_auc_score
 
 from predictive_circuit_coding.decoding import (
     apply_session_linear_transforms_to_features,
@@ -22,7 +21,18 @@ from predictive_circuit_coding.decoding import (
     fit_session_whitening_transforms,
 )
 from predictive_circuit_coding.decoding.extract import DiscoveryWindowPlan, EncodedDiscoverySelection
-from predictive_circuit_coding.decoding.scoring import select_candidate_tokens_from_shards
+from predictive_circuit_coding.decoding.probes import (
+    fit_shuffled_probe_features,
+    probe_logits_from_features,
+    probe_metrics_from_logits,
+)
+from predictive_circuit_coding.decoding.scoring import (
+    candidate_centroids,
+    held_out_similarity_summary as summarize_held_out_similarity,
+    pooled_features_from_tokens,
+    select_candidate_tokens_from_shards,
+    window_similarity_scores,
+)
 from predictive_circuit_coding.discovery.clustering import cluster_candidate_tokens
 from predictive_circuit_coding.discovery.reporting import build_discovery_cluster_report
 from predictive_circuit_coding.discovery.run import _ensure_binary_label_coverage, _ensure_min_positive_windows
@@ -50,10 +60,6 @@ class RepresentationComparisonRunResult:
     split_summary: dict[str, Any]
     arm_results: tuple[RepresentationComparisonArmResult, ...]
 
-
-_SIMILARITY_CHUNK_SIZE = 512
-
-
 def _window_key(*, recording_id: str, session_id: str, window_start_s: float, window_end_s: float) -> tuple[str, str, float, float]:
     return (
         str(recording_id),
@@ -66,99 +72,6 @@ def _window_key(*, recording_id: str, session_id: str, window_start_s: float, wi
 def _subset_tuple(values: tuple[Any, ...], indices: torch.Tensor) -> tuple[Any, ...]:
     index_list = [int(index) for index in indices.detach().cpu().tolist()]
     return tuple(values[index] for index in index_list)
-
-
-def _probe_metrics_from_logits(*, sample_logits: torch.Tensor, labels: torch.Tensor) -> dict[str, float]:
-    probabilities = torch.sigmoid(sample_logits)
-    predictions = (probabilities >= 0.5).to(dtype=labels.dtype)
-    accuracy = float((predictions == labels).to(dtype=torch.float32).mean().item())
-    bce = float(torch.nn.functional.binary_cross_entropy_with_logits(sample_logits, labels).item())
-    labels_np = labels.detach().cpu().numpy()
-    probabilities_np = probabilities.detach().cpu().numpy()
-    roc_auc = None
-    pr_auc = None
-    if len({int(value) for value in labels_np.tolist()}) >= 2:
-        roc_auc = float(roc_auc_score(labels_np, probabilities_np))
-        pr_auc = float(average_precision_score(labels_np, probabilities_np))
-    return {
-        "probe_accuracy": accuracy,
-        "probe_bce": bce,
-        "positive_rate": float(labels.mean().item()),
-        "probe_roc_auc": roc_auc,
-        "probe_pr_auc": pr_auc,
-    }
-
-
-def _probe_logits_from_features(*, state_dict: dict[str, Any], features: torch.Tensor) -> torch.Tensor:
-    weight = state_dict["linear.weight"].detach().cpu().reshape(-1).to(dtype=torch.float32)
-    bias = float(state_dict["linear.bias"].detach().cpu().item())
-    feature_tensor = features.detach().cpu().to(dtype=torch.float32)
-    return (feature_tensor @ weight) + bias
-
-
-def _candidate_centroids(candidates: tuple[Any, ...]) -> list[torch.Tensor]:
-    grouped: dict[int, list[torch.Tensor]] = {}
-    for candidate in candidates:
-        cluster_id = int(candidate.cluster_id)
-        if cluster_id == -1:
-            continue
-        grouped.setdefault(cluster_id, []).append(torch.tensor(candidate.embedding, dtype=torch.float32))
-    return [torch.stack(values, dim=0).mean(dim=0) for _, values in sorted(grouped.items())]
-
-
-def _window_similarity_scores(
-    *,
-    tokens: torch.Tensor,
-    token_mask: torch.Tensor,
-    centroids: list[torch.Tensor],
-) -> torch.Tensor:
-    if tokens.numel() == 0 or token_mask.numel() == 0:
-        return torch.empty((0,), dtype=torch.float32)
-    if not centroids:
-        return torch.zeros((tokens.shape[0],), dtype=torch.float32)
-    centroid_tensor = torch.stack(
-        [centroid / centroid.norm().clamp_min(1.0e-8) for centroid in centroids],
-        dim=0,
-    )
-    scores = torch.empty((tokens.shape[0],), dtype=torch.float32)
-    for start in range(0, tokens.shape[0], _SIMILARITY_CHUNK_SIZE):
-        end = min(start + _SIMILARITY_CHUNK_SIZE, tokens.shape[0])
-        chunk = tokens[start:end]
-        normalized_chunk = chunk / chunk.norm(dim=-1, keepdim=True).clamp_min(1.0e-8)
-        chunk_sims = torch.einsum("wtd,cd->wtc", normalized_chunk, centroid_tensor)
-        chunk_sims = chunk_sims.masked_fill(~token_mask[start:end].unsqueeze(-1), float("-inf"))
-        scores[start:end] = chunk_sims.amax(dim=(1, 2)).to(dtype=torch.float32)
-    return scores
-
-
-def _held_out_similarity_summary(
-    *,
-    labels: torch.Tensor,
-    window_session_ids: tuple[str, ...],
-    window_scores: torch.Tensor,
-) -> dict[str, Any]:
-    positive_count = int((labels > 0.0).sum().item())
-    negative_count = int((labels <= 0.0).sum().item())
-    if positive_count <= 0 or negative_count <= 0:
-        raise ValueError(
-            "Held-out motif similarity validation requires both positive and negative windows in the held-out subset."
-        )
-    labels_np = labels.detach().cpu().numpy()
-    scores_np = window_scores.detach().cpu().numpy()
-    per_session_roc_auc: dict[str, float] = {}
-    for session_id in sorted(set(window_session_ids)):
-        indices = [index for index, value in enumerate(window_session_ids) if value == session_id]
-        session_labels = labels_np[indices]
-        if len({int(value) for value in session_labels.tolist()}) < 2:
-            continue
-        per_session_roc_auc[session_id] = float(roc_auc_score(session_labels, scores_np[indices]))
-    return {
-        "window_roc_auc": float(roc_auc_score(labels_np, scores_np)),
-        "window_pr_auc": float(average_precision_score(labels_np, scores_np)),
-        "positive_window_count": positive_count,
-        "negative_window_count": negative_count,
-        "per_session_roc_auc": per_session_roc_auc,
-    }
 
 
 def _unavailable_similarity_summary(*, reason: str) -> dict[str, Any]:
@@ -285,28 +198,6 @@ def _summarize_selected_shards(
     }
 
 
-def _fit_shuffled_probe_features(
-    *,
-    features: torch.Tensor,
-    labels: torch.Tensor,
-    epochs: int,
-    learning_rate: float,
-    seed: int,
-    label_name: str,
-) -> Any:
-    shuffled_labels = labels.clone()
-    permutation = list(range(len(shuffled_labels)))
-    random.Random(int(seed)).shuffle(permutation)
-    shuffled_labels = shuffled_labels[torch.tensor(permutation, dtype=torch.long)]
-    return fit_additive_probe_features(
-        features=features,
-        labels=shuffled_labels,
-        epochs=epochs,
-        learning_rate=learning_rate,
-        label_name=label_name,
-    )
-
-
 def _standard_cross_session_validation_summary(
     *,
     experiment_config: ExperimentConfig,
@@ -339,14 +230,8 @@ def _standard_cross_session_validation_summary(
     discovery_tokens = discovery_collection.tokens
     test_tokens = test_collection.tokens
     if transform_mode == "whitening_only":
-        discovery_features = (
-            discovery_tokens
-            * discovery_collection.token_mask.unsqueeze(-1).to(dtype=discovery_tokens.dtype)
-        ).sum(dim=1) / discovery_collection.token_mask.unsqueeze(-1).to(dtype=discovery_tokens.dtype).sum(dim=1).clamp_min(1.0)
-        test_features = (
-            test_tokens
-            * test_collection.token_mask.unsqueeze(-1).to(dtype=test_tokens.dtype)
-        ).sum(dim=1) / test_collection.token_mask.unsqueeze(-1).to(dtype=test_tokens.dtype).sum(dim=1).clamp_min(1.0)
+        discovery_features = pooled_features_from_tokens(discovery_tokens, discovery_collection.token_mask)
+        test_features = pooled_features_from_tokens(test_tokens, test_collection.token_mask)
         discovery_transforms, _ = fit_session_whitening_transforms(
             features=discovery_features,
             session_ids=discovery_collection.window_session_ids,
@@ -393,14 +278,14 @@ def _standard_cross_session_validation_summary(
         token_mask=test_collection.token_mask,
         labels=test_collection.labels,
     )
-    centroids = _candidate_centroids(candidates)
+    centroids = candidate_centroids(candidates)
     if centroids:
-        window_scores = _window_similarity_scores(
+        window_scores = window_similarity_scores(
             tokens=test_tokens,
             token_mask=test_collection.token_mask,
             centroids=centroids,
         )
-        held_out_similarity_summary = _held_out_similarity_summary(
+        held_out_similarity_summary = summarize_held_out_similarity(
             labels=test_collection.labels,
             window_session_ids=test_collection.window_session_ids,
             window_scores=window_scores,
@@ -563,7 +448,7 @@ def run_representation_comparison_from_encoded(
             learning_rate=experiment_config.discovery.probe_learning_rate,
             label_name=experiment_config.discovery.target_label,
         )
-        shuffled_fit = _fit_shuffled_probe_features(
+        shuffled_fit = fit_shuffled_probe_features(
             features=arm_fit_features,
             labels=fit_labels,
             epochs=experiment_config.discovery.probe_epochs,
@@ -675,20 +560,20 @@ def run_representation_comparison_from_encoded(
         )
         cluster_report = build_discovery_cluster_report(artifact)
 
-        heldout_logits = _probe_logits_from_features(
+        heldout_logits = probe_logits_from_features(
             state_dict=probe_fit.state_dict,
             features=arm_heldout_features,
         )
-        primary_metrics = _probe_metrics_from_logits(
+        primary_metrics = probe_metrics_from_logits(
             sample_logits=heldout_logits,
             labels=heldout_labels,
         )
-        centroids = _candidate_centroids(clustered_candidates)
+        centroids = candidate_centroids(clustered_candidates)
         if centroids:
-            heldout_similarity_summary = _held_out_similarity_summary(
+            heldout_similarity_summary = summarize_held_out_similarity(
                 labels=heldout_labels,
                 window_session_ids=heldout_session_ids,
-                window_scores=_window_similarity_scores(
+                window_scores=window_similarity_scores(
                     tokens=arm_heldout_tokens,
                     token_mask=heldout_token_mask,
                     centroids=centroids,

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 PIPELINE_STAGE_ORDER = ("train", "evaluate", "refinement", "alignment_diagnostic", "final_reports")
@@ -43,3 +44,33 @@ class PipelineRunResult:
     alignment_summary_csv_path: Path | None
     pipeline_manifest_path: Path
     pipeline_state_path: Path
+
+
+@dataclass(frozen=True)
+class PipelineStageState:
+    stage_name: str
+    status: str
+    config_hash: str
+    inputs: dict[str, Any] = field(default_factory=dict)
+    outputs: dict[str, Any] = field(default_factory=dict)
+    created_at_utc: str = ""
+    updated_at_utc: str = ""
+    error_message: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class PipelineRunManifest:
+    run_id: str
+    dataset_id: str
+    stage_order: tuple[str, ...]
+    local_run_root: str
+    drive_run_root: str | None
+    config_snapshot_path: str
+    created_at_utc: str
+    updated_at_utc: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)

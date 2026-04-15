@@ -6,11 +6,113 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 from predictive_circuit_coding.training.contracts import CandidateTokenRecord, FrozenTokenRecord
 
 
 _ScoredHeapEntry = tuple[float, int, dict[str, Any]]
+
+
+def pooled_features_from_tokens(tokens: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
+    mask = token_mask.to(dtype=tokens.dtype).unsqueeze(-1)
+    token_counts = mask.sum(dim=1).clamp_min(1.0)
+    return (tokens * mask).sum(dim=1) / token_counts
+
+
+def candidate_centroids(
+    candidates: tuple[Any, ...] | list[Any],
+    *,
+    require_non_noise: bool = False,
+    empty_message: str = "Discovery artifact does not contain any non-noise candidate clusters to validate.",
+) -> list[torch.Tensor]:
+    grouped: dict[int, list[torch.Tensor]] = {}
+    for candidate in candidates:
+        cluster_id = int(candidate["cluster_id"] if isinstance(candidate, dict) else candidate.cluster_id)
+        if cluster_id == -1:
+            continue
+        embedding = candidate["embedding"] if isinstance(candidate, dict) else candidate.embedding
+        grouped.setdefault(cluster_id, []).append(torch.tensor(embedding, dtype=torch.float32))
+    if require_non_noise and not grouped:
+        raise ValueError(empty_message)
+    return [torch.stack(values, dim=0).mean(dim=0) for _, values in sorted(grouped.items())]
+
+
+def window_similarity_scores(
+    *,
+    tokens: torch.Tensor,
+    token_mask: torch.Tensor,
+    centroids: list[torch.Tensor],
+    require_centroids: bool = False,
+) -> torch.Tensor:
+    if tokens.numel() == 0 or token_mask.numel() == 0:
+        return torch.empty((0,), dtype=torch.float32)
+    if not centroids:
+        if require_centroids:
+            raise ValueError("Cannot compute motif similarity without at least one candidate centroid.")
+        return torch.zeros((tokens.shape[0],), dtype=torch.float32)
+    centroid_tensor = torch.stack(
+        [centroid / centroid.norm().clamp_min(1.0e-8) for centroid in centroids],
+        dim=0,
+    )
+    scores = torch.empty((tokens.shape[0],), dtype=torch.float32)
+    for start in range(0, tokens.shape[0], 512):
+        end = min(start + 512, tokens.shape[0])
+        chunk = tokens[start:end]
+        chunk_mask = token_mask[start:end].to(dtype=torch.bool)
+        normalized_chunk = chunk / chunk.norm(dim=-1, keepdim=True).clamp_min(1.0e-8)
+        chunk_sims = torch.einsum("wtd,cd->wtc", normalized_chunk, centroid_tensor)
+        chunk_sims = chunk_sims.masked_fill(~chunk_mask.unsqueeze(-1), float("-inf"))
+        chunk_scores = chunk_sims.amax(dim=(1, 2)).to(dtype=torch.float32)
+        scores[start:end] = torch.where(chunk_mask.any(dim=1), chunk_scores, torch.zeros_like(chunk_scores))
+    return scores
+
+
+def held_out_similarity_summary(
+    *,
+    labels: torch.Tensor,
+    window_session_ids: tuple[str, ...],
+    window_scores: torch.Tensor,
+    missing_class_failure_reason: str | None = None,
+    missing_class_error_message: str | None = None,
+    include_comparison_available: bool = False,
+) -> dict[str, Any]:
+    positive_count = int((labels > 0.0).sum().item())
+    negative_count = int((labels <= 0.0).sum().item())
+    if positive_count <= 0 or negative_count <= 0:
+        if missing_class_failure_reason is not None:
+            return {
+                "window_roc_auc": None,
+                "window_pr_auc": None,
+                "positive_window_count": positive_count,
+                "negative_window_count": negative_count,
+                "per_session_roc_auc": {},
+                "comparison_available": False,
+                "failure_reason": str(missing_class_failure_reason),
+            }
+        message = missing_class_error_message or (
+            "Held-out motif similarity validation requires both positive and negative windows in the held-out subset."
+        )
+        raise ValueError(message)
+    labels_np = labels.detach().cpu().numpy()
+    scores_np = window_scores.detach().cpu().numpy()
+    per_session_roc_auc: dict[str, float] = {}
+    for session_id in sorted(set(window_session_ids)):
+        indices = [index for index, value in enumerate(window_session_ids) if value == session_id]
+        session_labels = labels_np[indices]
+        if len({int(value) for value in session_labels.tolist()}) < 2:
+            continue
+        per_session_roc_auc[session_id] = float(roc_auc_score(session_labels, scores_np[indices]))
+    summary: dict[str, Any] = {
+        "window_roc_auc": float(roc_auc_score(labels_np, scores_np)),
+        "window_pr_auc": float(average_precision_score(labels_np, scores_np)),
+        "positive_window_count": positive_count,
+        "negative_window_count": negative_count,
+        "per_session_roc_auc": per_session_roc_auc,
+    }
+    if include_comparison_available:
+        summary["comparison_available"] = True
+    return summary
 
 
 def score_token_records(

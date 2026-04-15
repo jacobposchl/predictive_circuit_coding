@@ -21,6 +21,10 @@ from predictive_circuit_coding.discovery import (
     write_discovery_cluster_report_json,
     write_discovery_coverage_summary,
 )
+from predictive_circuit_coding.discovery.reporting import (
+    discovery_cluster_report_paths,
+    discovery_coverage_summary_path,
+)
 from predictive_circuit_coding.training import load_experiment_config
 from predictive_circuit_coding.training.logging import StageLogger
 
@@ -40,19 +44,6 @@ def _default_output_path(checkpoint_path: str | Path, split_name: str) -> Path:
     return checkpoint.with_name(f"{checkpoint.stem}_{split_name}_discovery.json")
 
 
-def _cluster_report_paths(discovery_output_path: str | Path) -> tuple[Path, Path]:
-    output = Path(discovery_output_path)
-    return (
-        output.with_name(f"{output.stem}_cluster_summary.json"),
-        output.with_name(f"{output.stem}_cluster_summary.csv"),
-    )
-
-
-def _coverage_summary_path(discovery_output_path: str | Path) -> Path:
-    output = Path(discovery_output_path)
-    return output.with_name(f"{output.stem}_decode_coverage.json")
-
-
 def _run(args: argparse.Namespace) -> int:
     console = get_cli_console()
     config = load_experiment_config(args.config)
@@ -65,7 +56,7 @@ def _run(args: argparse.Namespace) -> int:
         dataset_id=config.dataset_id,
     )
     output_path = Path(args.output) if args.output else _default_output_path(checkpoint_path, args.split)
-    coverage_summary_path = _coverage_summary_path(output_path)
+    coverage_summary_path = discovery_coverage_summary_path(output_path)
     collection = prepare_discovery_collection(
         experiment_config=config,
         data_config_path=args.data_config,
@@ -98,7 +89,7 @@ def _run(args: argparse.Namespace) -> int:
     artifact = result.artifact
     write_discovery_artifact(artifact, output_path)
     cluster_report = build_discovery_cluster_report(artifact)
-    cluster_report_json, cluster_report_csv = _cluster_report_paths(output_path)
+    cluster_report_json, cluster_report_csv = discovery_cluster_report_paths(output_path)
     write_discovery_cluster_report_json(cluster_report, cluster_report_json)
     write_discovery_cluster_report_csv(cluster_report, cluster_report_csv)
     print_artifact(console, label="Decode coverage summary", path=coverage_summary_path)

@@ -7,9 +7,13 @@ from pathlib import Path
 import shutil
 from typing import Any, Iterable
 
-from predictive_circuit_coding.benchmarks.contracts import PipelineRunManifest, PipelineStageState
 from predictive_circuit_coding.utils.notebook_progress import NotebookProgressUI, NotebookStageSummary
-from predictive_circuit_coding.workflows.contracts import PIPELINE_STAGE_ORDER, PipelinePaths
+from predictive_circuit_coding.workflows.contracts import (
+    PIPELINE_STAGE_ORDER,
+    PipelinePaths,
+    PipelineRunManifest,
+    PipelineStageState,
+)
 
 
 def utc_now() -> str:

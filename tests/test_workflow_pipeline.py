@@ -13,7 +13,9 @@ from predictive_circuit_coding.workflows import (
     load_pipeline_config,
     run_pipeline_from_config,
 )
-from predictive_circuit_coding.workflows.pipeline import PipelinePaths, run_training_stage
+from predictive_circuit_coding.workflows import state as workflow_state
+from predictive_circuit_coding.workflows.contracts import PipelinePaths
+from predictive_circuit_coding.workflows.stages import run_training_stage
 
 
 def _write_prep_config(tmp_path: Path) -> Path:
@@ -420,28 +422,10 @@ def test_training_stage_records_running_then_failed(tmp_path: Path, monkeypatch)
     paths = _make_paths(tmp_path)
     observed_statuses: list[str] = []
 
-    monkeypatch.setattr(
-        "predictive_circuit_coding.workflows.pipeline._write_runtime_experiment_config",
-        lambda **kwargs: paths.runtime_experiment_config_path,
-    )
-    monkeypatch.setattr(
-        "predictive_circuit_coding.workflows.pipeline.load_experiment_config",
-        lambda path: SimpleNamespace(
-            splits=SimpleNamespace(train="train", valid="valid"),
-            artifacts=SimpleNamespace(
-                summary_path=tmp_path / "training_summary.json",
-                checkpoint_dir=tmp_path / "checkpoints",
-                checkpoint_prefix="pcc_test",
-            ),
-        ),
-    )
-
     def fake_train_model(**kwargs):
         payload = json.loads(paths.pipeline_state_path.read_text(encoding="utf-8"))
         observed_statuses.append(payload["stages"]["train"]["status"])
         raise RuntimeError("boom")
-
-    monkeypatch.setattr("predictive_circuit_coding.workflows.pipeline.train_model", fake_train_model)
 
     with pytest.raises(RuntimeError, match="boom"):
         run_training_stage(
@@ -452,6 +436,19 @@ def test_training_stage_records_running_then_failed(tmp_path: Path, monkeypatch)
             step_log_every=3,
             run_stage_train=True,
             progress_ui=None,
+            json_hash_func=workflow_state.json_hash,
+            path_identity_func=workflow_state.path_identity,
+            write_runtime_experiment_config_func=lambda **kwargs: paths.runtime_experiment_config_path,
+            load_experiment_config_func=lambda path: SimpleNamespace(
+                splits=SimpleNamespace(train="train", valid="valid"),
+                artifacts=SimpleNamespace(
+                    summary_path=tmp_path / "training_summary.json",
+                    checkpoint_dir=tmp_path / "checkpoints",
+                    checkpoint_prefix="pcc_test",
+                ),
+            ),
+            resolve_notebook_checkpoint_func=lambda **kwargs: tmp_path / "best.pt",
+            train_model_func=fake_train_model,
         )
 
     payload = json.loads(paths.pipeline_state_path.read_text(encoding="utf-8"))

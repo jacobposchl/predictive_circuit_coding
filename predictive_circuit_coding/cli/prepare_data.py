@@ -104,17 +104,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     materialize_selection.add_argument("--data-config", required=True, help="Path to a preparation YAML config.")
     materialize_selection.set_defaults(func=_run_materialize_runtime_selection)
 
-    prepare_allen_legacy = subparsers.add_parser(
-        "prepare-allen-neuropixels",
-        help="Deprecated alias for prepare-allen-visual-behavior-neuropixels.",
-    )
-    prepare_allen_legacy.add_argument("--config", required=True, help="Path to a YAML preparation config.")
-    prepare_allen_legacy.add_argument("--session-ids-file", default=None, help="Optional text file containing one session id per line.")
-    prepare_allen_legacy.add_argument("--max-sessions", type=int, default=None, help="Optional cap for subset runs.")
-    prepare_allen_legacy.add_argument("--cleanup-raw", action="store_true", help="Delete the Allen raw cache after successful processing.")
-    prepare_allen_legacy.add_argument("--reprocess", action="store_true", help="Rebuild processed session files even if they already exist.")
-    prepare_allen_legacy.add_argument("--redownload", action="store_true", help="Force AllenSDK to redownload source session files when supported.")
-    prepare_allen_legacy.set_defaults(func=_run_prepare_allen_visual_behavior_neuropixels)
     return parser.parse_args(argv)
 
 

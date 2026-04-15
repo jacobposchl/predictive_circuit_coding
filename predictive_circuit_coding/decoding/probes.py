@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
+import random
+from typing import Any
 
 import torch
+from sklearn.metrics import average_precision_score, roc_auc_score
 from torch import nn
 from torch.nn import functional as F
 
@@ -158,4 +161,53 @@ def evaluate_additive_probe_features(
         tokens=tokens,
         token_mask=token_mask,
         labels=labels,
+    )
+
+
+def probe_logits_from_features(*, state_dict: dict[str, Any], features: torch.Tensor) -> torch.Tensor:
+    weight = state_dict["linear.weight"].detach().cpu().reshape(-1).to(dtype=torch.float32)
+    bias = float(state_dict["linear.bias"].detach().cpu().item())
+    feature_tensor = features.detach().cpu().to(dtype=torch.float32)
+    return (feature_tensor @ weight) + bias
+
+
+def probe_metrics_from_logits(*, sample_logits: torch.Tensor, labels: torch.Tensor) -> dict[str, float | None]:
+    probabilities = torch.sigmoid(sample_logits)
+    predictions = (probabilities >= 0.5).to(dtype=labels.dtype)
+    accuracy = float((predictions == labels).to(dtype=torch.float32).mean().item())
+    bce = float(F.binary_cross_entropy_with_logits(sample_logits, labels).item())
+    labels_np = labels.detach().cpu().numpy()
+    probabilities_np = probabilities.detach().cpu().numpy()
+    roc_auc = None
+    pr_auc = None
+    if len({int(value) for value in labels_np.tolist()}) >= 2:
+        roc_auc = float(roc_auc_score(labels_np, probabilities_np))
+        pr_auc = float(average_precision_score(labels_np, probabilities_np))
+    return {
+        "probe_accuracy": accuracy,
+        "probe_bce": bce,
+        "positive_rate": float(labels.mean().item()),
+        "probe_roc_auc": roc_auc,
+        "probe_pr_auc": pr_auc,
+    }
+
+
+def fit_shuffled_probe_features(
+    *,
+    features: torch.Tensor,
+    labels: torch.Tensor,
+    epochs: int,
+    learning_rate: float,
+    seed: int,
+    label_name: str,
+) -> ProbeFitResult:
+    permutation = list(range(len(labels)))
+    random.Random(int(seed)).shuffle(permutation)
+    shuffled_labels = labels.clone()[torch.tensor(permutation, dtype=torch.long)]
+    return fit_additive_probe_features(
+        features=features,
+        labels=shuffled_labels,
+        epochs=epochs,
+        learning_rate=learning_rate,
+        label_name=label_name,
     )

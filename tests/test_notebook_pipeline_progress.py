@@ -4,8 +4,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from predictive_circuit_coding.benchmarks.contracts import BenchmarkArmSpec, BenchmarkTaskSpec
-from predictive_circuit_coding.workflows.pipeline import (
-    PipelinePaths,
+from predictive_circuit_coding.workflows import state as workflow_state
+from predictive_circuit_coding.workflows.contracts import PipelinePaths
+from predictive_circuit_coding.workflows.stages import (
     run_evaluation_stage,
     run_refinement_stage,
     run_training_stage,
@@ -59,26 +60,21 @@ def _make_paths(tmp_path: Path) -> PipelinePaths:
     )
 
 
+def _runtime_config(tmp_path: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        splits=SimpleNamespace(train="train", valid="valid"),
+        artifacts=SimpleNamespace(
+            summary_path=tmp_path / "training_summary.json",
+            checkpoint_dir=tmp_path / "checkpoints",
+            checkpoint_prefix="pcc_test",
+        ),
+    )
+
+
 def test_prepare_training_stage_passes_training_progress_callback(tmp_path: Path, monkeypatch):
     paths = _make_paths(tmp_path)
     progress_ui = RecordingProgressUI()
     captured: dict[str, object] = {}
-
-    monkeypatch.setattr(
-        "predictive_circuit_coding.workflows.pipeline._write_runtime_experiment_config",
-        lambda **kwargs: paths.runtime_experiment_config_path,
-    )
-    monkeypatch.setattr(
-        "predictive_circuit_coding.workflows.pipeline.load_experiment_config",
-        lambda path: SimpleNamespace(
-            splits=SimpleNamespace(train="train", valid="valid"),
-            artifacts=SimpleNamespace(
-                summary_path=tmp_path / "training_summary.json",
-                checkpoint_dir=tmp_path / "checkpoints",
-                checkpoint_prefix="pcc_test",
-            ),
-        ),
-    )
 
     def fake_train_model(**kwargs):
         captured["progress_callback"] = kwargs["progress_callback"]
@@ -89,8 +85,6 @@ def test_prepare_training_stage_passes_training_progress_callback(tmp_path: Path
             history_csv_path=tmp_path / "training_history.csv",
         )
 
-    monkeypatch.setattr("predictive_circuit_coding.workflows.pipeline.train_model", fake_train_model)
-
     run_training_stage(
         paths=paths,
         states={},
@@ -99,6 +93,12 @@ def test_prepare_training_stage_passes_training_progress_callback(tmp_path: Path
         step_log_every=1,
         run_stage_train=True,
         progress_ui=progress_ui,
+        json_hash_func=workflow_state.json_hash,
+        path_identity_func=workflow_state.path_identity,
+        write_runtime_experiment_config_func=lambda **kwargs: paths.runtime_experiment_config_path,
+        load_experiment_config_func=lambda path: _runtime_config(tmp_path),
+        resolve_notebook_checkpoint_func=lambda **kwargs: tmp_path / "best.pt",
+        train_model_func=fake_train_model,
     )
 
     assert captured["progress_callback"] is progress_ui.training_callback
@@ -112,23 +112,9 @@ def test_evaluation_stage_passes_evaluation_progress_callback(tmp_path: Path, mo
     progress_ui = RecordingProgressUI()
     captured_callbacks: list[object] = []
 
-    monkeypatch.setattr(
-        "predictive_circuit_coding.workflows.pipeline.load_experiment_config",
-        lambda path: SimpleNamespace(splits=SimpleNamespace(valid="valid", test="test")),
-    )
-
     def fake_evaluate_checkpoint_on_split(**kwargs):
         captured_callbacks.append(kwargs["progress_callback"])
         return SimpleNamespace(metrics={"predictive_improvement": 0.5}, losses={"predictive_loss": 1.0})
-
-    monkeypatch.setattr(
-        "predictive_circuit_coding.workflows.pipeline.evaluate_checkpoint_on_split",
-        fake_evaluate_checkpoint_on_split,
-    )
-    monkeypatch.setattr(
-        "predictive_circuit_coding.workflows.pipeline.write_evaluation_summary",
-        lambda summary, path: Path(path).write_text("{}", encoding="utf-8"),
-    )
 
     run_evaluation_stage(
         paths=paths,
@@ -138,6 +124,11 @@ def test_evaluation_stage_passes_evaluation_progress_callback(tmp_path: Path, mo
         checkpoint_path=tmp_path / "best.pt",
         run_stage_evaluate=True,
         progress_ui=progress_ui,
+        json_hash_func=workflow_state.json_hash,
+        path_identity_func=workflow_state.path_identity,
+        load_experiment_config_func=lambda path: SimpleNamespace(splits=SimpleNamespace(valid="valid", test="test")),
+        evaluate_checkpoint_on_split_func=fake_evaluate_checkpoint_on_split,
+        write_evaluation_summary_func=lambda summary, path: Path(path).write_text("{}", encoding="utf-8"),
     )
 
     assert captured_callbacks == [progress_ui.evaluation_callback, progress_ui.evaluation_callback]
@@ -151,25 +142,11 @@ def test_refinement_stage_passes_benchmark_progress_callback(tmp_path: Path, mon
     progress_ui = RecordingProgressUI()
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(
-        "predictive_circuit_coding.workflows.pipeline.load_experiment_config",
-        lambda path: SimpleNamespace(),
-    )
-
     def fake_run_motif_benchmark_matrix(**kwargs):
         captured["progress_callback"] = kwargs["progress_callback"]
         return (
             SimpleNamespace(summary={"task_name": "stimulus_change", "arm_name": "encoder_raw", "status": "ok"}),
         )
-
-    monkeypatch.setattr(
-        "predictive_circuit_coding.workflows.pipeline.run_motif_benchmark_matrix",
-        fake_run_motif_benchmark_matrix,
-    )
-    monkeypatch.setattr(
-        "predictive_circuit_coding.workflows.pipeline.write_summary_rows",
-        lambda rows, output_json_path, output_csv_path, root_key: (Path(output_json_path), Path(output_csv_path)),
-    )
 
     run_refinement_stage(
         paths=paths,
@@ -184,6 +161,14 @@ def test_refinement_stage_passes_benchmark_progress_callback(tmp_path: Path, mon
         session_holdout_seed=7,
         debug_retain_intermediates=False,
         progress_ui=progress_ui,
+        json_hash_func=workflow_state.json_hash,
+        path_identity_func=workflow_state.path_identity,
+        load_experiment_config_func=lambda path: SimpleNamespace(),
+        run_motif_benchmark_matrix_func=fake_run_motif_benchmark_matrix,
+        write_summary_rows_func=lambda rows, output_json_path, output_csv_path, root_key: (
+            Path(output_json_path),
+            Path(output_csv_path),
+        ),
     )
 
     assert captured["progress_callback"] is progress_ui.benchmark_callback
@@ -195,22 +180,6 @@ def test_refinement_stage_passes_benchmark_progress_callback(tmp_path: Path, mon
 def test_reused_training_stage_advances_pipeline(tmp_path: Path, monkeypatch):
     paths = _make_paths(tmp_path)
     progress_ui = RecordingProgressUI()
-    monkeypatch.setattr("predictive_circuit_coding.workflows.pipeline._json_hash", lambda payload: "same")
-    monkeypatch.setattr(
-        "predictive_circuit_coding.workflows.pipeline._write_runtime_experiment_config",
-        lambda **kwargs: paths.runtime_experiment_config_path,
-    )
-    monkeypatch.setattr(
-        "predictive_circuit_coding.workflows.pipeline.load_experiment_config",
-        lambda path: SimpleNamespace(
-            splits=SimpleNamespace(train="train", valid="valid"),
-            artifacts=SimpleNamespace(
-                summary_path=tmp_path / "training_summary.json",
-                checkpoint_dir=tmp_path / "checkpoints",
-                checkpoint_prefix="pcc_test",
-            ),
-        ),
-    )
     states = {
         "train": {
             "status": "complete",
@@ -240,6 +209,12 @@ def test_reused_training_stage_advances_pipeline(tmp_path: Path, monkeypatch):
         step_log_every=1,
         run_stage_train=True,
         progress_ui=progress_ui,
+        json_hash_func=lambda payload: "same",
+        path_identity_func=workflow_state.path_identity,
+        write_runtime_experiment_config_func=lambda **kwargs: paths.runtime_experiment_config_path,
+        load_experiment_config_func=lambda path: _runtime_config(tmp_path),
+        resolve_notebook_checkpoint_func=lambda **kwargs: tmp_path / "best.pt",
+        train_model_func=lambda **kwargs: None,
     )
 
     assert progress_ui.started == []

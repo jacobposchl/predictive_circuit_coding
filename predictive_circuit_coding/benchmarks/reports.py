@@ -28,6 +28,22 @@ def write_summary_rows(
     return json_path, csv_path
 
 
+def write_csv_rows(rows: list[dict[str, Any]], path: str | Path) -> Path:
+    csv_path = Path(path)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = sorted({key for row in rows for key in row.keys()}) if rows else []
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return csv_path
+
+
+def write_single_row_csv(row: dict[str, Any], path: str | Path) -> Path:
+    return write_csv_rows([row], path)
+
+
 def write_single_row_summary(
     row: dict[str, Any],
     *,

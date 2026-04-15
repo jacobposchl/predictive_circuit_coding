@@ -2,14 +2,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
-import random
 import shutil
 from pathlib import Path
 from typing import Any
 from typing import Callable
 
 import torch
-from sklearn.metrics import average_precision_score, roc_auc_score
 
 from predictive_circuit_coding.benchmarks.contracts import (
     BenchmarkArmSpec,
@@ -37,7 +35,17 @@ from predictive_circuit_coding.decoding import (
     fit_session_whitening_transforms,
     summarize_neighbor_geometry,
 )
-from predictive_circuit_coding.decoding.scoring import select_candidate_tokens_from_shards
+from predictive_circuit_coding.decoding.probes import (
+    fit_shuffled_probe_features,
+    probe_logits_from_features,
+    probe_metrics_from_logits,
+)
+from predictive_circuit_coding.decoding.scoring import (
+    candidate_centroids,
+    held_out_similarity_summary as summarize_held_out_similarity,
+    select_candidate_tokens_from_shards,
+    window_similarity_scores,
+)
 from predictive_circuit_coding.discovery.clustering import cluster_candidate_tokens
 from predictive_circuit_coding.discovery.reporting import (
     build_discovery_cluster_report,
@@ -55,7 +63,6 @@ from predictive_circuit_coding.training.contracts import CandidateTokenRecord, D
 from predictive_circuit_coding.utils.notebook_progress import BenchmarkProgressEvent
 
 
-_SIMILARITY_CHUNK_SIZE = 512
 BenchmarkProgressCallback = Callable[[BenchmarkProgressEvent], None]
 
 
@@ -99,126 +106,6 @@ def _task_config(experiment_config: ExperimentConfig, task: BenchmarkTaskSpec) -
             target_label_match_value=task.target_label_match_value,
         ),
     )
-
-
-def _probe_logits_from_features(*, state_dict: dict[str, Any], features: torch.Tensor) -> torch.Tensor:
-    weight = state_dict["linear.weight"].detach().cpu().reshape(-1).to(dtype=torch.float32)
-    bias = float(state_dict["linear.bias"].detach().cpu().item())
-    feature_tensor = features.detach().cpu().to(dtype=torch.float32)
-    return (feature_tensor @ weight) + bias
-
-
-def _probe_metrics_from_logits(*, sample_logits: torch.Tensor, labels: torch.Tensor) -> dict[str, float | None]:
-    probabilities = torch.sigmoid(sample_logits)
-    predictions = (probabilities >= 0.5).to(dtype=labels.dtype)
-    accuracy = float((predictions == labels).to(dtype=torch.float32).mean().item())
-    bce = float(torch.nn.functional.binary_cross_entropy_with_logits(sample_logits, labels).item())
-    labels_np = labels.detach().cpu().numpy()
-    probabilities_np = probabilities.detach().cpu().numpy()
-    roc_auc = None
-    pr_auc = None
-    if len({int(value) for value in labels_np.tolist()}) >= 2:
-        roc_auc = float(roc_auc_score(labels_np, probabilities_np))
-        pr_auc = float(average_precision_score(labels_np, probabilities_np))
-    return {
-        "probe_accuracy": accuracy,
-        "probe_bce": bce,
-        "probe_roc_auc": roc_auc,
-        "probe_pr_auc": pr_auc,
-        "positive_rate": float(labels.mean().item()),
-    }
-
-
-def _fit_shuffled_probe_features(
-    *,
-    features: torch.Tensor,
-    labels: torch.Tensor,
-    epochs: int,
-    learning_rate: float,
-    seed: int,
-    label_name: str,
-):
-    shuffled_labels = labels.clone()
-    permutation = list(range(len(shuffled_labels)))
-    random.Random(int(seed)).shuffle(permutation)
-    shuffled_labels = shuffled_labels[torch.tensor(permutation, dtype=torch.long)]
-    return fit_additive_probe_features(
-        features=features,
-        labels=shuffled_labels,
-        epochs=epochs,
-        learning_rate=learning_rate,
-        label_name=label_name,
-    )
-
-
-def _candidate_centroids(candidates: tuple[CandidateTokenRecord, ...]) -> list[torch.Tensor]:
-    grouped: dict[int, list[torch.Tensor]] = {}
-    for candidate in candidates:
-        cluster_id = int(candidate.cluster_id)
-        if cluster_id == -1:
-            continue
-        grouped.setdefault(cluster_id, []).append(torch.tensor(candidate.embedding, dtype=torch.float32))
-    return [torch.stack(values, dim=0).mean(dim=0) for _, values in sorted(grouped.items())]
-
-
-def _window_similarity_scores(
-    *,
-    tokens: torch.Tensor,
-    token_mask: torch.Tensor,
-    centroids: list[torch.Tensor],
-) -> torch.Tensor:
-    if tokens.numel() == 0 or token_mask.numel() == 0:
-        return torch.empty((0,), dtype=torch.float32)
-    if not centroids:
-        return torch.zeros((tokens.shape[0],), dtype=torch.float32)
-    centroid_tensor = torch.stack(
-        [centroid / centroid.norm().clamp_min(1.0e-8) for centroid in centroids],
-        dim=0,
-    )
-    scores = torch.empty((tokens.shape[0],), dtype=torch.float32)
-    for start in range(0, tokens.shape[0], _SIMILARITY_CHUNK_SIZE):
-        end = min(start + _SIMILARITY_CHUNK_SIZE, tokens.shape[0])
-        chunk = tokens[start:end]
-        normalized_chunk = chunk / chunk.norm(dim=-1, keepdim=True).clamp_min(1.0e-8)
-        chunk_sims = torch.einsum("wtd,cd->wtc", normalized_chunk, centroid_tensor)
-        chunk_sims = chunk_sims.masked_fill(~token_mask[start:end].unsqueeze(-1), float("-inf"))
-        scores[start:end] = chunk_sims.amax(dim=(1, 2)).to(dtype=torch.float32)
-    return scores
-
-
-def _held_out_similarity_summary(
-    *,
-    labels: torch.Tensor,
-    window_session_ids: tuple[str, ...],
-    window_scores: torch.Tensor,
-) -> dict[str, Any]:
-    labels_np = labels.detach().cpu().numpy()
-    scores_np = window_scores.detach().cpu().numpy()
-    if len({int(value) for value in labels_np.tolist()}) < 2:
-        return {
-            "window_roc_auc": None,
-            "window_pr_auc": None,
-            "positive_window_count": int((labels > 0.0).sum().item()),
-            "negative_window_count": int((labels <= 0.0).sum().item()),
-            "per_session_roc_auc": {},
-            "comparison_available": False,
-            "failure_reason": "held_out_split_missing_one_class",
-        }
-    per_session_roc_auc: dict[str, float] = {}
-    for session_id in sorted(set(window_session_ids)):
-        indices = [index for index, value in enumerate(window_session_ids) if value == session_id]
-        session_labels = labels_np[indices]
-        if len({int(value) for value in session_labels.tolist()}) < 2:
-            continue
-        per_session_roc_auc[session_id] = float(roc_auc_score(session_labels, scores_np[indices]))
-    return {
-        "window_roc_auc": float(roc_auc_score(labels_np, scores_np)),
-        "window_pr_auc": float(average_precision_score(labels_np, scores_np)),
-        "positive_window_count": int((labels > 0.0).sum().item()),
-        "negative_window_count": int((labels <= 0.0).sum().item()),
-        "per_session_roc_auc": per_session_roc_auc,
-        "comparison_available": True,
-    }
 
 
 def _encoder_arm_metadata(arm: BenchmarkArmSpec) -> dict[str, str | bool]:
@@ -1092,7 +979,7 @@ def run_motif_benchmark_matrix(
                             message="fit shuffled probe",
                         ),
                     )
-                    shuffled_probe = _fit_shuffled_probe_features(
+                    shuffled_probe = fit_shuffled_probe_features(
                         features=transformed_discovery.pooled_features,
                         labels=transformed_discovery.labels,
                         epochs=task_config.discovery.probe_epochs,
@@ -1266,15 +1153,15 @@ def run_motif_benchmark_matrix(
                         cluster_quality_summary=cluster_quality_summary,
                     )
                     cluster_report = build_discovery_cluster_report(artifact)
-                    test_logits = _probe_logits_from_features(
+                    test_logits = probe_logits_from_features(
                         state_dict=fit_probe.state_dict,
                         features=transformed_test.pooled_features,
                     )
-                    test_metrics = _probe_metrics_from_logits(
+                    test_metrics = probe_metrics_from_logits(
                         sample_logits=test_logits,
                         labels=transformed_test.labels,
                     )
-                    centroids = _candidate_centroids(clustered_candidates)
+                    centroids = candidate_centroids(clustered_candidates)
                     if centroids:
                         _maybe_emit_benchmark_progress(
                             progress_callback,
@@ -1289,14 +1176,16 @@ def run_motif_benchmark_matrix(
                                 message="score held-out motif similarity",
                             ),
                         )
-                        held_out_similarity_summary = _held_out_similarity_summary(
+                        held_out_similarity_summary = summarize_held_out_similarity(
                             labels=transformed_test.labels,
                             window_session_ids=transformed_test.window_session_ids,
-                            window_scores=_window_similarity_scores(
+                            window_scores=window_similarity_scores(
                                 tokens=similarity_test_tokens,
                                 token_mask=transformed_test.token_mask,
                                 centroids=centroids,
                             ),
+                            missing_class_failure_reason="held_out_split_missing_one_class",
+                            include_comparison_available=True,
                         )
                         _maybe_emit_benchmark_progress(
                             progress_callback,

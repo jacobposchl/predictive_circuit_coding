@@ -20,7 +20,7 @@ from predictive_circuit_coding.data import (
     write_split_manifest,
     write_temporaldata_session,
 )
-from predictive_circuit_coding.workflows.pipeline import _ensure_local_prepared_sessions
+from predictive_circuit_coding.workflows.runtime import ensure_local_prepared_sessions
 
 
 def _write_prep_config(tmp_path: Path, *, cache_root: Path | None = None) -> Path:
@@ -541,7 +541,7 @@ def test_ensure_local_prepared_sessions_stages_from_source_root(tmp_path: Path):
             regions=["VISp", "LP"],
         )
 
-    _ensure_local_prepared_sessions(
+    ensure_local_prepared_sessions(
         data_config_path=prep_config_path,
         source_dataset_root=source_root,
         stage_prepared_sessions_locally=True,

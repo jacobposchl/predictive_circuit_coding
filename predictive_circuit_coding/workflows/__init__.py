@@ -6,15 +6,16 @@ from predictive_circuit_coding.workflows.config import (
     build_pipeline_preflight,
     load_pipeline_config,
 )
+from predictive_circuit_coding.workflows.contracts import PipelinePaths, PipelineRunResult
 from predictive_circuit_coding.workflows.pipeline import (
-    PipelinePaths,
-    PipelineRunResult,
     resume_pipeline,
+    run_pipeline,
+    run_pipeline_from_config,
+)
+from predictive_circuit_coding.workflows.stages import (
     run_alignment_diagnostic_stage,
     run_evaluation_stage,
     run_final_reports_stage,
-    run_pipeline,
-    run_pipeline_from_config,
     run_refinement_stage,
     run_training_stage,
 )

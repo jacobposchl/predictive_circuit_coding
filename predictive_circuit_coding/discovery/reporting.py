@@ -8,6 +8,19 @@ from predictive_circuit_coding.training.contracts import CandidateTokenRecord, D
 from predictive_circuit_coding.training.contracts import write_json_payload
 
 
+def discovery_cluster_report_paths(discovery_output_path: str | Path) -> tuple[Path, Path]:
+    output = Path(discovery_output_path)
+    return (
+        output.with_name(f"{output.stem}_cluster_summary.json"),
+        output.with_name(f"{output.stem}_cluster_summary.csv"),
+    )
+
+
+def discovery_coverage_summary_path(discovery_output_path: str | Path) -> Path:
+    output = Path(discovery_output_path)
+    return output.with_name(f"{output.stem}_decode_coverage.json")
+
+
 def _top_items(values: list[str], *, limit: int = 3) -> list[dict[str, object]]:
     counter = Counter(value for value in values if value)
     return [
