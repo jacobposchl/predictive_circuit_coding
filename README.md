@@ -69,9 +69,9 @@ Core configs:
 
 One-axis ablations:
 
-- `refined_recon000`: reconstruction weight set to `0.0`
+- `refined_recon000`: reconstruction-free variant retained for compatibility with earlier full-core comparisons
 - `refined_l2off`: token L2 normalization disabled
-- `refined_countnorm`: train-split `log1p` count normalization
+- `refined_countnorm`: train-split `log1p` count-normalized variant retained for compatibility with earlier full-core comparisons
 - `refined_cls`: per-patch population CLS tokens for pooled discovery features
 
 Pipeline configs:

@@ -85,7 +85,7 @@ Pipeline:
 - `pipeline_refined_debug.yaml`
 - `pipeline_refined_full.yaml`
 
-Short ablation configs use `extends` to inherit from the refined core config and override one axis.
+Short ablation configs use `extends` to inherit from the refined core config and override one axis. Some compatibility variants preserve earlier comparison names even when the current full-core defaults already include that setting.
 
 Pipeline task coverage:
 
@@ -94,10 +94,10 @@ Pipeline task coverage:
 
 ## Refinement Axes
 
-- Reconstruction: `reconstruction_weight: 0.05` in core, `0.0` in the reconstruction-free ablation
+- Reconstruction: full-core training uses `reconstruction_weight: 0.0`; the debug config still keeps a lightweight reconstruction term for quick smoke runs
 - Reconstruction target mode: `window_zscore` in the core config
 - Token geometry: model token L2 normalization plus post-hoc token normalization arm
-- Count normalization: optional train-split `log1p_train_zscore`
+- Count normalization: full-core training uses train-split `log1p_train_zscore`
 - Pooling: mean tokens by default, optional per-patch population CLS tokens
 - Discovery geometry: raw, token-normalized, probe-weighted, and oracle-aligned diagnostic arms
 

@@ -52,8 +52,8 @@ data_runtime:
   include_optotagging: true
 
 count_normalization:
-  mode: none
-  stats_path:
+  mode: log1p_train_zscore
+  stats_path: ../../artifacts/count_normalization_stats_full.json
 
 model:
   d_model: 256
@@ -71,7 +71,7 @@ objective:
   continuation_baseline_type: previous_patch
   predictive_loss: mse
   reconstruction_loss: mse
-  reconstruction_weight: 0.05
+  reconstruction_weight: 0.0
   reconstruction_target_mode: window_zscore
   exclude_final_prediction_patch: true
 
@@ -79,12 +79,12 @@ optimization:
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4
   grad_clip_norm: 1.0
-  batch_size: 4
+  batch_size: 16
   scheduler_type: cosine
   scheduler_warmup_steps: 0
 
 training:
-  num_epochs: 8
+  num_epochs: 32
   train_steps_per_epoch: 128
   validation_steps: 16
   checkpoint_every_epochs: 1
