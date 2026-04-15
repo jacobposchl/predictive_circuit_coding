@@ -6,11 +6,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from predictive_circuit_coding.benchmarks.config import load_notebook_pipeline_config
 from predictive_circuit_coding.benchmarks.run import _task_config, default_benchmark_task_specs, default_motif_arm_specs
 from predictive_circuit_coding.data import resolve_runtime_dataset_view
 from predictive_circuit_coding.discovery.run import prepare_discovery_collection
 from predictive_circuit_coding.training import ExperimentConfig, load_experiment_config
+from predictive_circuit_coding.workflows.config import load_pipeline_config
 from predictive_circuit_coding.windowing.dataset import split_session_ids
 
 
@@ -192,7 +192,7 @@ def verify_refinement_readiness(
     pipeline_config_path: str | Path,
     output_root: str | Path,
 ) -> RefinementVerificationResult:
-    pipeline_config = load_notebook_pipeline_config(pipeline_config_path)
+    pipeline_config = load_pipeline_config(pipeline_config_path)
     experiment_config = load_experiment_config(pipeline_config.experiment_config_path)
     issues: list[VerificationIssue] = []
     _check_refinement_config(experiment_config=experiment_config, pipeline_config=pipeline_config, issues=issues)

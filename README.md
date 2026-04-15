@@ -29,6 +29,8 @@ pcc-refine --config configs/pcc/predictive_circuit_coding_refined_debug.yaml --d
 
 pcc-validate --config configs/pcc/predictive_circuit_coding_refined_debug.yaml --data-config configs/pcc/allen_visual_behavior_neuropixels_local.yaml --checkpoint artifacts/checkpoints/pcc_refined_debug_best.pt --discovery-artifact artifacts/refinement/refinement/stimulus_change/encoder_raw/discovery_artifact.json --output artifacts/validation_summary.json
 
+pcc-run-pipeline --pipeline-config configs/pcc/pipeline_refined_debug.yaml
+
 pcc-verify-refinement --pipeline-config configs/pcc/pipeline_refined_debug.yaml --output-root artifacts/refinement_verification
 ```
 

@@ -21,14 +21,11 @@ pipeline:
 
 notebook_ui:
   enabled: true
-  progress_backend: tqdm
-  mode: clean_dashboard
-  log_mode: failures_only
   leave_pipeline_bar: true
-  leave_stage_bars: false
+  leave_stage_bars: true
   show_stage_summaries: true
   show_artifact_paths: compact
-  metric_snapshot_every_n:
+  metric_snapshot_every_n: 1
 
 tasks:
   motifs: [stimulus_change]

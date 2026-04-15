@@ -37,6 +37,7 @@ pcc-evaluate = "predictive_circuit_coding.cli.evaluate:main"
 pcc-discover = "predictive_circuit_coding.cli.discover:main"
 pcc-validate = "predictive_circuit_coding.cli.validate:main"
 pcc-refine = "predictive_circuit_coding.cli.refine:main"
+pcc-run-pipeline = "predictive_circuit_coding.cli.run_pipeline:main"
 pcc-preview-notebook-ui = "predictive_circuit_coding.cli.preview_notebook:main"
 pcc-verify-refinement = "predictive_circuit_coding.cli.verify_refinement:main"
 

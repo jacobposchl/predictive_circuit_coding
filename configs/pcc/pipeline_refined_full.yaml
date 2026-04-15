@@ -21,9 +21,6 @@ pipeline:
 
 notebook_ui:
   enabled: true
-  progress_backend: tqdm
-  mode: clean_dashboard
-  log_mode: failures_only
   leave_pipeline_bar: true
   leave_stage_bars: false
   show_stage_summaries: true

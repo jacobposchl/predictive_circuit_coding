@@ -4,11 +4,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from predictive_circuit_coding.benchmarks.contracts import BenchmarkArmSpec, BenchmarkTaskSpec
-from predictive_circuit_coding.benchmarks.pipeline import (
-    NotebookPipelinePaths,
-    prepare_or_restore_training_stage,
+from predictive_circuit_coding.workflows.pipeline import (
+    PipelinePaths,
+    run_evaluation_stage,
     run_refinement_stage,
-    run_standard_evaluation_stage,
+    run_training_stage,
 )
 
 
@@ -40,9 +40,9 @@ class RecordingProgressUI:
         return self.benchmark_callback
 
 
-def _make_paths(tmp_path: Path) -> NotebookPipelinePaths:
+def _make_paths(tmp_path: Path) -> PipelinePaths:
     local_run_root = tmp_path / "run_1"
-    return NotebookPipelinePaths(
+    return PipelinePaths(
         run_id="run_1",
         local_run_root=local_run_root,
         drive_run_root=None,
@@ -52,7 +52,7 @@ def _make_paths(tmp_path: Path) -> NotebookPipelinePaths:
         diagnostics_root=local_run_root / "diagnostics",
         reports_root=local_run_root / "reports",
         pipeline_root=local_run_root / "pipeline",
-        runtime_experiment_config_path=local_run_root / "pipeline" / "runtime_experiment.yaml",
+        runtime_experiment_config_path=local_run_root / "train" / "colab_runtime_experiment.yaml",
         pipeline_config_snapshot_path=local_run_root / "pipeline" / "pipeline_config_snapshot.yaml",
         pipeline_manifest_path=local_run_root / "pipeline" / "pipeline_manifest.json",
         pipeline_state_path=local_run_root / "pipeline" / "pipeline_state.json",
@@ -65,12 +65,19 @@ def test_prepare_training_stage_passes_training_progress_callback(tmp_path: Path
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
-        "predictive_circuit_coding.benchmarks.pipeline.prepare_notebook_runtime_context_from_experiment_config",
-        lambda **kwargs: SimpleNamespace(experiment_config_path=paths.runtime_experiment_config_path),
+        "predictive_circuit_coding.workflows.pipeline._write_runtime_experiment_config",
+        lambda **kwargs: paths.runtime_experiment_config_path,
     )
     monkeypatch.setattr(
-        "predictive_circuit_coding.benchmarks.pipeline.load_experiment_config",
-        lambda path: SimpleNamespace(splits=SimpleNamespace(train="train", valid="valid")),
+        "predictive_circuit_coding.workflows.pipeline.load_experiment_config",
+        lambda path: SimpleNamespace(
+            splits=SimpleNamespace(train="train", valid="valid"),
+            artifacts=SimpleNamespace(
+                summary_path=tmp_path / "training_summary.json",
+                checkpoint_dir=tmp_path / "checkpoints",
+                checkpoint_prefix="pcc_test",
+            ),
+        ),
     )
 
     def fake_train_model(**kwargs):
@@ -82,15 +89,13 @@ def test_prepare_training_stage_passes_training_progress_callback(tmp_path: Path
             history_csv_path=tmp_path / "training_history.csv",
         )
 
-    monkeypatch.setattr("predictive_circuit_coding.benchmarks.pipeline.train_model", fake_train_model)
+    monkeypatch.setattr("predictive_circuit_coding.workflows.pipeline.train_model", fake_train_model)
 
-    prepare_or_restore_training_stage(
+    run_training_stage(
         paths=paths,
         states={},
         base_experiment_config=tmp_path / "base.yaml",
         data_config_path=tmp_path / "data.yaml",
-        dataset_config=SimpleNamespace(),
-        training_config=SimpleNamespace(),
         step_log_every=1,
         run_stage_train=True,
         progress_ui=progress_ui,
@@ -108,7 +113,7 @@ def test_evaluation_stage_passes_evaluation_progress_callback(tmp_path: Path, mo
     captured_callbacks: list[object] = []
 
     monkeypatch.setattr(
-        "predictive_circuit_coding.benchmarks.pipeline.load_experiment_config",
+        "predictive_circuit_coding.workflows.pipeline.load_experiment_config",
         lambda path: SimpleNamespace(splits=SimpleNamespace(valid="valid", test="test")),
     )
 
@@ -117,15 +122,15 @@ def test_evaluation_stage_passes_evaluation_progress_callback(tmp_path: Path, mo
         return SimpleNamespace(metrics={"predictive_improvement": 0.5}, losses={"predictive_loss": 1.0})
 
     monkeypatch.setattr(
-        "predictive_circuit_coding.benchmarks.pipeline.evaluate_checkpoint_on_split",
+        "predictive_circuit_coding.workflows.pipeline.evaluate_checkpoint_on_split",
         fake_evaluate_checkpoint_on_split,
     )
     monkeypatch.setattr(
-        "predictive_circuit_coding.benchmarks.pipeline.write_evaluation_summary",
+        "predictive_circuit_coding.workflows.pipeline.write_evaluation_summary",
         lambda summary, path: Path(path).write_text("{}", encoding="utf-8"),
     )
 
-    run_standard_evaluation_stage(
+    run_evaluation_stage(
         paths=paths,
         states={},
         runtime_experiment_config_path=tmp_path / "runtime.yaml",
@@ -147,7 +152,7 @@ def test_refinement_stage_passes_benchmark_progress_callback(tmp_path: Path, mon
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
-        "predictive_circuit_coding.benchmarks.pipeline.load_experiment_config",
+        "predictive_circuit_coding.workflows.pipeline.load_experiment_config",
         lambda path: SimpleNamespace(),
     )
 
@@ -158,11 +163,11 @@ def test_refinement_stage_passes_benchmark_progress_callback(tmp_path: Path, mon
         )
 
     monkeypatch.setattr(
-        "predictive_circuit_coding.benchmarks.pipeline.run_motif_benchmark_matrix",
+        "predictive_circuit_coding.workflows.pipeline.run_motif_benchmark_matrix",
         fake_run_motif_benchmark_matrix,
     )
     monkeypatch.setattr(
-        "predictive_circuit_coding.benchmarks.pipeline.write_summary_rows",
+        "predictive_circuit_coding.workflows.pipeline.write_summary_rows",
         lambda rows, output_json_path, output_csv_path, root_key: (Path(output_json_path), Path(output_csv_path)),
     )
 
@@ -190,7 +195,22 @@ def test_refinement_stage_passes_benchmark_progress_callback(tmp_path: Path, mon
 def test_reused_training_stage_advances_pipeline(tmp_path: Path, monkeypatch):
     paths = _make_paths(tmp_path)
     progress_ui = RecordingProgressUI()
-    monkeypatch.setattr("predictive_circuit_coding.benchmarks.pipeline._json_hash", lambda payload: "same")
+    monkeypatch.setattr("predictive_circuit_coding.workflows.pipeline._json_hash", lambda payload: "same")
+    monkeypatch.setattr(
+        "predictive_circuit_coding.workflows.pipeline._write_runtime_experiment_config",
+        lambda **kwargs: paths.runtime_experiment_config_path,
+    )
+    monkeypatch.setattr(
+        "predictive_circuit_coding.workflows.pipeline.load_experiment_config",
+        lambda path: SimpleNamespace(
+            splits=SimpleNamespace(train="train", valid="valid"),
+            artifacts=SimpleNamespace(
+                summary_path=tmp_path / "training_summary.json",
+                checkpoint_dir=tmp_path / "checkpoints",
+                checkpoint_prefix="pcc_test",
+            ),
+        ),
+    )
     states = {
         "train": {
             "status": "complete",
@@ -198,6 +218,7 @@ def test_reused_training_stage_advances_pipeline(tmp_path: Path, monkeypatch):
             "inputs": {
                 "base_experiment_config": str((tmp_path / "base.yaml").resolve()),
                 "data_config_path": str((tmp_path / "data.yaml").resolve()),
+                "stage_root": str(paths.train_root.resolve()),
             },
             "outputs": {
                 "runtime_experiment_config_path": str(paths.runtime_experiment_config_path),
@@ -211,13 +232,11 @@ def test_reused_training_stage_advances_pipeline(tmp_path: Path, monkeypatch):
         }
     }
 
-    prepare_or_restore_training_stage(
+    run_training_stage(
         paths=paths,
         states=states,
         base_experiment_config=tmp_path / "base.yaml",
         data_config_path=tmp_path / "data.yaml",
-        dataset_config=SimpleNamespace(),
-        training_config=SimpleNamespace(),
         step_log_every=1,
         run_stage_train=True,
         progress_ui=progress_ui,

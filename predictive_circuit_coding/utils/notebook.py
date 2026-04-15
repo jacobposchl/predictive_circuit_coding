@@ -35,9 +35,6 @@ def verify_paths_exist(paths: dict[str, str | Path]) -> dict[str, bool]:
 @dataclass(frozen=True)
 class NotebookProgressConfig:
     enabled: bool = True
-    progress_backend: str = "tqdm"
-    mode: str = "clean_dashboard"
-    log_mode: str = "failures_only"
     leave_pipeline_bar: bool = True
     leave_stage_bars: bool = False
     show_stage_summaries: bool = True
@@ -299,7 +296,7 @@ class NotebookProgressUI:
         if not self.config.enabled or not self.config.show_stage_summaries:
             return
         status = "reused" if summary.status == "reused" else summary.status
-        self._display_markdown(f"### {summary.stage_name.replace('_', ' ').title()} — {status}\n\n{summary.headline}")
+        self._display_markdown(f"### {summary.stage_name.replace('_', ' ').title()} - {status}\n\n{summary.headline}")
         if summary.notes:
             self._display_markdown("\n".join(f"- {note}" for note in summary.notes))
         if summary.rows:

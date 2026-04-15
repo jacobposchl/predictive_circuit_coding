@@ -16,6 +16,12 @@ Before expensive runs, use:
 pcc-verify-refinement --pipeline-config configs/pcc/pipeline_refined_full.yaml --output-root artifacts/refinement_verification
 ```
 
+For the Colab/notebook end-to-end path, use:
+
+```bash
+pcc-run-pipeline --pipeline-config configs/pcc/pipeline_refined_debug.yaml
+```
+
 ## Package Map
 
 - `predictive_circuit_coding/data/`: Allen preparation, manifests, catalogs, split planning, local pipeline integration
@@ -26,8 +32,9 @@ pcc-verify-refinement --pipeline-config configs/pcc/pipeline_refined_full.yaml -
 - `predictive_circuit_coding/training/`: typed configs, training loop, checkpoint and summary writing
 - `predictive_circuit_coding/decoding/`: frozen-token extraction, labels, probes, geometry transforms
 - `predictive_circuit_coding/discovery/`: candidate selection, clustering, stability, reports
-- `predictive_circuit_coding/benchmarks/`: refinement discovery matrices and notebook pipeline orchestration
+- `predictive_circuit_coding/benchmarks/`: refinement discovery matrices and reporting
 - `predictive_circuit_coding/validation/`: conservative validation checks for discovery artifacts
+- `predictive_circuit_coding/workflows/`: end-to-end pipeline orchestration, preflight, stage state, and Colab runner integration
 
 ## Config Families
 

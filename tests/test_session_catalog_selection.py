@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 
-from predictive_circuit_coding.benchmarks.pipeline import _ensure_local_prepared_sessions
 from predictive_circuit_coding.cli.prepare_data import main as prepare_main
 from predictive_circuit_coding.cli.train import main as train_main
 from predictive_circuit_coding.data import (
@@ -21,6 +20,7 @@ from predictive_circuit_coding.data import (
     write_split_manifest,
     write_temporaldata_session,
 )
+from predictive_circuit_coding.workflows.pipeline import _ensure_local_prepared_sessions
 
 
 def _write_prep_config(tmp_path: Path, *, cache_root: Path | None = None) -> Path:

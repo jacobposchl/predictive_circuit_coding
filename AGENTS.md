@@ -8,7 +8,7 @@ This file is the shared top-level contract for coding agents working in this rep
 
 - preparing Allen Visual Behavior Neuropixels sessions into `temporaldata`/`torch_brain`-compatible processed sessions
 - training a predictive population-dynamics encoder
-- evaluating held-out predictive performance against explicit baselines
+- evaluating held-out predictive performance as a sanity check
 - discovering candidate task-relevant motifs from frozen tokens
 - validating those discoveries with conservative observational checks
 
@@ -16,9 +16,9 @@ The supported end-to-end workflow is:
 
 1. `pcc-prepare-data`
 2. `pcc-train`
-3. `pcc-evaluate`
-4. `pcc-discover`
-5. `pcc-validate`
+3. `pcc-refine`
+4. `pcc-validate`
+5. optional `pcc-evaluate`
 
 
 ## Canonical Sources Of Truth
@@ -42,8 +42,8 @@ The repo is built around a strict compute split:
   - local inspection and debugging
 - Google Colab A100:
   - training
-  - evaluation
-  - discovery
+  - optional predictive evaluation
+  - refinement discovery
   - validation
 
 When `allen_sdk.cache_root` is configured, the Allen raw cache is external to this repo. Keep processed outputs, manifests, splits, and runtime artifacts inside this repo; do not copy raw Allen session data into the project workspace unless explicitly required.
@@ -60,6 +60,7 @@ When `allen_sdk.cache_root` is configured, the Allen raw cache is external to th
 - `predictive_circuit_coding/discovery/`: candidate selection, clustering, stability estimates, cluster reporting
 - `predictive_circuit_coding/evaluation/`: held-out evaluation and metric aggregation
 - `predictive_circuit_coding/validation/`: label-shuffle, recurrence, baseline-sensitivity, and provenance-integrity checks
+- `predictive_circuit_coding/workflows/`: end-to-end pipeline orchestration, stage state, preflight, and Colab runner integration
 - `predictive_circuit_coding/utils/`: dependency checks, console helpers, notebook-facing helpers
 - `brainsets_local_pipelines/`: repo-local Allen Visual Behavior Neuropixels `BrainsetPipeline`
 - `configs/pcc/`: preparation and experiment configs
@@ -93,7 +94,7 @@ If you change docs, configs, notebooks, or artifact formats, also sanity-check:
 
 - Notebooks are Google Colab-first.
 - Setup cells may clone the repo, install the package, mount Drive, and reuse saved checkpoints and processed outputs.
-- Notebook code should call library APIs or `pcc-*` CLIs rather than duplicating implementation logic.
+- Notebook code should call `predictive_circuit_coding.workflows` or `pcc-*` CLIs rather than duplicating implementation logic.
 - Install first, import repo helpers second.
 - Reusable notebook helpers belong in the package, not copy-pasted across notebooks.
 
