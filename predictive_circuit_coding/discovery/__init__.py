@@ -1,4 +1,3 @@
-from predictive_circuit_coding.discovery.candidates import select_candidate_tokens
 from predictive_circuit_coding.discovery.clustering import cluster_candidate_tokens
 from predictive_circuit_coding.discovery.comparison import (
     RepresentationComparisonArmResult,
@@ -31,7 +30,6 @@ __all__ = [
     "estimate_clustering_stability",
     "prepare_discovery_collection",
     "run_representation_comparison_from_encoded",
-    "select_candidate_tokens",
     "write_discovery_cluster_report_csv",
     "write_discovery_cluster_report_json",
     "write_discovery_artifact",

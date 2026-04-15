@@ -1,10 +1,11 @@
-from predictive_circuit_coding.models.contracts import EncoderOutput
 from predictive_circuit_coding.models.encoder import (
+    EncoderOutput,
     PatchEmbedder,
     PredictiveCircuitEncoder,
     PredictiveCircuitModel,
+    PredictiveHead,
+    ReconstructionHead,
 )
-from predictive_circuit_coding.models.heads import PredictiveHead, ReconstructionHead
 
 __all__ = [
     "EncoderOutput",

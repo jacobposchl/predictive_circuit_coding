@@ -24,7 +24,8 @@ from predictive_circuit_coding.data import (
     write_split_manifest,
     write_temporaldata_session,
 )
-from predictive_circuit_coding.utils import NotebookStageReporter, get_console, verify_paths_exist
+from predictive_circuit_coding.utils import get_console
+from predictive_circuit_coding.utils.notebook_progress import NotebookStageReporter, verify_paths_exist
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

@@ -11,7 +11,6 @@ class BenchmarkTaskSpec:
     target_label: str
     target_label_mode: str = "auto"
     target_label_match_value: str | None = None
-    include_in_representation: bool = True
     include_in_motifs: bool = True
     optional: bool = False
 

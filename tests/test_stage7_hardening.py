@@ -33,7 +33,7 @@ from predictive_circuit_coding.training.contracts import (
     DiscoveryArtifact,
     TrainingCheckpoint,
 )
-from predictive_circuit_coding.utils import NotebookStageReporter, format_duration, verify_paths_exist
+from predictive_circuit_coding.utils.notebook_progress import NotebookStageReporter, format_duration, verify_paths_exist
 
 
 def _write_preparation_config(tmp_path: Path) -> Path:

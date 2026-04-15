@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from predictive_circuit_coding.cli.discover import main as discover_main
@@ -34,8 +35,8 @@ from predictive_circuit_coding.decoding.extract import (
 from predictive_circuit_coding.discovery import run_representation_comparison_from_encoded
 from predictive_circuit_coding.training import load_experiment_config, train_model
 from predictive_circuit_coding.training.contracts import DiscoveryCoverageSummary, EvaluationSummary
-from predictive_circuit_coding.utils import collect_notebook_target_value_counts
-from predictive_circuit_coding.utils import inspect_notebook_target_field_availability
+from predictive_circuit_coding.discovery.notebook import collect_notebook_target_value_counts
+from predictive_circuit_coding.discovery.notebook import inspect_notebook_target_field_availability
 
 
 def _write_preparation_config(tmp_path: Path) -> Path:
@@ -1130,6 +1131,153 @@ def test_resume_training_preserves_best_epoch_from_latest_checkpoint(tmp_path: P
     assert resumed_summary["best_epoch"] == 1
     resumed_checkpoint = torch.load(resumed_result.checkpoint_path, map_location="cpu", weights_only=False)
     assert resumed_checkpoint["best_epoch"] == 1
+
+
+def test_resume_training_restores_best_checkpoint_into_fresh_artifact_root(tmp_path: Path, monkeypatch):
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    experiment_config = load_experiment_config(experiment_config_path)
+    metric_sequence = [0.9, 0.3]
+
+    def _scripted_evaluation(**kwargs):
+        value = metric_sequence.pop(0)
+        return EvaluationSummary(
+            dataset_id="allen_visual_behavior_neuropixels",
+            split_name="valid",
+            checkpoint_path=str(kwargs.get("checkpoint_path", "")),
+            metrics={
+                "predictive_loss": 1.0 - value,
+                "reconstruction_loss": 0.0,
+                "predictive_raw_mse": 1.0,
+                "predictive_baseline_mse": 1.0,
+                "predictive_improvement": value,
+                "token_coverage": 1.0,
+            },
+            losses={
+                "predictive_loss": 1.0 - value,
+                "reconstruction_loss": 0.0,
+                "total_loss": 1.0 - value,
+            },
+            window_count=2,
+        )
+
+    monkeypatch.setattr(
+        "predictive_circuit_coding.training.loop.evaluate_checkpoint_on_split",
+        _scripted_evaluation,
+    )
+
+    initial_result = train_model(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        train_split="train",
+        valid_split="valid",
+    )
+    latest_checkpoint_path = experiment_config.artifacts.checkpoint_dir / "pcc_test_latest.pt"
+    resumed_config = replace(
+        load_experiment_config(experiment_config_path),
+        artifacts=replace(
+            experiment_config.artifacts,
+            checkpoint_dir=tmp_path / "fresh_artifacts" / "checkpoints",
+            summary_path=tmp_path / "fresh_artifacts" / "training_summary.json",
+        ),
+        training=replace(
+            experiment_config.training,
+            num_epochs=2,
+            resume_checkpoint=latest_checkpoint_path,
+        ),
+    )
+
+    resumed_result = train_model(
+        experiment_config=resumed_config,
+        data_config_path=prep_config_path,
+        train_split="train",
+        valid_split="valid",
+    )
+
+    assert initial_result.best_epoch == 1
+    assert resumed_result.best_epoch == 1
+    assert resumed_result.checkpoint_path == resumed_config.artifacts.checkpoint_dir / "pcc_test_best.pt"
+    assert resumed_result.checkpoint_path.is_file()
+    resumed_summary = json.loads(resumed_config.artifacts.summary_path.read_text(encoding="utf-8"))
+    assert resumed_summary["best_epoch"] == 1
+    assert resumed_summary["metrics"]["predictive_improvement"] == 0.9
+
+
+def test_resume_training_fails_when_prior_best_checkpoint_is_missing(tmp_path: Path, monkeypatch):
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    experiment_config = load_experiment_config(experiment_config_path)
+    metric_sequence = [0.9, 0.3]
+
+    def _scripted_evaluation(**kwargs):
+        value = metric_sequence.pop(0)
+        return EvaluationSummary(
+            dataset_id="allen_visual_behavior_neuropixels",
+            split_name="valid",
+            checkpoint_path=str(kwargs.get("checkpoint_path", "")),
+            metrics={
+                "predictive_loss": 1.0 - value,
+                "reconstruction_loss": 0.0,
+                "predictive_raw_mse": 1.0,
+                "predictive_baseline_mse": 1.0,
+                "predictive_improvement": value,
+                "token_coverage": 1.0,
+            },
+            losses={
+                "predictive_loss": 1.0 - value,
+                "reconstruction_loss": 0.0,
+                "total_loss": 1.0 - value,
+            },
+            window_count=2,
+        )
+
+    monkeypatch.setattr(
+        "predictive_circuit_coding.training.loop.evaluate_checkpoint_on_split",
+        _scripted_evaluation,
+    )
+
+    train_model(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+        train_split="train",
+        valid_split="valid",
+    )
+    latest_checkpoint_path = experiment_config.artifacts.checkpoint_dir / "pcc_test_latest.pt"
+    (experiment_config.artifacts.checkpoint_dir / "pcc_test_best.pt").unlink()
+    resumed_config = replace(
+        load_experiment_config(experiment_config_path),
+        artifacts=replace(
+            experiment_config.artifacts,
+            checkpoint_dir=tmp_path / "fresh_artifacts" / "checkpoints",
+            summary_path=tmp_path / "fresh_artifacts" / "training_summary.json",
+        ),
+        training=replace(
+            experiment_config.training,
+            num_epochs=2,
+            resume_checkpoint=latest_checkpoint_path,
+        ),
+    )
+
+    with pytest.raises(FileNotFoundError, match="Best checkpoint was not available"):
+        train_model(
+            experiment_config=resumed_config,
+            data_config_path=prep_config_path,
+            train_split="train",
+            valid_split="valid",
+        )
+
+
+def test_train_model_rejects_empty_training_sampler(tmp_path: Path, monkeypatch):
+    prep_config_path, experiment_config_path, _ = _create_prepared_workspace(tmp_path)
+    experiment_config = load_experiment_config(experiment_config_path)
+
+    monkeypatch.setattr("predictive_circuit_coding.training.loop.iter_sampler_batches", lambda **kwargs: iter(()))
+
+    with pytest.raises(RuntimeError, match="No training batches were sampled"):
+        train_model(
+            experiment_config=experiment_config,
+            data_config_path=prep_config_path,
+            train_split="train",
+            valid_split="valid",
+        )
 
 
 def test_validation_caps_discovery_extraction_when_sampling_strategy_is_label_balanced(tmp_path: Path):

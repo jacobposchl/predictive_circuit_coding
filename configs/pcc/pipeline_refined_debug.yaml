@@ -16,7 +16,6 @@ pipeline:
   step_log_every: 1
   session_holdout_fraction: 0.5
   session_holdout_seed: 7
-  neighbor_k: 3
   debug_retain_intermediates: false
 
 notebook_ui:

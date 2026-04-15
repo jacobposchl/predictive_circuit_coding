@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -61,6 +62,7 @@ def fit_additive_probe(
     learning_rate: float,
     mini_batch_size: int | None = None,
     label_name: str = "label",
+    seed: int | None = None,
 ) -> ProbeFitResult:
     if tokens.numel() == 0 or token_mask.numel() == 0 or labels.numel() == 0:
         raise ValueError("Cannot fit additive probe because no frozen-token batches were collected.")
@@ -68,35 +70,39 @@ def fit_additive_probe(
         raise ValueError(
             f"Cannot fit additive probe because no positive '{label_name}' labels were found in the sampled windows."
         )
-    n = tokens.shape[0]
-    model = AdditiveTokenProbe(tokens.shape[-1])
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    use_mini_batch = mini_batch_size is not None and mini_batch_size < n
-    for _ in range(epochs):
-        if use_mini_batch:
-            indices = torch.randperm(n)
-            for start in range(0, n, mini_batch_size):  # type: ignore[arg-type]
-                batch_idx = indices[start : start + mini_batch_size]
+    rng_context = torch.random.fork_rng(devices=[]) if seed is not None else nullcontext()
+    with rng_context:
+        if seed is not None:
+            torch.manual_seed(seed)
+        n = tokens.shape[0]
+        model = AdditiveTokenProbe(tokens.shape[-1])
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        use_mini_batch = mini_batch_size is not None and mini_batch_size < n
+        for _ in range(epochs):
+            if use_mini_batch:
+                indices = torch.randperm(n)
+                for start in range(0, n, mini_batch_size):  # type: ignore[arg-type]
+                    batch_idx = indices[start : start + mini_batch_size]
+                    optimizer.zero_grad(set_to_none=True)
+                    sample_logits, _ = model(tokens[batch_idx], token_mask[batch_idx])
+                    loss = F.binary_cross_entropy_with_logits(sample_logits, labels[batch_idx])
+                    loss.backward()
+                    optimizer.step()
+            else:
                 optimizer.zero_grad(set_to_none=True)
-                sample_logits, _ = model(tokens[batch_idx], token_mask[batch_idx])
-                loss = F.binary_cross_entropy_with_logits(sample_logits, labels[batch_idx])
+                sample_logits, _ = model(tokens, token_mask)
+                loss = F.binary_cross_entropy_with_logits(sample_logits, labels)
                 loss.backward()
                 optimizer.step()
-        else:
-            optimizer.zero_grad(set_to_none=True)
-            sample_logits, _ = model(tokens, token_mask)
-            loss = F.binary_cross_entropy_with_logits(sample_logits, labels)
-            loss.backward()
-            optimizer.step()
-    return ProbeFitResult(
-        state_dict=model.state_dict(),
-        metrics=_compute_probe_metrics(
-            model=model,
-            tokens=tokens,
-            token_mask=token_mask,
-            labels=labels,
-        ),
-    )
+        return ProbeFitResult(
+            state_dict=model.state_dict(),
+            metrics=_compute_probe_metrics(
+                model=model,
+                tokens=tokens,
+                token_mask=token_mask,
+                labels=labels,
+            ),
+        )
 
 
 def fit_additive_probe_features(
@@ -106,6 +112,7 @@ def fit_additive_probe_features(
     epochs: int,
     learning_rate: float,
     label_name: str = "label",
+    seed: int | None = None,
 ) -> ProbeFitResult:
     tokens, token_mask = _pooled_feature_tokens(features)
     return fit_additive_probe(
@@ -115,6 +122,7 @@ def fit_additive_probe_features(
         epochs=epochs,
         learning_rate=learning_rate,
         label_name=label_name,
+        seed=seed,
     )
 
 

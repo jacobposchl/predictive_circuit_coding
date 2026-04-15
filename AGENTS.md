@@ -14,12 +14,15 @@ This file is the shared top-level contract for coding agents working in this rep
 
 The supported end-to-end workflow is:
 
-1. `pcc-prepare-data`
+1. local data preparation with `pcc-prepare-data` subcommands
 2. `pcc-train`
 3. `pcc-refine`
 4. `pcc-validate`
 5. optional `pcc-evaluate`
 
+`pcc-prepare-data` is a command group. The common entry points are `init-workspace`, `prepare-allen-visual-behavior-neuropixels`, `build-session-catalog`, and `materialize-runtime-selection`.
+
+`pcc-discover` remains available for lower-level single-target debugging, but `pcc-refine` is the canonical discovery surface for this project.
 
 ## Canonical Sources Of Truth
 
@@ -58,9 +61,11 @@ When `allen_sdk.cache_root` is configured, the Allen raw cache is external to th
 - `predictive_circuit_coding/training/`: typed experiment config, runtime contracts, training loop, checkpointing, summaries, logging
 - `predictive_circuit_coding/decoding/`: frozen-token extraction, label extraction, additive probes, token scoring
 - `predictive_circuit_coding/discovery/`: candidate selection, clustering, stability estimates, cluster reporting
+- `predictive_circuit_coding/benchmarks/`: refinement benchmark matrix, transform summaries, final project summary, verification gating
 - `predictive_circuit_coding/evaluation/`: held-out evaluation and metric aggregation
 - `predictive_circuit_coding/validation/`: label-shuffle, recurrence, baseline-sensitivity, and provenance-integrity checks
 - `predictive_circuit_coding/workflows/`: end-to-end pipeline orchestration, stage state, preflight, and Colab runner integration
+- `predictive_circuit_coding/cli/`: stable `pcc-*` command surface and command-sidecar manifests
 - `predictive_circuit_coding/utils/`: dependency checks, console helpers, notebook-facing helpers
 - `brainsets_local_pipelines/`: repo-local Allen Visual Behavior Neuropixels `BrainsetPipeline`
 - `configs/pcc/`: preparation and experiment configs
@@ -103,12 +108,21 @@ If you change docs, configs, notebooks, or artifact formats, also sanity-check:
 Current first-class artifacts are:
 
 - training checkpoints
+- count-normalization stats JSON when enabled
 - training summary JSON
+- training history JSON and CSV
 - evaluation summary JSON
+- discovery decode-coverage JSON
 - discovery artifact JSON
 - cluster summary JSON and CSV
+- refinement summary JSON and CSV
+- per-arm transform summary JSON and CSV
+- final project summary JSON and CSV
 - validation summary JSON and CSV
+- refinement verification summary JSON and task-coverage CSV
 - run-manifest sidecars
+- pipeline manifest JSON
+- pipeline state JSON
 
 See [`documents/artifact_contracts.md`](C:/Users/Jacob%20Poschl/Desktop/population-dynamics/documents/artifact_contracts.md) for required keys and shapes.
 

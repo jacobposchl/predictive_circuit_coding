@@ -83,7 +83,7 @@ def __getattr__(name: str):
         module = import_module("predictive_circuit_coding.training.factories")
         return getattr(module, name)
     if name == "run_training_step":
-        module = import_module("predictive_circuit_coding.training.step")
+        module = import_module("predictive_circuit_coding.training.runtime")
         return getattr(module, name)
     if name == "train_model":
         module = import_module("predictive_circuit_coding.training.loop")

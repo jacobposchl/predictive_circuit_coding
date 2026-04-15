@@ -5,38 +5,44 @@ from pathlib import Path
 
 import yaml
 
-from predictive_circuit_coding.utils import (
-    NotebookCommandStreamFormatter,
-    NotebookDatasetConfig,
-    NotebookDiscoveryRunResult,
+from predictive_circuit_coding.discovery.notebook import (
     NotebookDiscoveryComparisonPaths,
-    NotebookAlignmentDiagnosticsRunResult,
-    NotebookDiagnosticsExperimentPaths,
-    NotebookLocalDatasetStageResult,
-    NotebookTrainingConfig,
-    NotebookValidationRunResult,
-    build_notebook_alignment_summary_row,
+    NotebookDiscoveryRunResult,
     build_notebook_discovery_comparison_local_root,
     build_notebook_discovery_comparison_paths,
     build_notebook_discovery_comparison_summary_row,
-    build_notebook_discovery_runtime_config,
     build_notebook_discovery_export_path,
+    export_notebook_discovery_artifacts,
+    export_notebook_discovery_comparison_artifacts,
+    find_existing_discovery_run,
+    restore_latest_discovery_artifacts,
+)
+from predictive_circuit_coding.utils.notebook_progress import (
+    NotebookCommandStreamFormatter,
+    output_indicates_missing_positive_labels,
+    run_streaming_command,
+)
+from predictive_circuit_coding.validation.diagnostics import (
+    NotebookAlignmentDiagnosticsRunResult,
+    NotebookDiagnosticsExperimentPaths,
+    build_notebook_alignment_summary_row,
     build_notebook_diagnostics_experiment_paths,
     build_notebook_diagnostics_export_path,
-    describe_notebook_compute_targets,
-    export_notebook_discovery_comparison_artifacts,
-    export_notebook_discovery_artifacts,
     export_notebook_diagnostics_artifacts,
+)
+from predictive_circuit_coding.validation.notebook import NotebookValidationRunResult
+from predictive_circuit_coding.workflows.notebook_runtime import (
+    NotebookDatasetConfig,
+    NotebookLocalDatasetStageResult,
+    NotebookTrainingConfig,
+    build_notebook_discovery_runtime_config,
+    describe_notebook_compute_targets,
     export_notebook_training_artifacts,
-    find_existing_discovery_run,
     load_notebook_split_counts,
     materialize_notebook_prepared_sessions,
-    output_indicates_missing_positive_labels,
     prepare_notebook_runtime_context,
     resolve_notebook_checkpoint,
-    restore_latest_discovery_artifacts,
     restore_latest_exported_artifacts,
-    run_streaming_command,
 )
 import pytest
 import subprocess

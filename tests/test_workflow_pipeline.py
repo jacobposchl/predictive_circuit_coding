@@ -184,7 +184,9 @@ def _write_pipeline_config(
     tmp_path: Path,
     *,
     source_dataset_root: Path | None = None,
+    extra_pipeline_lines: list[str] | None = None,
     extra_notebook_ui_lines: list[str] | None = None,
+    extra_top_level_lines: list[str] | None = None,
 ) -> Path:
     config_dir = tmp_path / "configs" / "pcc"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -205,7 +207,6 @@ def _write_pipeline_config(
         "  step_log_every: 3",
         "  session_holdout_fraction: 0.5",
         "  session_holdout_seed: 7",
-        "  neighbor_k: 3",
         "  debug_retain_intermediates: false",
         "notebook_ui:",
         "  enabled: true",
@@ -219,9 +220,14 @@ def _write_pipeline_config(
         "arms:",
         "  motifs: [encoder_raw]",
     ]
+    if extra_pipeline_lines:
+        insert_at = lines.index("notebook_ui:")
+        lines = lines[:insert_at] + extra_pipeline_lines + lines[insert_at:]
     if extra_notebook_ui_lines:
         insert_at = lines.index("tasks:")
         lines = lines[:insert_at] + extra_notebook_ui_lines + lines[insert_at:]
+    if extra_top_level_lines:
+        lines.extend(extra_top_level_lines)
     config_path.write_text("\n".join(lines), encoding="utf-8")
     return config_path
 
@@ -293,6 +299,78 @@ def test_load_pipeline_config_rejects_unused_notebook_ui_keys(tmp_path: Path) ->
         load_pipeline_config(config_path)
 
 
+def test_load_pipeline_config_rejects_unused_pipeline_keys(tmp_path: Path) -> None:
+    _write_prep_config(tmp_path)
+    _write_experiment_config(tmp_path)
+    config_path = _write_pipeline_config(
+        tmp_path,
+        extra_pipeline_lines=["  neighbor_k: 3"],
+    )
+
+    with pytest.raises(ValueError, match="Unsupported pipeline keys"):
+        load_pipeline_config(config_path)
+
+
+def test_load_pipeline_config_rejects_unused_top_level_keys(tmp_path: Path) -> None:
+    _write_prep_config(tmp_path)
+    _write_experiment_config(tmp_path)
+    config_path = _write_pipeline_config(
+        tmp_path,
+        extra_top_level_lines=["mystery_section:", "  enabled: true"],
+    )
+
+    with pytest.raises(ValueError, match="Unsupported top-level pipeline config keys"):
+        load_pipeline_config(config_path)
+
+
+def test_load_pipeline_config_rejects_invalid_numeric_values(tmp_path: Path) -> None:
+    _write_prep_config(tmp_path)
+    _write_experiment_config(tmp_path)
+    config_path = _write_pipeline_config(
+        tmp_path,
+        extra_pipeline_lines=["  step_log_every: 0"],
+    )
+
+    with pytest.raises(ValueError, match="step_log_every must be at least 1"):
+        load_pipeline_config(config_path)
+
+
+def test_load_pipeline_config_rejects_invalid_holdout_fraction(tmp_path: Path) -> None:
+    _write_prep_config(tmp_path)
+    _write_experiment_config(tmp_path)
+    config_path = _write_pipeline_config(
+        tmp_path,
+        extra_pipeline_lines=["  session_holdout_fraction: 1.0"],
+    )
+
+    with pytest.raises(ValueError, match="session_holdout_fraction must be less than 1.0"):
+        load_pipeline_config(config_path)
+
+
+def test_load_pipeline_config_rejects_invalid_metric_snapshot_interval(tmp_path: Path) -> None:
+    _write_prep_config(tmp_path)
+    _write_experiment_config(tmp_path)
+    config_path = _write_pipeline_config(
+        tmp_path,
+        extra_notebook_ui_lines=["  metric_snapshot_every_n: 0"],
+    )
+
+    with pytest.raises(ValueError, match="metric_snapshot_every_n must be at least 1"):
+        load_pipeline_config(config_path)
+
+
+def test_load_pipeline_config_rejects_invalid_notebook_artifact_mode(tmp_path: Path) -> None:
+    _write_prep_config(tmp_path)
+    _write_experiment_config(tmp_path)
+    config_path = _write_pipeline_config(
+        tmp_path,
+        extra_notebook_ui_lines=["  show_artifact_paths: verbose"],
+    )
+
+    with pytest.raises(ValueError, match="show_artifact_paths must be one of"):
+        load_pipeline_config(config_path)
+
+
 def test_pipeline_preflight_requires_cuda_for_compute_stages(tmp_path: Path, monkeypatch) -> None:
     _write_prep_config(tmp_path)
     _write_experiment_config(tmp_path, device="auto")
@@ -305,6 +383,36 @@ def test_pipeline_preflight_requires_cuda_for_compute_stages(tmp_path: Path, mon
     report = build_pipeline_preflight(config_path)
     assert not report.ok
     with pytest.raises(RuntimeError, match="CUDA is unavailable"):
+        assert_pipeline_preflight(report)
+
+
+def test_pipeline_preflight_fails_when_referenced_configs_are_missing(tmp_path: Path, monkeypatch) -> None:
+    _write_prep_config(tmp_path)
+    config_path = _write_pipeline_config(tmp_path)
+
+    monkeypatch.setattr("predictive_circuit_coding.workflows.config.torch.cuda.is_available", lambda: True)
+    monkeypatch.setattr("predictive_circuit_coding.workflows.config.torch.cuda.device_count", lambda: 1)
+    monkeypatch.setattr("predictive_circuit_coding.workflows.config.torch.cuda.get_device_name", lambda index: "Fake GPU")
+
+    report = build_pipeline_preflight(config_path)
+    assert not report.ok
+    with pytest.raises(RuntimeError, match="Experiment config not found"):
+        assert_pipeline_preflight(report)
+
+
+def test_pipeline_preflight_rejects_cpu_execution_for_compute_stages(tmp_path: Path, monkeypatch) -> None:
+    _write_prep_config(tmp_path)
+    _write_experiment_config(tmp_path, device="cpu")
+    source_dataset_root = _write_source_dataset(tmp_path)
+    config_path = _write_pipeline_config(tmp_path, source_dataset_root=source_dataset_root)
+
+    monkeypatch.setattr("predictive_circuit_coding.workflows.config.torch.cuda.is_available", lambda: True)
+    monkeypatch.setattr("predictive_circuit_coding.workflows.config.torch.cuda.device_count", lambda: 1)
+    monkeypatch.setattr("predictive_circuit_coding.workflows.config.torch.cuda.get_device_name", lambda index: "Fake GPU")
+
+    report = build_pipeline_preflight(config_path)
+    assert not report.ok
+    with pytest.raises(RuntimeError, match="execution.device is set to cpu"):
         assert_pipeline_preflight(report)
 
 
@@ -363,16 +471,17 @@ def test_run_pipeline_from_config_smoke_stages_dataset_and_writes_state(tmp_path
     monkeypatch.setattr("predictive_circuit_coding.workflows.config.torch.cuda.get_device_name", lambda index: "Fake GPU")
 
     def fake_train_model(**kwargs):
-        checkpoint_dir = tmp_path / "artifacts" / "checkpoints"
+        experiment_config = kwargs["experiment_config"]
+        checkpoint_dir = experiment_config.artifacts.checkpoint_dir
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         checkpoint_path = checkpoint_dir / "pcc_test_best.pt"
         checkpoint_path.write_text("checkpoint", encoding="utf-8")
-        summary_path = tmp_path / "artifacts" / "training_summary.json"
+        summary_path = experiment_config.artifacts.summary_path
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         summary_path.write_text("{}", encoding="utf-8")
-        history_json_path = tmp_path / "artifacts" / "training_history.json"
+        history_json_path = summary_path.with_name("training_history.json")
         history_json_path.write_text("{}", encoding="utf-8")
-        history_csv_path = tmp_path / "artifacts" / "training_history.csv"
+        history_csv_path = summary_path.with_name("training_history.csv")
         history_csv_path.write_text("epoch,total_loss\n1,0.1\n", encoding="utf-8")
         return SimpleNamespace(
             checkpoint_path=checkpoint_path,
@@ -409,6 +518,10 @@ def test_run_pipeline_from_config_smoke_stages_dataset_and_writes_state(tmp_path
     local_prepared = tmp_path / "data" / "allen_visual_behavior_neuropixels" / "prepared" / "allen_visual_behavior_neuropixels" / "101.h5"
     assert local_prepared.is_file()
     assert result.final_summary_json_path.is_file()
+    assert result.checkpoint_path == result.local_run_root / "train" / "checkpoints" / "pcc_test_best.pt"
+    assert result.training_summary_path == result.local_run_root / "train" / "training_summary.json"
+    assert result.training_history_json_path == result.local_run_root / "train" / "training_history.json"
+    assert result.training_history_csv_path == result.local_run_root / "train" / "training_history.csv"
     state_payload = json.loads(result.pipeline_state_path.read_text(encoding="utf-8"))
     assert state_payload["stages"]["train"]["status"] == "complete"
     assert state_payload["stages"]["evaluate"]["status"] == "complete"
@@ -418,6 +531,8 @@ def test_run_pipeline_from_config_smoke_stages_dataset_and_writes_state(tmp_path
 
     runtime_payload = yaml.safe_load(result.runtime_experiment_config_path.read_text(encoding="utf-8"))
     assert runtime_payload["training"]["log_every_steps"] == 3
+    assert runtime_payload["artifacts"]["checkpoint_dir"] == str((result.local_run_root / "train" / "checkpoints").resolve())
+    assert runtime_payload["artifacts"]["summary_path"] == str((result.local_run_root / "train" / "training_summary.json").resolve())
 
 
 def test_committed_colab_notebook_does_not_patch_repo_source() -> None:
@@ -429,3 +544,19 @@ def test_committed_colab_notebook_does_not_patch_repo_source() -> None:
     assert "Runtime patch for notebook pipeline" not in code
     assert "pipeline_path.write_text" not in code
     assert "predictive_circuit_coding/benchmarks/pipeline.py" not in code
+
+
+def test_committed_colab_notebook_defines_pipeline_config_cell_and_fallbacks() -> None:
+    notebook_path = Path("notebooks/run_predictive_circuit_coding_pipeline_colab.ipynb")
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    code_cells = [cell for cell in notebook["cells"] if cell.get("cell_type") == "code"]
+    assert code_cells, "Expected code cells in the Colab notebook."
+
+    first_code = "".join(code_cells[0].get("source", []))
+    assert "# Pipeline config" in first_code
+    assert "PIPELINE_CONFIG_PATH" in first_code
+    assert "PIPELINE_RUN_ID" in first_code
+
+    all_code = "\n".join("".join(cell.get("source", [])) for cell in code_cells)
+    assert "globals().get('PIPELINE_CONFIG_PATH'" in all_code
+    assert "globals().get('PIPELINE_RUN_ID'" in all_code

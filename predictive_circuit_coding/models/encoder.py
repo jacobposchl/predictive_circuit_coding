@@ -1,14 +1,40 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 from torch import nn
 from torch.nn import functional as F
 
 from predictive_circuit_coding.models.blocks import SpatiotemporalBlock, TemporalSelfAttentionBlock
-from predictive_circuit_coding.models.contracts import EncoderOutput
-from predictive_circuit_coding.models.heads import PredictiveHead, ReconstructionHead
 from predictive_circuit_coding.training.config import ModelConfig
 from predictive_circuit_coding.training.contracts import ModelForwardOutput, PopulationWindowBatch
+
+
+@dataclass(frozen=True)
+class EncoderOutput:
+    tokens: torch.Tensor
+    unit_mask: torch.Tensor
+    patch_mask: torch.Tensor
+    summary_tokens: torch.Tensor | None = None
+
+
+class PredictiveHead(nn.Module):
+    def __init__(self, d_model: int, *, patch_bins: int):
+        super().__init__()
+        self.proj = nn.Linear(d_model, patch_bins)
+
+    def forward(self, tokens):
+        return self.proj(tokens)
+
+
+class ReconstructionHead(nn.Module):
+    def __init__(self, d_model: int, *, patch_bins: int):
+        super().__init__()
+        self.proj = nn.Linear(d_model, patch_bins)
+
+    def forward(self, tokens):
+        return self.proj(tokens)
 
 
 class PatchEmbedder(nn.Module):

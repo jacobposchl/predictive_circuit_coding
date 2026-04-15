@@ -14,9 +14,8 @@ from predictive_circuit_coding.training.factories import (
     build_objective_from_config,
     build_tokenizer_from_config,
 )
-from predictive_circuit_coding.training.runtime import iter_sampler_batches, resolve_device
-from predictive_circuit_coding.training.step import run_training_step
-from predictive_circuit_coding.utils.notebook import EvaluationProgressEvent
+from predictive_circuit_coding.training.runtime import iter_sampler_batches, resolve_device, run_training_step
+from predictive_circuit_coding.utils.notebook_progress import EvaluationProgressEvent
 from predictive_circuit_coding.windowing import (
     FixedWindowConfig,
     build_dataset_bundle,

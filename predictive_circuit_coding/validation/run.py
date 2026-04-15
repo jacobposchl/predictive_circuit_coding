@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import gc
-import json
 import os
 from pathlib import Path
 import random
@@ -17,6 +16,10 @@ from predictive_circuit_coding.training.config import ExperimentConfig
 from predictive_circuit_coding.training.contracts import ValidationSummary
 from predictive_circuit_coding.training.factories import build_model_from_config
 from predictive_circuit_coding.training.runtime import resolve_device
+from predictive_circuit_coding.validation.artifact_checks import (
+    load_discovery_artifact,
+    validate_discovery_artifact_identity,
+)
 from predictive_circuit_coding.windowing import (
     FixedWindowConfig,
     build_dataset_bundle,
@@ -32,11 +35,6 @@ def _ram_mb() -> str:
         return f"[RAM {rss:.0f} MB]"
     except Exception:
         return ""
-
-
-def _load_discovery_artifact(path: str | Path) -> dict:
-    with Path(path).open("r", encoding="utf-8") as handle:
-        return json.load(handle)
 
 
 def _deserialize_probe_state(raw_state: dict[str, Any] | None) -> dict[str, torch.Tensor] | None:
@@ -55,6 +53,8 @@ def _candidate_centroids(candidates: list[dict]) -> list[torch.Tensor]:
         if cluster_id == -1:
             continue
         grouped.setdefault(cluster_id, []).append(torch.tensor(candidate["embedding"], dtype=torch.float32))
+    if not grouped:
+        raise ValueError("Discovery artifact does not contain any non-noise candidate clusters to validate.")
     return [torch.stack(values, dim=0).mean(dim=0) for _, values in sorted(grouped.items())]
 
 
@@ -70,7 +70,7 @@ def _window_similarity_scores(
     if tokens.numel() == 0 or token_mask.numel() == 0:
         return torch.empty((0,), dtype=torch.float32)
     if not centroids:
-        return torch.zeros((tokens.shape[0],), dtype=torch.float32)
+        raise ValueError("Cannot compute motif similarity without at least one candidate centroid.")
     centroid_tensor = torch.stack(
         [centroid / centroid.norm().clamp_min(1.0e-8) for centroid in centroids],
         dim=0,
@@ -80,9 +80,12 @@ def _window_similarity_scores(
         end = min(start + _SIMILARITY_CHUNK_SIZE, tokens.shape[0])
         chunk = tokens[start:end]
         normalized_chunk = chunk / chunk.norm(dim=-1, keepdim=True).clamp_min(1.0e-8)
+        chunk_mask = token_mask[start:end].to(dtype=torch.bool)
         chunk_sims = torch.einsum("wtd,cd->wtc", normalized_chunk, centroid_tensor)
-        chunk_sims = chunk_sims.masked_fill(~token_mask[start:end].unsqueeze(-1), float("-inf"))
-        scores[start:end] = chunk_sims.amax(dim=(1, 2)).to(dtype=torch.float32)
+        chunk_sims = chunk_sims.masked_fill(~chunk_mask.unsqueeze(-1), float("-inf"))
+        chunk_scores = chunk_sims.amax(dim=(1, 2)).to(dtype=torch.float32)
+        chunk_scores = torch.where(chunk_mask.any(dim=1), chunk_scores, torch.zeros_like(chunk_scores))
+        scores[start:end] = chunk_scores
     return scores
 
 
@@ -148,24 +151,74 @@ def _count_split_windows(
             bundle.dataset._close_open_files()
 
 
-def _validate_artifact_provenance(
+_REQUIRED_CANDIDATE_FIELDS = frozenset(
+    {
+        "candidate_id",
+        "cluster_id",
+        "recording_id",
+        "session_id",
+        "subject_id",
+        "unit_id",
+        "unit_region",
+        "unit_depth_um",
+        "patch_index",
+        "patch_start_s",
+        "patch_end_s",
+        "window_start_s",
+        "window_end_s",
+        "label",
+        "score",
+        "embedding",
+    }
+)
+
+
+def _validate_candidate_schema(
     *,
-    artifact: dict[str, Any],
-    checkpoint_path: str | Path,
-    target_label: str,
-) -> None:
-    artifact_checkpoint = artifact.get("checkpoint_path")
-    if artifact_checkpoint and Path(artifact_checkpoint).resolve() != Path(checkpoint_path).resolve():
-        raise ValueError(
-            "Discovery artifact checkpoint_path does not match the checkpoint selected for validation. "
-            f"artifact={Path(artifact_checkpoint).resolve()}, checkpoint={Path(checkpoint_path).resolve()}."
-        )
-    artifact_target_label = artifact.get("decoder_summary", {}).get("target_label")
-    if artifact_target_label and str(artifact_target_label) != str(target_label):
-        raise ValueError(
-            "Discovery artifact target label does not match the validation config target label. "
-            f"artifact='{artifact_target_label}', config='{target_label}'."
-        )
+    candidates: Any,
+    expected_embedding_dim: int,
+) -> list[dict]:
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("Validation cannot run because the discovery artifact contains no candidate tokens.")
+    issues: list[str] = []
+    non_noise_cluster_count = 0
+    parsed_candidates: list[dict] = []
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            issues.append(f"candidate[{index}] is not an object")
+            continue
+        candidate_id = str(candidate.get("candidate_id", f"index_{index}"))
+        missing = sorted(_REQUIRED_CANDIDATE_FIELDS - set(candidate))
+        if missing:
+            issues.append(f"{candidate_id} missing fields: {', '.join(missing)}")
+            continue
+        try:
+            cluster_id = int(candidate["cluster_id"])
+        except (TypeError, ValueError):
+            issues.append(f"{candidate_id} has invalid cluster_id")
+            continue
+        if cluster_id != -1:
+            non_noise_cluster_count += 1
+        embedding = candidate.get("embedding")
+        if not isinstance(embedding, (list, tuple)):
+            issues.append(f"{candidate_id} embedding must be a list")
+            continue
+        if len(embedding) != expected_embedding_dim:
+            issues.append(
+                f"{candidate_id} embedding dimension {len(embedding)} does not match model.d_model {expected_embedding_dim}"
+            )
+            continue
+        try:
+            tuple(float(value) for value in embedding)
+        except (TypeError, ValueError):
+            issues.append(f"{candidate_id} embedding contains non-numeric values")
+            continue
+        parsed_candidates.append(candidate)
+    if issues:
+        raise ValueError("Discovery artifact candidate schema is invalid: " + "; ".join(issues))
+    if non_noise_cluster_count <= 0:
+        raise ValueError("Discovery artifact does not contain any non-noise candidate clusters to validate.")
+    return parsed_candidates
 
 
 def _provenance_issues(
@@ -304,19 +357,29 @@ def validate_discovery_artifact(
     discovery_artifact_path: str | Path,
     dataset_view=None,
     progress_callback: Callable[[int, int | None], None] | None = None,
+    log_sink: Callable[[str], None] | None = None,
 ) -> ValidationSummary:
+    def _log(message: str) -> None:
+        if log_sink is not None:
+            log_sink(message)
+
     dataset_view = dataset_view or resolve_runtime_dataset_view(
         experiment_config=experiment_config,
         data_config_path=data_config_path,
     )
-    print(f"validate: start {_ram_mb()}")
-    artifact = _load_discovery_artifact(discovery_artifact_path)
-    if not artifact.get("candidates"):
-        raise ValueError("Validation cannot run because the discovery artifact contains no candidate tokens.")
-    _validate_artifact_provenance(
+    _log(f"validate: start {_ram_mb()}")
+    artifact = load_discovery_artifact(discovery_artifact_path)
+    validate_discovery_artifact_identity(
         artifact=artifact,
         checkpoint_path=checkpoint_path,
+        dataset_id=experiment_config.dataset_id,
+        split_name=experiment_config.splits.discovery,
         target_label=experiment_config.discovery.target_label,
+        require_fields=True,
+    )
+    candidates = _validate_candidate_schema(
+        candidates=artifact.get("candidates"),
+        expected_embedding_dim=int(experiment_config.model.d_model),
     )
     artifact_probe_state = _deserialize_probe_state(artifact.get("decoder_summary", {}).get("probe_state"))
 
@@ -326,7 +389,7 @@ def validate_discovery_artifact(
     shared_model.load_state_dict(checkpoint["model_state"])
     del checkpoint
     shared_model.eval()
-    print(f"validate: model loaded {_ram_mb()}")
+    _log(f"validate: model loaded {_ram_mb()}")
 
     discovery_collection = extract_frozen_tokens(
         experiment_config=experiment_config,
@@ -339,7 +402,7 @@ def validate_discovery_artifact(
         sampling_strategy_override="sequential",
         model=shared_model,
     )
-    print(
+    _log(
         f"validate: discovery extracted  windows={discovery_collection.tokens.shape[0]}"
         f"  seq_len={discovery_collection.tokens.shape[1]}"
         f"  tokens_MB={discovery_collection.tokens.nbytes / 1_048_576:.0f}"
@@ -354,10 +417,11 @@ def validate_discovery_artifact(
             learning_rate=experiment_config.discovery.probe_learning_rate,
             mini_batch_size=256,
             label_name=experiment_config.discovery.target_label,
+            seed=experiment_config.discovery.shuffle_seed,
         )
         artifact_probe_state = real_probe_fit.state_dict
         real_label_metrics = real_probe_fit.metrics
-        print(f"validate: real probe trained {_ram_mb()}")
+        _log(f"validate: real probe trained {_ram_mb()}")
     else:
         real_label_metrics = evaluate_additive_probe(
             state_dict=artifact_probe_state,
@@ -365,7 +429,7 @@ def validate_discovery_artifact(
             token_mask=discovery_collection.token_mask,
             labels=discovery_collection.labels,
         )
-        print(f"validate: real probe re-evaluated {_ram_mb()}")
+        _log(f"validate: real probe re-evaluated {_ram_mb()}")
 
     rng = random.Random(experiment_config.discovery.shuffle_seed)
     shuffled_labels = discovery_collection.labels.clone()
@@ -380,15 +444,16 @@ def validate_discovery_artifact(
         learning_rate=experiment_config.discovery.probe_learning_rate,
         mini_batch_size=256,
         label_name=experiment_config.discovery.target_label,
+        seed=experiment_config.discovery.shuffle_seed + 1,
     )
-    print(f"validate: shuffled probe trained {_ram_mb()}")
+    _log(f"validate: shuffled probe trained {_ram_mb()}")
     discovery_sampled_window_count = int(discovery_collection.labels.shape[0])
     del discovery_collection
     del shuffled_labels
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    print(f"validate: discovery freed {_ram_mb()}")
+    _log(f"validate: discovery freed {_ram_mb()}")
 
     test_collection = extract_frozen_tokens(
         experiment_config=experiment_config,
@@ -404,7 +469,7 @@ def validate_discovery_artifact(
         progress_callback=progress_callback,
         model=shared_model,
     )
-    print(
+    _log(
         f"validate: test extracted  windows={test_collection.tokens.shape[0]}"
         f"  seq_len={test_collection.tokens.shape[1]}"
         f"  tokens_MB={test_collection.tokens.nbytes / 1_048_576:.0f}"
@@ -415,7 +480,7 @@ def validate_discovery_artifact(
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    print(f"validate: model freed {_ram_mb()}")
+    _log(f"validate: model freed {_ram_mb()}")
 
     held_out_test_metrics = evaluate_additive_probe(
         state_dict=artifact_probe_state,
@@ -423,7 +488,7 @@ def validate_discovery_artifact(
         token_mask=test_collection.token_mask,
         labels=test_collection.labels,
     )
-    centroids = _candidate_centroids(artifact["candidates"])
+    centroids = _candidate_centroids(candidates)
     window_scores = _window_similarity_scores(
         tokens=test_collection.tokens,
         token_mask=test_collection.token_mask,
@@ -441,7 +506,7 @@ def validate_discovery_artifact(
     cluster_count = len(
         {
             int(candidate["cluster_id"])
-            for candidate in artifact["candidates"]
+            for candidate in candidates
             if int(candidate["cluster_id"]) != -1
         }
     )
@@ -477,11 +542,11 @@ def validate_discovery_artifact(
         held_out_test_metrics=held_out_test_metrics,
         held_out_similarity_summary=held_out_similarity_summary,
         baseline_sensitivity_summary=baseline_sensitivity_summary,
-        candidate_count=len(artifact["candidates"]),
+        candidate_count=len(candidates),
         cluster_count=cluster_count,
         cluster_quality_summary=artifact.get("cluster_quality_summary", {}),
         provenance_issues=_provenance_issues(
-            candidates=artifact["candidates"],
+            candidates=candidates,
             dataset_view=dataset_view,
             experiment_config=experiment_config,
             split_name=str(artifact.get("split_name", experiment_config.splits.discovery)),

@@ -475,6 +475,51 @@ def test_resolve_runtime_dataset_view_rebuilds_support_files_from_prepared_sessi
     }
 
 
+def test_resolve_runtime_dataset_view_materializes_split_only_selection_overrides(tmp_path: Path):
+    prep_config_path = _write_prep_config(tmp_path)
+    prep_config = load_preparation_config(prep_config_path)
+    workspace = create_workspace(prep_config)
+    dataset_id = prep_config.dataset.dataset_id
+    for session_id, subject_id in (
+        ("session_train", "mouse_train"),
+        ("session_valid", "mouse_valid"),
+        ("session_discovery", "mouse_discovery"),
+        ("session_test", "mouse_test"),
+    ):
+        _write_session(
+            workspace.brainset_prepared_root / f"{session_id}.h5",
+            dataset_id=dataset_id,
+            session_id=session_id,
+            subject_id=subject_id,
+            regions=["VISp", "LP"],
+        )
+
+    experiment_config_path = _write_experiment_config(
+        tmp_path,
+        dataset_selection_lines=[
+            "  split_seed: 11",
+            "  train_fraction: 0.25",
+            "  valid_fraction: 0.25",
+            "  discovery_fraction: 0.25",
+            "  test_fraction: 0.25",
+        ],
+    )
+
+    from predictive_circuit_coding.training import load_experiment_config
+
+    experiment_config = load_experiment_config(experiment_config_path)
+    view = resolve_runtime_dataset_view(
+        experiment_config=experiment_config,
+        data_config_path=prep_config_path,
+    )
+
+    assert view.selection_active is True
+    assert view.selection_summary is not None
+    assert view.selection_summary.session_count == 4
+    assert view.split_manifest_path.name == "selected_split_manifest.json"
+    assert view.config_dir.name == "runtime_selection"
+
+
 def test_ensure_local_prepared_sessions_stages_from_source_root(tmp_path: Path):
     prep_config_path = _write_prep_config(tmp_path)
     prep_config = load_preparation_config(prep_config_path)

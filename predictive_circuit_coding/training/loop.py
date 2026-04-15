@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import math
 import random
+import shutil
 from typing import Callable
 
 import numpy as np
@@ -34,9 +35,8 @@ from predictive_circuit_coding.training.factories import (
     build_tokenizer_from_config,
 )
 from predictive_circuit_coding.training.logging import StageLogger
-from predictive_circuit_coding.training.runtime import iter_sampler_batches, resolve_device
-from predictive_circuit_coding.training.step import run_training_step
-from predictive_circuit_coding.utils.notebook import TrainingProgressEvent
+from predictive_circuit_coding.training.runtime import iter_sampler_batches, resolve_device, run_training_step
+from predictive_circuit_coding.utils.notebook_progress import TrainingProgressEvent
 from predictive_circuit_coding.windowing import (
     FixedWindowConfig,
     build_dataset_bundle,
@@ -173,6 +173,94 @@ def _prefixed_metrics(prefix: str, metrics: dict[str, float] | None) -> dict[str
     return {f"{prefix}_{str(key)}": float(value) for key, value in metrics.items() if value is not None}
 
 
+def _float_metric_dict(payload: object) -> dict[str, float] | None:
+    if not isinstance(payload, dict):
+        return None
+    parsed: dict[str, float] = {}
+    for key, value in payload.items():
+        if value is None:
+            continue
+        parsed[str(key)] = float(value)
+    return parsed
+
+
+def _load_resume_summary_payload(
+    *,
+    summary_path: Path,
+    resume_checkpoint_path: Path,
+) -> dict | None:
+    candidate_paths = [summary_path]
+    inferred_source_summary = resume_checkpoint_path.parent.parent / summary_path.name
+    if inferred_source_summary not in candidate_paths:
+        candidate_paths.append(inferred_source_summary)
+    for candidate in candidate_paths:
+        if not candidate.is_file():
+            continue
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _copy_checkpoint(source: Path, target: Path) -> None:
+    if source.resolve() == target.resolve():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+
+
+def _restore_best_checkpoint_from_resume(
+    *,
+    resume_checkpoint_path: Path,
+    best_checkpoint_path: Path,
+    checkpoint_prefix: str,
+    state: dict,
+    logger: StageLogger,
+) -> bool:
+    if best_checkpoint_path.is_file():
+        return True
+    source_best_checkpoint_path = resume_checkpoint_path.with_name(f"{checkpoint_prefix}_best.pt")
+    if source_best_checkpoint_path.is_file():
+        _copy_checkpoint(source_best_checkpoint_path, best_checkpoint_path)
+        logger.log_artifact(label="resumed best checkpoint", path=best_checkpoint_path)
+        return True
+    state_epoch = int(state["epoch"])
+    best_epoch = int(state.get("best_epoch", state_epoch))
+    if best_epoch == state_epoch:
+        _copy_checkpoint(resume_checkpoint_path, best_checkpoint_path)
+        logger.log_artifact(label="resumed best checkpoint", path=best_checkpoint_path)
+        return True
+    return False
+
+
+def _write_summary_if_missing(
+    *,
+    summary_path: Path,
+    experiment_config: ExperimentConfig,
+    train_split: str,
+    checkpoint_path: Path,
+    best_epoch: int,
+    metrics: dict[str, float] | None,
+    losses: dict[str, float] | None,
+    selection_reason: str,
+    logger: StageLogger,
+) -> None:
+    if summary_path.is_file() or best_epoch <= 0:
+        return
+    summary = _build_training_summary(
+        experiment_config=experiment_config,
+        train_split=train_split,
+        checkpoint_path=checkpoint_path,
+        epoch=best_epoch,
+        best_epoch=best_epoch,
+        metrics=metrics or {},
+        losses=losses or {},
+        selection_reason=selection_reason,
+    )
+    write_training_summary(summary, summary_path)
+    logger.log_artifact(label="training summary", path=summary_path)
+
+
 def _build_training_summary(
     *,
     experiment_config: ExperimentConfig,
@@ -273,11 +361,11 @@ def train_model(
     latest_evaluation_metrics: dict[str, float] | None = None
     latest_training_losses: dict[str, float] | None = None
     best_checkpoint_path = experiment_config.artifacts.checkpoint_dir / f"{experiment_config.artifacts.checkpoint_prefix}_best.pt"
-    latest_epoch_checkpoint_path: Path | None = None
     latest_epoch_checkpoint: TrainingCheckpoint | None = None
 
     if experiment_config.training.resume_checkpoint is not None:
-        state = load_training_checkpoint(experiment_config.training.resume_checkpoint, map_location=device)
+        resume_checkpoint_path = experiment_config.training.resume_checkpoint
+        state = load_training_checkpoint(resume_checkpoint_path, map_location=device)
         model.load_state_dict(state["model_state"])
         optimizer.load_state_dict(state["optimizer_state"])
         if scheduler is not None and state.get("scheduler_state") is not None:
@@ -290,6 +378,21 @@ def train_model(
             {str(key): float(value) for key, value in state.get("best_validation_metrics", {}).items()}
             if state.get("best_validation_metrics") is not None
             else None
+        )
+        summary_payload = _load_resume_summary_payload(
+            summary_path=experiment_config.artifacts.summary_path,
+            resume_checkpoint_path=resume_checkpoint_path,
+        )
+        if summary_payload is not None and int(summary_payload.get("best_epoch", 0)) == best_epoch:
+            best_training_losses = _float_metric_dict(summary_payload.get("losses"))
+            best_validation_metrics = best_validation_metrics or _float_metric_dict(summary_payload.get("metrics"))
+            best_selection_reason = str(summary_payload.get("selection_reason", best_selection_reason))
+        _restore_best_checkpoint_from_resume(
+            resume_checkpoint_path=resume_checkpoint_path,
+            best_checkpoint_path=best_checkpoint_path,
+            checkpoint_prefix=experiment_config.artifacts.checkpoint_prefix,
+            state=state,
+            logger=logger,
         )
         training_history_rows = _load_prior_training_history_rows(
             history_json_path=training_history_json_path,
@@ -339,59 +442,63 @@ def train_model(
         )
         train_metrics: list[dict[str, float]] = []
         train_metric_weights: list[float] = []
-        for step_index, batch in enumerate(
-            iter_sampler_batches(
-                dataset=train_bundle.dataset,
-                sampler=train_sampler,
-                collator=tokenizer,
-                batch_size=experiment_config.optimization.batch_size,
-                max_batches=experiment_config.training.train_steps_per_epoch,
-            ),
-            start=1,
-        ):
-            batch = batch.to(device)
-            optimizer.zero_grad(set_to_none=True)
-            autocast_context = (
-                torch.autocast(device_type=device.type, dtype=torch.float16) if scaler_enabled else nullcontext()
-            )
-            with autocast_context:
-                step_output = run_training_step(model, objective, batch)
-            if scaler_enabled:
-                grad_scaler.scale(step_output.loss).backward()
-                if experiment_config.optimization.grad_clip_norm is not None:
-                    grad_scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(),
-                        experiment_config.optimization.grad_clip_norm,
-                    )
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
-            else:
-                step_output.loss.backward()
-                if experiment_config.optimization.grad_clip_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), experiment_config.optimization.grad_clip_norm)
-                optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
-            global_step += 1
-            train_metrics.append({**step_output.metrics, **step_output.losses})
-            train_metric_weights.append(float(step_output.batch_size))
-            _maybe_emit_training_progress(
-                progress_callback,
-                TrainingProgressEvent(
-                    event_type="step",
-                    epoch=epoch,
-                    epoch_total=experiment_config.training.num_epochs,
-                    step=step_index,
-                    step_total=experiment_config.training.train_steps_per_epoch,
-                    metrics={**step_output.metrics, **step_output.losses},
+        try:
+            for step_index, batch in enumerate(
+                iter_sampler_batches(
+                    dataset=train_bundle.dataset,
+                    sampler=train_sampler,
+                    collator=tokenizer,
+                    batch_size=experiment_config.optimization.batch_size,
+                    max_batches=experiment_config.training.train_steps_per_epoch,
                 ),
-            )
-            if step_index % experiment_config.training.log_every_steps == 0:
-                logger.log_metrics(prefix=f"epoch={epoch} step={step_index}", metrics={**step_output.metrics, **step_output.losses})
+                start=1,
+            ):
+                batch = batch.to(device)
+                optimizer.zero_grad(set_to_none=True)
+                autocast_context = (
+                    torch.autocast(device_type=device.type, dtype=torch.float16) if scaler_enabled else nullcontext()
+                )
+                with autocast_context:
+                    step_output = run_training_step(model, objective, batch)
+                if scaler_enabled:
+                    grad_scaler.scale(step_output.loss).backward()
+                    if experiment_config.optimization.grad_clip_norm is not None:
+                        grad_scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(),
+                            experiment_config.optimization.grad_clip_norm,
+                        )
+                    grad_scaler.step(optimizer)
+                    grad_scaler.update()
+                else:
+                    step_output.loss.backward()
+                    if experiment_config.optimization.grad_clip_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), experiment_config.optimization.grad_clip_norm)
+                    optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
+                global_step += 1
+                train_metrics.append({**step_output.metrics, **step_output.losses})
+                train_metric_weights.append(float(step_output.batch_size))
+                _maybe_emit_training_progress(
+                    progress_callback,
+                    TrainingProgressEvent(
+                        event_type="step",
+                        epoch=epoch,
+                        epoch_total=experiment_config.training.num_epochs,
+                        step=step_index,
+                        step_total=experiment_config.training.train_steps_per_epoch,
+                        metrics={**step_output.metrics, **step_output.losses},
+                    ),
+                )
+                if step_index % experiment_config.training.log_every_steps == 0:
+                    logger.log_metrics(prefix=f"epoch={epoch} step={step_index}", metrics={**step_output.metrics, **step_output.losses})
+        finally:
+            if hasattr(train_bundle.dataset, "_close_open_files"):
+                train_bundle.dataset._close_open_files()
 
-        if hasattr(train_bundle.dataset, "_close_open_files"):
-            train_bundle.dataset._close_open_files()
+        if not train_metrics:
+            raise RuntimeError(f"No training batches were sampled from split '{train_split}' for epoch {epoch}.")
 
         current_training_losses = aggregate_metric_dicts(train_metrics, weights=train_metric_weights)
         latest_training_losses = current_training_losses
@@ -413,7 +520,7 @@ def train_model(
                 data_config_path=data_config_path,
                 model=model,
                 split_name=valid_split,
-                checkpoint_path=str(best_checkpoint_path if best_checkpoint_path.exists() else ""),
+                checkpoint_path=str(best_checkpoint_path),
                 max_batches=experiment_config.training.validation_steps,
                 dataset_view=dataset_view,
             )
@@ -519,7 +626,6 @@ def train_model(
             )
             epoch_path = experiment_config.artifacts.checkpoint_dir / f"{experiment_config.artifacts.checkpoint_prefix}_latest.pt"
             save_training_checkpoint(checkpoint, epoch_path)
-            latest_epoch_checkpoint_path = epoch_path
             latest_epoch_checkpoint = checkpoint
             logger.log_artifact(label="latest checkpoint", path=epoch_path)
             _maybe_emit_training_progress(
@@ -546,7 +652,9 @@ def train_model(
             ),
         )
 
-    if not best_checkpoint_path.exists() and latest_epoch_checkpoint is not None:
+    if not best_checkpoint_path.exists() and latest_epoch_checkpoint is not None and (
+        best_epoch in {0, latest_epoch_checkpoint.epoch} or not math.isfinite(best_metric)
+    ):
         save_training_checkpoint(latest_epoch_checkpoint, best_checkpoint_path)
         logger.log(
             "best checkpoint metric was not set cleanly; using the latest epoch checkpoint as a fallback"
@@ -573,6 +681,24 @@ def train_model(
         )
         write_training_summary(fallback_summary, experiment_config.artifacts.summary_path)
         logger.log_artifact(label="training summary", path=experiment_config.artifacts.summary_path)
+
+    if not best_checkpoint_path.exists():
+        raise FileNotFoundError(
+            "Best checkpoint was not available after training. "
+            f"Expected {best_checkpoint_path}. If resuming from a latest checkpoint whose best_epoch is "
+            "different from the latest epoch, keep the corresponding best checkpoint beside the resume checkpoint."
+        )
+    _write_summary_if_missing(
+        summary_path=experiment_config.artifacts.summary_path,
+        experiment_config=experiment_config,
+        train_split=train_split,
+        checkpoint_path=best_checkpoint_path,
+        best_epoch=best_epoch,
+        metrics=best_validation_metrics or latest_evaluation_metrics,
+        losses=best_training_losses or latest_training_losses,
+        selection_reason=best_selection_reason,
+        logger=logger,
+    )
 
     _maybe_emit_training_progress(
         progress_callback,
