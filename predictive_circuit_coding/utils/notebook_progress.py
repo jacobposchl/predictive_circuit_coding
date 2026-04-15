@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
@@ -121,6 +122,9 @@ class NotebookProgressUI:
         self._last_detail_label: str | None = None
         self._last_training_epoch: int | None = None
         self._last_metric_snapshot: dict[str, int] = {}
+        self._training_total_steps: int | None = None
+        self._training_steps_per_epoch: int | None = None
+        self._training_best_metric: float | None = None
         self._force_auto_tqdm = False
 
     def _tqdm_cls(self):
@@ -163,6 +167,61 @@ class NotebookProgressUI:
         except Exception:
             for row in materialized:
                 self.stream.write(str(row) + "\n")
+
+    def _active_bar(self):
+        for name in ("_detail_bar", "_stage_bar", "_pipeline_bar"):
+            bar = getattr(self, name)
+            if bar is not None:
+                return bar
+        return None
+
+    def _write_line(self, text: str) -> None:
+        line = str(text).rstrip()
+        if not line:
+            return
+        bar = self._active_bar()
+        if bar is not None and hasattr(bar, "write"):
+            try:
+                bar.write(line)
+                return
+            except Exception:
+                pass
+        self.stream.write(line + "\n")
+        try:
+            self.stream.flush()
+        except Exception:
+            pass
+
+    def note(self, message: str) -> None:
+        if not self.config.enabled:
+            return
+        self._write_line(message)
+
+    def milestone(self, message: str) -> None:
+        self.note(message)
+
+    @staticmethod
+    def _stage_display_name(stage_name: str | None, fallback: str | None = None) -> str:
+        if stage_name == "train":
+            return "training"
+        if stage_name == "evaluate":
+            return "evaluation"
+        if stage_name == "final_reports":
+            return "final reports"
+        if stage_name == "alignment_diagnostic":
+            return "alignment diagnostic"
+        if stage_name:
+            return stage_name.replace("_", " ")
+        return (fallback or "stage").replace("_", " ").lower()
+
+    @staticmethod
+    def _format_metric(value: Any) -> str:
+        if value is None:
+            return "n/a"
+        try:
+            return f"{float(value):.4g}"
+        except (TypeError, ValueError):
+            return str(value)
 
     def _close_bar(self, name: str) -> None:
         bar = getattr(self, name)
@@ -217,6 +276,7 @@ class NotebookProgressUI:
         self._close_bar("_detail_bar")
         self._stage_name = stage_name
         self._last_detail_label = None
+        self.milestone(f"Starting {self._stage_display_name(stage_name, description)}.")
         self._ensure_bar(
             current_bar_name="_stage_bar",
             desc=description or stage_name.replace("_", " ").title(),
@@ -291,21 +351,47 @@ class NotebookProgressUI:
         self._pipeline_bar.update(int(steps))
         self._pipeline_bar.refresh()
 
+    def make_copy_callback(self, *, label: str) -> Callable[[int, int], None]:
+        def _callback(current: int, total: int) -> None:
+            self.update_detail(label=label, current=current, total=total)
+            if total and current >= total:
+                self.clear_detail()
+
+        return _callback
+
+    def render_artifacts(self, title: str, artifacts: dict[str, str | Path | None]) -> None:
+        if not self.config.enabled or self.config.show_artifact_paths == "hidden":
+            return
+        materialized = {
+            key: str(value)
+            for key, value in artifacts.items()
+            if value not in (None, "")
+        }
+        if not materialized:
+            return
+        self.note(title)
+        for key, value in materialized.items():
+            self.note(f"  {key}: {value}")
+
     def render_stage_summary(self, summary: NotebookStageSummary) -> None:
         if not self.config.enabled or not self.config.show_stage_summaries:
             return
-        status = "reused" if summary.status == "reused" else summary.status
-        self._display_markdown(f"### {summary.stage_name.replace('_', ' ').title()} - {status}\n\n{summary.headline}")
+        stage_name = self._stage_display_name(summary.stage_name)
+        if summary.status == "complete":
+            self.note(f"Finished {stage_name}.")
+        elif summary.status == "reused":
+            self.note(f"Reusing {stage_name}.")
+        elif summary.status == "skipped":
+            self.note(f"Skipping {stage_name}.")
+        elif summary.status == "failed":
+            self.note(f"Failed {stage_name}.")
+        else:
+            self.note(f"{stage_name.title()}: {summary.status}.")
         if summary.notes:
-            self._display_markdown("\n".join(f"- {note}" for note in summary.notes))
+            for note in summary.notes:
+                self.note(f"  {note}")
         if summary.rows:
             self._display_rows(summary.rows)
-        if summary.artifact_paths and self.config.show_artifact_paths != "hidden":
-            artifact_rows = [
-                {"artifact": key, "path": value}
-                for key, value in summary.artifact_paths.items()
-            ]
-            self._display_rows(artifact_rows)
 
     def finish_stage(self, summary: NotebookStageSummary | None = None) -> None:
         if self.config.enabled:
@@ -349,62 +435,120 @@ class NotebookProgressUI:
         if self._pipeline_bar is not None:
             self._pipeline_bar.refresh()
 
+    def _training_current_step(self, event: TrainingProgressEvent) -> int | None:
+        if event.epoch is None or event.step is None:
+            return None
+        step_total = event.step_total or self._training_steps_per_epoch
+        if step_total is None:
+            return event.step
+        return max(0, (int(event.epoch) - 1) * int(step_total) + int(event.step))
+
+    def _training_postfix(self, event: TrainingProgressEvent) -> dict[str, str]:
+        postfix: dict[str, str] = {}
+        if event.epoch is not None and event.epoch_total is not None:
+            postfix["epoch"] = f"{event.epoch}/{event.epoch_total}"
+        metric_aliases = (
+            ("loss", "total_loss"),
+            ("pred_loss", "predictive_loss"),
+            ("pred_imp", "predictive_improvement"),
+        )
+        for label, key in metric_aliases:
+            if key in event.metrics:
+                postfix[label] = self._format_metric(event.metrics.get(key))
+        if self._training_best_metric is not None:
+            postfix["best"] = self._format_metric(self._training_best_metric)
+        return postfix
+
     def make_training_callback(self, *, stage_name: str) -> Callable[[TrainingProgressEvent], None]:
         def _callback(event: TrainingProgressEvent) -> None:
+            if event.event_type == "setup_start":
+                self.milestone(event.message or "Preparing training inputs.")
+                return
+            if event.event_type == "setup_complete":
+                self.milestone(event.message or "Training data and model are ready.")
+                return
+            if event.event_type == "resume":
+                self.milestone(event.message or "Resuming training.")
+                return
             if event.event_type == "epoch_start":
+                self.clear_detail()
+                if event.step_total is not None:
+                    self._training_steps_per_epoch = int(event.step_total)
+                if event.epoch_total is not None and self._training_steps_per_epoch is not None:
+                    self._training_total_steps = int(event.epoch_total) * int(self._training_steps_per_epoch)
+                current = 0
+                if event.epoch is not None and self._training_steps_per_epoch is not None:
+                    current = max(0, (int(event.epoch) - 1) * int(self._training_steps_per_epoch))
                 self.update_stage(
-                    current=(event.epoch - 1) if event.epoch is not None else None,
-                    total=event.epoch_total,
+                    current=current,
+                    total=self._training_total_steps,
                     description="Training",
-                )
-                self.update_detail(
-                    label=f"Epoch {event.epoch}/{event.epoch_total}",
-                    current=0,
-                    total=event.step_total,
+                    metrics=self._training_postfix(event),
                 )
                 self._last_training_epoch = event.epoch
                 return
             if event.event_type == "step":
-                metrics = {}
-                snapshot_every = self.config.metric_snapshot_every_n
-                if snapshot_every is not None and event.step is not None and event.step % snapshot_every == 0:
-                    metrics = {
-                        key: event.metrics.get(key)
-                        for key in ("predictive_improvement", "predictive_loss", "total_loss")
-                    }
-                self.update_detail(
-                    label=f"Epoch {event.epoch}/{event.epoch_total}",
-                    current=event.step,
-                    total=event.step_total,
-                    metrics=metrics or None,
+                self.update_stage(
+                    current=self._training_current_step(event),
+                    total=self._training_total_steps,
+                    description="Training",
+                    metrics=self._training_postfix(event),
                 )
                 return
             if event.event_type == "validation_start":
                 self.clear_detail()
-                self.update_detail(label="Validation", current=0, total=1)
+                self.milestone(event.message or "Starting validation.")
                 return
             if event.event_type == "validation_end":
-                self.update_detail(
-                    label="Validation",
-                    current=1,
-                    total=1,
-                    metrics={
-                        "predictive_improvement": event.metrics.get("predictive_improvement"),
-                    },
+                predictive_improvement = event.metrics.get("predictive_improvement")
+                if predictive_improvement is not None:
+                    value = float(predictive_improvement)
+                    if math.isfinite(value) and (
+                        self._training_best_metric is None or value > self._training_best_metric
+                    ):
+                        self._training_best_metric = value
+                self.update_stage(
+                    current=self._training_current_step(event),
+                    total=self._training_total_steps,
+                    description="Training",
+                    metrics=self._training_postfix(event),
+                )
+                self.milestone(
+                    "Validation complete"
+                    if predictive_improvement is None
+                    else f"Validation complete: predictive_improvement={self._format_metric(predictive_improvement)}."
                 )
                 return
             if event.event_type == "epoch_end":
+                current = None
+                if event.epoch is not None and self._training_steps_per_epoch is not None:
+                    current = int(event.epoch) * int(self._training_steps_per_epoch)
                 self.update_stage(
-                    current=event.epoch,
-                    total=event.epoch_total,
+                    current=current,
+                    total=self._training_total_steps,
                     description="Training",
+                    metrics=self._training_postfix(event),
                 )
                 return
             if event.event_type == "checkpoint_saved":
-                self.update_detail(label=event.message or "checkpoint", current=1, total=1)
+                label = event.message or "checkpoint"
+                if event.checkpoint_path:
+                    self.milestone(f"Saved {label}: {event.checkpoint_path}")
+                else:
+                    self.milestone(f"Saved {label}.")
                 return
             if event.event_type == "training_complete":
                 self.clear_detail()
+                self.update_stage(
+                    current=self._training_total_steps,
+                    total=self._training_total_steps,
+                    description="Training",
+                    metrics=self._training_postfix(event),
+                )
+                if event.checkpoint_path:
+                    self.milestone(f"Training complete: best checkpoint at {event.checkpoint_path}")
+                else:
+                    self.milestone("Training complete.")
 
         return _callback
 

@@ -303,6 +303,13 @@ def train_model(
     log_sink: Callable[[str], None] | None = None,
     emit_logs: bool = True,
 ) -> TrainingRunResult:
+    _maybe_emit_training_progress(
+        progress_callback,
+        TrainingProgressEvent(
+            event_type="setup_start",
+            message="Preparing training data and model.",
+        ),
+    )
     dataset_view = dataset_view or resolve_runtime_dataset_view(
         experiment_config=experiment_config,
         data_config_path=data_config_path,
@@ -350,6 +357,20 @@ def train_model(
         )
         write_json_payload(experiment_config.to_dict(), snapshot_path)
         logger.log_artifact(label="config snapshot", path=snapshot_path)
+    _maybe_emit_training_progress(
+        progress_callback,
+        TrainingProgressEvent(
+            event_type="setup_complete",
+            epoch_total=experiment_config.training.num_epochs,
+            step_total=experiment_config.training.train_steps_per_epoch,
+            message=(
+                "Training ready: "
+                f"device={device}, epochs={experiment_config.training.num_epochs}, "
+                f"steps_per_epoch={experiment_config.training.train_steps_per_epoch}, "
+                f"batch_size={experiment_config.optimization.batch_size}."
+            ),
+        ),
+    )
 
     start_epoch = 1
     global_step = 0

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from types import SimpleNamespace
 
 from predictive_circuit_coding.benchmarks.contracts import BenchmarkArmSpec, BenchmarkTaskSpec
+from predictive_circuit_coding.utils.notebook_progress import NotebookProgressConfig, NotebookProgressUI, TrainingProgressEvent
 from predictive_circuit_coding.workflows import state as workflow_state
 from predictive_circuit_coding.workflows.contracts import PipelinePaths
 from predictive_circuit_coding.workflows.stages import (
@@ -39,6 +41,122 @@ class RecordingProgressUI:
 
     def make_benchmark_callback(self, *, benchmark_name: str, total_arms: int | None = None):
         return self.benchmark_callback
+
+
+class FakeTqdmBar:
+    def __init__(self, owner, *, total=None, desc="", leave=False, position=0, dynamic_ncols=True):
+        del dynamic_ncols
+        self.owner = owner
+        self.total = total
+        self.desc = desc
+        self.leave = leave
+        self.position = position
+        self.n = 0
+        self.closed = False
+        self.postfix: dict[str, object] = {}
+        owner.bars.append(self)
+
+    def update(self, steps: int) -> None:
+        self.n += int(steps)
+
+    def refresh(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+    def set_description_str(self, desc: str) -> None:
+        self.desc = desc
+
+    def set_postfix(self, values: dict[str, object], refresh: bool = False) -> None:
+        del refresh
+        self.postfix = dict(values)
+
+    def write(self, line: str) -> None:
+        self.owner.lines.append(line)
+
+
+class FakeTqdmNotebookProgressUI(NotebookProgressUI):
+    def __init__(self) -> None:
+        self.bars: list[FakeTqdmBar] = []
+        self.lines: list[str] = []
+        super().__init__(config=NotebookProgressConfig(metric_snapshot_every_n=None), stream=io.StringIO())
+
+    def _tqdm_cls(self):
+        owner = self
+
+        class _Factory(FakeTqdmBar):
+            def __init__(self, **kwargs):
+                super().__init__(owner, **kwargs)
+
+        return _Factory
+
+
+def test_notebook_training_progress_uses_one_step_bar_with_compact_metrics() -> None:
+    progress_ui = FakeTqdmNotebookProgressUI()
+    progress_ui.start_stage(stage_name="train", total=1, description="Training")
+    callback = progress_ui.make_training_callback(stage_name="train")
+
+    callback(TrainingProgressEvent(event_type="epoch_start", epoch=1, epoch_total=2, step_total=3))
+    callback(
+        TrainingProgressEvent(
+            event_type="step",
+            epoch=1,
+            epoch_total=2,
+            step=1,
+            step_total=3,
+            metrics={
+                "total_loss": 1.25,
+                "predictive_loss": 0.75,
+                "predictive_improvement": 0.125,
+            },
+        )
+    )
+    stage_bar = progress_ui.bars[0]
+    assert stage_bar.postfix["epoch"] == "1/2"
+    assert stage_bar.postfix["loss"] == "1.25"
+    assert stage_bar.postfix["pred_loss"] == "0.75"
+    assert stage_bar.postfix["pred_imp"] == "0.125"
+
+    callback(TrainingProgressEvent(event_type="epoch_start", epoch=2, epoch_total=2, step_total=3))
+
+    assert len(progress_ui.bars) == 1
+    assert stage_bar.total == 6
+    assert stage_bar.n == 3
+    assert stage_bar.postfix["epoch"] == "2/2"
+
+
+def test_notebook_training_progress_writes_checkpoint_and_validation_milestones() -> None:
+    progress_ui = FakeTqdmNotebookProgressUI()
+    progress_ui.start_stage(stage_name="train", total=1, description="Training")
+    callback = progress_ui.make_training_callback(stage_name="train")
+
+    callback(TrainingProgressEvent(event_type="validation_start", message="Validating held-out split."))
+    callback(
+        TrainingProgressEvent(
+            event_type="validation_end",
+            metrics={"predictive_improvement": 0.25},
+        )
+    )
+    callback(
+        TrainingProgressEvent(
+            event_type="checkpoint_saved",
+            message="best checkpoint",
+            checkpoint_path="/tmp/pcc_best.pt",
+        )
+    )
+    callback(
+        TrainingProgressEvent(
+            event_type="training_complete",
+            checkpoint_path="/tmp/pcc_best.pt",
+            metrics={"predictive_improvement": 0.25},
+        )
+    )
+
+    assert "Validating held-out split." in progress_ui.lines
+    assert "Validation complete: predictive_improvement=0.25." in progress_ui.lines
+    assert "Saved best checkpoint: /tmp/pcc_best.pt" in progress_ui.lines
+    assert "Training complete: best checkpoint at /tmp/pcc_best.pt" in progress_ui.lines
 
 
 def _make_paths(tmp_path: Path) -> PipelinePaths:
@@ -78,6 +196,7 @@ def test_prepare_training_stage_passes_training_progress_callback(tmp_path: Path
 
     def fake_train_model(**kwargs):
         captured["progress_callback"] = kwargs["progress_callback"]
+        captured["emit_logs"] = kwargs["emit_logs"]
         return SimpleNamespace(
             checkpoint_path=tmp_path / "best.pt",
             summary_path=tmp_path / "training_summary.json",
@@ -102,7 +221,8 @@ def test_prepare_training_stage_passes_training_progress_callback(tmp_path: Path
     )
 
     assert captured["progress_callback"] is progress_ui.training_callback
-    assert progress_ui.started == [("train", 1, "Train")]
+    assert captured["emit_logs"] is False
+    assert progress_ui.started == [("train", 1, "Training")]
     assert progress_ui.finished[0].status == "complete"
     assert progress_ui.advanced == 1
 
@@ -132,7 +252,7 @@ def test_evaluation_stage_passes_evaluation_progress_callback(tmp_path: Path, mo
     )
 
     assert captured_callbacks == [progress_ui.evaluation_callback, progress_ui.evaluation_callback]
-    assert progress_ui.started == [("evaluate", 2, "Evaluate")]
+    assert progress_ui.started == [("evaluate", 2, "Evaluation")]
     assert progress_ui.finished[0].status == "complete"
     assert progress_ui.advanced == 1
 

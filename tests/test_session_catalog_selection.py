@@ -541,14 +541,48 @@ def test_ensure_local_prepared_sessions_stages_from_source_root(tmp_path: Path):
             regions=["VISp", "LP"],
         )
 
+    notes: list[str] = []
+    progress: list[tuple[int, int]] = []
     ensure_local_prepared_sessions(
         data_config_path=prep_config_path,
         source_dataset_root=source_root,
         stage_prepared_sessions_locally=True,
+        note_callback=notes.append,
+        progress_callback=lambda current, total: progress.append((current, total)),
     )
 
     assert sorted(path.stem for path in workspace.brainset_prepared_root.glob("*.h5")) == [
         "session_train",
         "session_valid",
     ]
+    assert progress == [(1, 2), (2, 2)]
+    assert any("Staging 2 prepared sessions locally" in note for note in notes)
+    assert any("Local data staging complete" in note for note in notes)
+
+
+def test_ensure_local_prepared_sessions_notes_existing_local_files(tmp_path: Path):
+    prep_config_path = _write_prep_config(tmp_path)
+    prep_config = load_preparation_config(prep_config_path)
+    workspace = create_workspace(prep_config)
+    workspace.brainset_prepared_root.mkdir(parents=True, exist_ok=True)
+    _write_session(
+        workspace.brainset_prepared_root / "session_local.h5",
+        dataset_id=prep_config.dataset.dataset_id,
+        session_id="session_local",
+        subject_id="mouse_local",
+        regions=["VISp", "LP"],
+    )
+
+    notes: list[str] = []
+    progress: list[tuple[int, int]] = []
+    ensure_local_prepared_sessions(
+        data_config_path=prep_config_path,
+        source_dataset_root=None,
+        stage_prepared_sessions_locally=True,
+        note_callback=notes.append,
+        progress_callback=lambda current, total: progress.append((current, total)),
+    )
+
+    assert progress == []
+    assert any("Prepared sessions already available locally: 1 files" in note for note in notes)
 

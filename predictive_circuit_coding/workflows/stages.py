@@ -90,7 +90,7 @@ def run_training_stage(
 
     paths.train_root.mkdir(parents=True, exist_ok=True)
     if progress_ui is not None:
-        progress_ui.start_stage(stage_name="train", total=1, description="Train")
+        progress_ui.start_stage(stage_name="train", total=1, description="Training")
     training_progress_callback = (
         progress_ui.make_training_callback(stage_name="train")
         if progress_ui is not None
@@ -110,6 +110,7 @@ def run_training_stage(
             train_split=runtime_config.splits.train,
             valid_split=runtime_config.splits.valid,
             progress_callback=training_progress_callback,
+            emit_logs=progress_ui is None,
         )
     except Exception as exc:
         mark_stage_failed(
@@ -194,7 +195,7 @@ def run_evaluation_stage(
     config = load_experiment_config_func(runtime_experiment_config_path)
     paths.evaluation_root.mkdir(parents=True, exist_ok=True)
     if progress_ui is not None:
-        progress_ui.start_stage(stage_name="evaluate", total=2, description="Evaluate")
+        progress_ui.start_stage(stage_name="evaluate", total=2, description="Evaluation")
     evaluation_progress_callback = (
         progress_ui.make_evaluation_callback(split_total=2)
         if progress_ui is not None

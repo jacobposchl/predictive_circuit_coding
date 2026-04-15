@@ -312,19 +312,59 @@ def test_materialize_notebook_prepared_sessions_copies_selected_h5s_and_support_
     (splits_dir / "split_manifest.json").write_text("{}", encoding="utf-8")
 
     target_dataset_root = tmp_path / "repo_dataset"
+    notes: list[str] = []
+    progress: list[tuple[int, int]] = []
     result = materialize_notebook_prepared_sessions(
         source_dataset_root=source_dataset_root,
         target_dataset_root=target_dataset_root,
         session_ids=["202", "101"],
         dataset_id="allen_visual_behavior_neuropixels",
+        note_callback=notes.append,
+        progress_callback=lambda current, total: progress.append((current, total)),
     )
 
     assert result.target_dataset_root == target_dataset_root.resolve()
     assert result.staged_session_ids == ("101", "202")
+    assert progress == [(1, 2), (2, 2)]
+    assert any("Copying 2 prepared session files" in note for note in notes)
+    assert any("Local data staging complete" in note for note in notes)
     assert (result.target_prepared_root / "101.h5").read_text(encoding="utf-8") == "101"
     assert (result.target_prepared_root / "202.h5").read_text(encoding="utf-8") == "202"
     assert (target_dataset_root / "manifests" / "session_catalog.json").is_file()
     assert (target_dataset_root / "splits" / "split_manifest.json").is_file()
+
+
+def test_materialize_notebook_prepared_sessions_notes_missing_session_before_error(tmp_path: Path) -> None:
+    source_dataset_root = tmp_path / "drive_dataset"
+    source_prepared_root = source_dataset_root / "prepared" / "allen_visual_behavior_neuropixels"
+    source_prepared_root.mkdir(parents=True, exist_ok=True)
+    notes: list[str] = []
+
+    with pytest.raises(FileNotFoundError, match="Prepared session not found"):
+        materialize_notebook_prepared_sessions(
+            source_dataset_root=source_dataset_root,
+            target_dataset_root=tmp_path / "repo_dataset",
+            session_ids=["404"],
+            dataset_id="allen_visual_behavior_neuropixels",
+            note_callback=notes.append,
+        )
+
+    assert any("Prepared session file was not found" in note for note in notes)
+
+
+def test_materialize_notebook_prepared_sessions_notes_missing_source_before_error(tmp_path: Path) -> None:
+    notes: list[str] = []
+
+    with pytest.raises(FileNotFoundError, match="Source dataset root not found"):
+        materialize_notebook_prepared_sessions(
+            source_dataset_root=tmp_path / "missing_drive_dataset",
+            target_dataset_root=tmp_path / "repo_dataset",
+            session_ids=["101"],
+            dataset_id="allen_visual_behavior_neuropixels",
+            note_callback=notes.append,
+        )
+
+    assert any("Source dataset root was not found" in note for note in notes)
 
 
 def test_materialize_notebook_prepared_sessions_replaces_existing_directory(tmp_path: Path) -> None:

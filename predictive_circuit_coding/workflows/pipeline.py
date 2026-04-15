@@ -58,13 +58,24 @@ def run_pipeline(
     output_stream: TextIO | None = None,
     validate_preflight: bool = True,
 ) -> PipelineRunResult:
+    progress_config = config.notebook_ui or NotebookProgressConfig()
+    ui = NotebookProgressUI(config=progress_config, stream=output_stream or sys.stdout) if progress_config.enabled else None
+    if ui is not None:
+        ui.start_pipeline(total_stages=len(config.enabled_stages()) + 1, completed_stages=0)
+        ui.milestone("Starting predictive circuit coding pipeline.")
     if validate_preflight:
         assert_pipeline_preflight(build_pipeline_preflight(config))
+        if ui is not None:
+            ui.milestone("Preflight complete.")
     workflow_runtime.ensure_local_prepared_sessions(
         data_config_path=config.data_config_path,
         source_dataset_root=config.source_dataset_root,
         stage_prepared_sessions_locally=config.stage_prepared_sessions_locally,
+        note_callback=ui.note if ui is not None else None,
+        progress_callback=ui.make_copy_callback(label="Staging prepared sessions") if ui is not None else None,
     )
+    if ui is not None:
+        ui.clear_detail()
     resolved_run_id = str(pipeline_run_id).strip() if pipeline_run_id is not None else ""
     if not resolved_run_id:
         if config.run_stage_train:
@@ -95,11 +106,6 @@ def run_pipeline(
     )
     workflow_state.write_pipeline_manifest(paths, dataset_id=experiment_config.dataset_id, created_at_utc=str(created_at))
     states = workflow_state.load_pipeline_state(paths.pipeline_state_path)
-
-    progress_config = config.notebook_ui or NotebookProgressConfig()
-    ui = NotebookProgressUI(config=progress_config, stream=output_stream or sys.stdout) if progress_config.enabled else None
-    if ui is not None:
-        ui.start_pipeline(total_stages=len(config.enabled_stages()) + 1, completed_stages=0)
 
     train_outputs = workflow_stages.run_training_stage(
         paths=paths,
@@ -174,6 +180,21 @@ def run_pipeline(
         write_single_row_summary_func=write_single_row_summary,
     )
     if ui is not None:
+        ui.render_artifacts(
+            "Run artifacts",
+            {
+                "run_id": paths.run_id,
+                "local_run_root": paths.local_run_root,
+                "drive_run_root": paths.drive_run_root,
+                "checkpoint": checkpoint_path,
+                "training_summary": training_summary_path,
+                "training_history": train_outputs.get("training_history_json_path"),
+                "refinement_summary": refinement_outputs.get("refinement_summary_json_path"),
+                "final_summary": final_outputs.get("final_summary_json_path"),
+                "pipeline_manifest": paths.pipeline_manifest_path,
+                "pipeline_state": paths.pipeline_state_path,
+            },
+        )
         ui.finish_pipeline()
 
     return PipelineRunResult(

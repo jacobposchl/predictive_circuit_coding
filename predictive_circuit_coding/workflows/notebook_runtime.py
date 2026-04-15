@@ -5,6 +5,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import yaml
 
@@ -514,18 +515,26 @@ def materialize_notebook_prepared_sessions(
     session_ids: list[str] | tuple[str, ...],
     dataset_id: str,
     reset_target: bool = True,
+    note_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> NotebookLocalDatasetStageResult:
+    def _note(message: str) -> None:
+        if note_callback is not None:
+            note_callback(message)
+
     source_root = Path(source_dataset_root).resolve()
     target_root = Path(target_dataset_root).expanduser()
     staged_session_ids = tuple(sorted(dict.fromkeys(str(session_id) for session_id in session_ids if str(session_id).strip())))
     if not staged_session_ids:
         raise ValueError("session_ids must contain at least one session to stage locally")
     if not source_root.is_dir():
+        _note(f"Source dataset root was not found: {source_root}")
         raise FileNotFoundError(f"Source dataset root not found: {source_root}")
 
     if target_root.exists() or target_root.is_symlink():
         if not reset_target:
             raise FileExistsError(f"Target dataset root already exists: {target_root}")
+        _note(f"Refreshing local dataset workspace: {target_root}")
         if target_root.is_symlink() or target_root.is_file():
             target_root.unlink()
         else:
@@ -534,15 +543,20 @@ def materialize_notebook_prepared_sessions(
     target_root.mkdir(parents=True, exist_ok=True)
     source_prepared_root = source_root / "prepared" / str(dataset_id)
     if not source_prepared_root.is_dir():
+        _note(f"Prepared session directory was not found: {source_prepared_root}")
         raise FileNotFoundError(f"Prepared dataset root not found: {source_prepared_root}")
     target_prepared_root = target_root / "prepared" / str(dataset_id)
     target_prepared_root.mkdir(parents=True, exist_ok=True)
 
-    for session_id in staged_session_ids:
+    _note(f"Copying {len(staged_session_ids)} prepared session files into the local workspace.")
+    for index, session_id in enumerate(staged_session_ids, start=1):
         source_path = source_prepared_root / f"{session_id}.h5"
         if not source_path.is_file():
+            _note(f"Prepared session file was not found: {source_path}")
             raise FileNotFoundError(f"Prepared session not found: {source_path}")
         shutil.copy2(source_path, target_prepared_root / source_path.name)
+        if progress_callback is not None:
+            progress_callback(index, len(staged_session_ids))
 
     copied_support_files: list[Path] = []
     for relative_path in (
@@ -558,6 +572,7 @@ def materialize_notebook_prepared_sessions(
         shutil.copy2(source_path, destination)
         copied_support_files.append(destination.resolve())
 
+    _note(f"Local data staging complete: {len(staged_session_ids)} sessions ready.")
     return NotebookLocalDatasetStageResult(
         target_dataset_root=target_root.resolve(),
         target_prepared_root=target_prepared_root.resolve(),

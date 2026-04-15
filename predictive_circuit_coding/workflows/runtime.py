@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 import yaml
 
@@ -55,28 +56,46 @@ def ensure_local_prepared_sessions(
     data_config_path: str | Path,
     source_dataset_root: str | Path | None,
     stage_prepared_sessions_locally: bool,
+    note_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> None:
+    def _note(message: str) -> None:
+        if note_callback is not None:
+            note_callback(message)
+
     prep_config = load_preparation_config(data_config_path)
     workspace = build_workspace(prep_config)
-    if any(workspace.brainset_prepared_root.glob("*.h5")):
+    local_prepared_paths = tuple(workspace.brainset_prepared_root.glob("*.h5"))
+    if local_prepared_paths:
+        _note(f"Prepared sessions already available locally: {len(local_prepared_paths)} files.")
         return
     if not stage_prepared_sessions_locally:
+        _note("No local prepared sessions found; local staging is disabled.")
         return
     if source_dataset_root is None:
+        _note("No local prepared sessions found and no source dataset root is configured.")
         raise FileNotFoundError(
             "No prepared sessions were found under the local workspace and paths.source_dataset_root is not set. "
             "Either stage prepared sessions locally or run local data preparation before training."
         )
-    if Path(source_dataset_root).resolve() == workspace.root.resolve():
+    resolved_source_root = Path(source_dataset_root).resolve()
+    if resolved_source_root == workspace.root.resolve():
+        _note("Source dataset root is already the local workspace.")
         return
+    if not resolved_source_root.is_dir():
+        _note(f"Source dataset root was not found: {resolved_source_root}")
+    _note(f"Checking source prepared sessions: {resolved_source_root}")
     session_ids = resolve_source_session_ids(
         source_dataset_root=source_dataset_root,
         dataset_id=prep_config.dataset.dataset_id,
     )
+    _note(f"Staging {len(session_ids)} prepared sessions locally before training.")
     materialize_notebook_prepared_sessions(
         source_dataset_root=source_dataset_root,
         target_dataset_root=workspace.root,
         session_ids=session_ids,
         dataset_id=prep_config.dataset.dataset_id,
         reset_target=True,
+        note_callback=note_callback,
+        progress_callback=progress_callback,
     )

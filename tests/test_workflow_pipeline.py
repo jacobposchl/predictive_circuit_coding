@@ -467,7 +467,70 @@ def test_run_pipeline_from_config_smoke_stages_dataset_and_writes_state(tmp_path
     monkeypatch.setattr("predictive_circuit_coding.workflows.config.torch.cuda.device_count", lambda: 1)
     monkeypatch.setattr("predictive_circuit_coding.workflows.config.torch.cuda.get_device_name", lambda index: "Fake GPU")
 
+    ui_events: list[object] = []
+
+    class RecordingPipelineUI:
+        def __init__(self, *, config=None, stream=None) -> None:
+            del config, stream
+            ui_events.append("ui_created")
+
+        def start_pipeline(self, *, total_stages: int, completed_stages: int = 0) -> None:
+            ui_events.append(("start_pipeline", total_stages, completed_stages))
+
+        def finish_pipeline(self) -> None:
+            ui_events.append("finish_pipeline")
+
+        def note(self, message: str) -> None:
+            ui_events.append(("note", message))
+
+        def milestone(self, message: str) -> None:
+            ui_events.append(("milestone", message))
+
+        def clear_detail(self) -> None:
+            ui_events.append("clear_detail")
+
+        def start_stage(self, *, stage_name: str, total: int | None = None, description: str | None = None) -> None:
+            ui_events.append(("start_stage", stage_name, total, description))
+
+        def finish_stage(self, summary) -> None:
+            ui_events.append(("finish_stage", summary.stage_name, summary.status))
+
+        def advance_pipeline(self, steps: int = 1) -> None:
+            ui_events.append(("advance_pipeline", steps))
+
+        def fail_stage(self, *, stage_name: str, error_message: str, debug_log_path: str | None, tail_lines=()) -> None:
+            del debug_log_path, tail_lines
+            ui_events.append(("fail_stage", stage_name, error_message))
+
+        def make_copy_callback(self, *, label: str):
+            ui_events.append(("make_copy_callback", label))
+
+            def _callback(current: int, total: int) -> None:
+                ui_events.append(("copy_progress", current, total))
+
+            return _callback
+
+        def make_training_callback(self, *, stage_name: str):
+            ui_events.append(("make_training_callback", stage_name))
+            return None
+
+        def make_evaluation_callback(self, *, split_total: int):
+            ui_events.append(("make_evaluation_callback", split_total))
+            return None
+
+        def make_benchmark_callback(self, *, benchmark_name: str, total_arms: int | None = None):
+            ui_events.append(("make_benchmark_callback", benchmark_name, total_arms))
+            return None
+
+        def render_artifacts(self, title: str, artifacts: dict) -> None:
+            ui_events.append(("render_artifacts", title, tuple(artifacts)))
+
+    monkeypatch.setattr("predictive_circuit_coding.workflows.pipeline.NotebookProgressUI", RecordingPipelineUI)
+
+    captured_train_kwargs: dict[str, object] = {}
+
     def fake_train_model(**kwargs):
+        captured_train_kwargs.update(kwargs)
         experiment_config = kwargs["experiment_config"]
         checkpoint_dir = experiment_config.artifacts.checkpoint_dir
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -519,6 +582,11 @@ def test_run_pipeline_from_config_smoke_stages_dataset_and_writes_state(tmp_path
     assert result.training_summary_path == result.local_run_root / "train" / "training_summary.json"
     assert result.training_history_json_path == result.local_run_root / "train" / "training_history.json"
     assert result.training_history_csv_path == result.local_run_root / "train" / "training_history.csv"
+    assert captured_train_kwargs["emit_logs"] is False
+    assert ui_events[0] == "ui_created"
+    assert ui_events[1] == ("start_pipeline", 4, 0)
+    assert ("copy_progress", 1, 1) in ui_events
+    assert ui_events.index(("start_pipeline", 4, 0)) < ui_events.index(("copy_progress", 1, 1))
     state_payload = json.loads(result.pipeline_state_path.read_text(encoding="utf-8"))
     assert state_payload["stages"]["train"]["status"] == "complete"
     assert state_payload["stages"]["evaluate"]["status"] == "complete"
